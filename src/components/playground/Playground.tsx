@@ -36,9 +36,8 @@ function RecipientInput({
   error?: string
 }) {
   return (
-    <Field label="Recipient" error={error}>
+    <Field label="Recipient" error={error} after={<AddressShortcuts onPick={onChange} />}>
       <input value={value} onChange={(e) => onChange(e.target.value.trim())} placeholder="0x…" />
-      <AddressShortcuts onPick={onChange} />
     </Field>
   )
 }

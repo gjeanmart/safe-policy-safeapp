@@ -826,3 +826,8 @@ select:focus-visible {
   align-items: center;
   gap: 6px;
 }
+
+/* Separates the policy builder's propose action from the draft / options above. */
+.builder-actions {
+  margin-top: 20px;
+}
