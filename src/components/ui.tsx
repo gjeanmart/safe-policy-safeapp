@@ -201,6 +201,7 @@ export function Field({
   hint,
   info,
   error,
+  after,
   children,
 }: {
   label: string
@@ -209,6 +210,8 @@ export function Field({
   info?: ReactNode
   /** Validation message for the input, shown in red directly under it. */
   error?: string
+  /** Extra controls rendered after the error (e.g. address shortcuts). */
+  after?: ReactNode
   children: ReactNode
 }) {
   return (
@@ -219,6 +222,7 @@ export function Field({
       </span>
       {children}
       {error && <span className="field-error">{error}</span>}
+      {after}
       {hint && <span className="field-hint">{hint}</span>}
     </label>
   )

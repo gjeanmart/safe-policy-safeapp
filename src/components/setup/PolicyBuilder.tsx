@@ -160,11 +160,13 @@ function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => void }) 
             label="Recipients"
             error={errors.recipients}
             info="One or more addresses, comma or space separated. The links under the field add an address to the list."
+            after={
+              <AddressShortcuts
+                onPick={(address) => setRecipients((current) => appendAddress(current, address))}
+              />
+            }
           >
             <input value={recipients} onChange={(e) => setRecipients(e.target.value)} placeholder="0x…" />
-            <AddressShortcuts
-              onPick={(address) => setRecipients((current) => appendAddress(current, address))}
-            />
           </Field>
         )}
         {template === 'erc20Transfer' && (
@@ -507,19 +509,21 @@ export function PolicyBuilder() {
       )}
 
       {rootStatus === 'pending' || rootStatus === 'ready' ? <Notice>{action.help}</Notice> : null}
-      <ProposeButton
-        info={rootStatus === 'pending' || rootStatus === 'ready' ? undefined : action.help}
-        label={action.label}
-        title={action.help}
-        txs={
-          // Never install the multisig-path guard alone: modules would bypass every policy.
-          (!guardInstalled && paths.multisig && !paths.module) ||
-          ((guardInstalled || !installGuard) && draft.length === 0)
-            ? []
-            : action.txs
-        }
-        onProposed={action.onProposed}
-      />
+      <div className="builder-actions">
+        <ProposeButton
+          info={rootStatus === 'pending' || rootStatus === 'ready' ? undefined : action.help}
+          label={action.label}
+          title={action.help}
+          txs={
+            // Never install the multisig-path guard alone: modules would bypass every policy.
+            (!guardInstalled && paths.multisig && !paths.module) ||
+            ((guardInstalled || !installGuard) && draft.length === 0)
+              ? []
+              : action.txs
+          }
+          onProposed={action.onProposed}
+        />
+      </div>
     </Card>
   )
 }

@@ -19,14 +19,22 @@ export function parseAddressInput(input: string, what = 'address'): Parsed<Addre
   return { ok: true, value: getAddress(value) }
 }
 
+const ordinal = (n: number): string => {
+  const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th' : (['th', 'st', 'nd', 'rd'][n % 10] ?? 'th')
+  return `${n}${suffix}`
+}
+
 /** Comma / space separated addresses; reports the first invalid entry by position. */
 export function parseAddressList(input: string): Parsed<Address[]> {
   const parts = input.split(/[\s,]+/).filter(Boolean)
   if (parts.length === 0) return missing('Enter at least one address.')
   const addresses: Address[] = []
   for (const [i, part] of parts.entries()) {
-    if (!isAddress(part, { strict: false }))
-      return invalid(`Entry ${i + 1} (${part.slice(0, 12)}…) is not a valid address.`)
+    if (!isAddress(part, { strict: false })) {
+      if (parts.length === 1) return invalid('Not a valid address (0x followed by 40 hex characters).')
+      const shown = part.length > 14 ? `${part.slice(0, 12)}…` : part
+      return invalid(`The ${ordinal(i + 1)} address ("${shown}") is not valid.`)
+    }
     addresses.push(getAddress(part))
   }
   const unique = new Set(addresses.map((a) => a.toLowerCase()))
