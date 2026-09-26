@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { type Address, getAddress, isAddress, zeroAddress } from 'viem'
 import { RolesPanel } from './components/RolesPanel'
+import { Footer } from './components/Footer'
 import { Notes } from './components/Notes'
 import { SettingsPanel } from './components/SettingsPanel'
 import { Playground } from './components/playground/Playground'
@@ -14,14 +15,13 @@ import { describeError } from './lib/errors'
 import { activeGuard, fetchSafeState, isKnownGuard } from './lib/safe'
 import { settingsStore } from './store'
 
-const TABS = {
+/** The three steps, left to right; Settings sits at the far right and Notes in the footer. */
+const STEPS = {
   roles: '1 · Roles',
   setup: '2 · Guard & policies',
   playground: '3 · Playground',
-  notes: 'Notes',
-  settings: 'Settings',
 } as const
-type TabKey = keyof typeof TABS
+type TabKey = keyof typeof STEPS | 'settings' | 'notes'
 
 const STATE_REFRESH_MS = 15_000
 
@@ -104,16 +104,23 @@ function Workspace({ safe, propose }: { safe: Address; propose?: Sandbox['propos
       )}
 
       <nav className="tabs">
-        {(Object.keys(TABS) as TabKey[]).map((key) => (
+        {(Object.keys(STEPS) as (keyof typeof STEPS)[]).map((key) => (
           <button
             key={key}
             type="button"
             className={key === tab ? 'tab active' : 'tab'}
             onClick={() => setTab(key)}
           >
-            {TABS[key]}
+            {STEPS[key]}
           </button>
         ))}
+        <button
+          type="button"
+          className={tab === 'settings' ? 'tab tab-end active' : 'tab tab-end'}
+          onClick={() => setTab('settings')}
+        >
+          Settings
+        </button>
       </nav>
 
       <main>
@@ -123,6 +130,8 @@ function Workspace({ safe, propose }: { safe: Address; propose?: Sandbox['propos
         {tab === 'notes' && <Notes />}
         {tab === 'settings' && <SettingsPanel />}
       </main>
+
+      <Footer onOpenNotes={() => setTab('notes')} />
     </SandboxContext.Provider>
   )
 }

@@ -1,8 +1,9 @@
 import { type ButtonHTMLAttributes, type ReactNode, useState } from 'react'
-import { ADDRESS_BOOK, EXPLORER } from '../config/contracts'
+import { EXPLORER } from '../config/contracts'
 import { describeError } from '../lib/errors'
 import { shortAddress } from '../lib/format'
 import type { SafeTx } from '../lib/safe'
+import { useAddressName } from '../hooks/useAddressName'
 import { InfoTip, Tooltip } from './Tooltip'
 
 export function Card({
@@ -33,6 +34,27 @@ export function Badge({
   children: ReactNode
 }) {
   return <span className={`badge badge-${tone}`}>{children}</span>
+}
+
+export type TagTone = 'neutral' | 'info' | 'ok' | 'bad'
+
+/**
+ * Small outlined label for categorical values (operation, policy, run mode), distinct from the
+ * filled status badges. `caps` renders it uppercase; `fixed` gives every tag the same width.
+ */
+export function Tag({
+  tone = 'neutral',
+  caps = false,
+  fixed = false,
+  children,
+}: {
+  tone?: TagTone
+  caps?: boolean
+  fixed?: boolean
+  children: ReactNode
+}) {
+  const classes = ['tag', `tag-${tone}`, caps && 'tag-caps', fixed && 'tag-fixed'].filter(Boolean).join(' ')
+  return <span className={classes}>{children}</span>
 }
 
 export function Notice({ tone = 'info', children }: { tone?: 'info' | 'warn' | 'bad'; children: ReactNode }) {
@@ -77,8 +99,9 @@ export function CopyButton({ value }: { value: string }) {
 }
 
 /**
- * Address with its known name (if any), a copy button and an Etherscan link.
- * @param name Overrides the address-book name, e.g. with a local role label.
+ * Address with its known name (role, Safe, owner or known contract), a copy button and an
+ * Etherscan link.
+ * @param name Overrides the resolved name; pass "" to show none (when the name is already shown).
  */
 export function AddressView({
   address,
@@ -89,7 +112,8 @@ export function AddressView({
   full?: boolean
   name?: string
 }) {
-  const name = nameOverride ?? ADDRESS_BOOK[address.toLowerCase()]
+  const resolved = useAddressName(address)
+  const name = nameOverride ?? resolved
   return (
     <span className="address">
       {name && <strong>{name} </strong>}
