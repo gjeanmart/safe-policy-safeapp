@@ -1,0 +1,185 @@
+import { type ButtonHTMLAttributes, type ReactNode, useState } from 'react'
+import { ADDRESS_BOOK, EXPLORER } from '../config/contracts'
+import { describeError } from '../lib/errors'
+import { shortAddress } from '../lib/format'
+import type { SafeTx } from '../lib/safe'
+
+export function Card({
+  title,
+  actions,
+  children,
+}: {
+  title: ReactNode
+  actions?: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <section className="card">
+      <header className="card-header">
+        <h2>{title}</h2>
+        {actions && <div className="row">{actions}</div>}
+      </header>
+      {children}
+    </section>
+  )
+}
+
+export function Badge({
+  tone = 'neutral',
+  children,
+}: {
+  tone?: 'ok' | 'warn' | 'bad' | 'neutral'
+  children: ReactNode
+}) {
+  return <span className={`badge badge-${tone}`}>{children}</span>
+}
+
+export function Notice({ tone = 'info', children }: { tone?: 'info' | 'warn' | 'bad'; children: ReactNode }) {
+  return <div className={`notice notice-${tone}`}>{children}</div>
+}
+
+/**
+ * Copies text to the clipboard. Inside the Safe{Wallet} iframe the async Clipboard API is denied
+ * (no `clipboard-write` permission is delegated), so fall back to the legacy `execCommand` path.
+ */
+async function copyText(value: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(value)
+    return true
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = value
+    textarea.setAttribute('readonly', '')
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    const ok = document.execCommand('copy')
+    textarea.remove()
+    return ok
+  }
+}
+
+export function CopyButton({ value }: { value: string }) {
+  const [status, setStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const copy = async () => {
+    setStatus((await copyText(value)) ? 'copied' : 'failed')
+    setTimeout(() => setStatus('idle'), 1200)
+  }
+  return (
+    <button
+      type="button"
+      className="link"
+      onClick={copy}
+      title={status === 'failed' ? 'Copy failed' : 'Copy'}
+    >
+      {status === 'copied' ? '✓' : status === 'failed' ? '✗' : '⧉'}
+    </button>
+  )
+}
+
+/**
+ * Address with its known name (if any), a copy button and an Etherscan link.
+ * @param name Overrides the address-book name, e.g. with a local role label.
+ */
+export function AddressView({
+  address,
+  full = false,
+  name: nameOverride,
+}: {
+  address: string
+  full?: boolean
+  name?: string
+}) {
+  const name = nameOverride ?? ADDRESS_BOOK[address.toLowerCase()]
+  return (
+    <span className="address">
+      {name && <strong>{name} </strong>}
+      <a href={`${EXPLORER}/address/${address}`} target="_blank" rel="noreferrer" className="mono">
+        {full ? address : shortAddress(address)}
+      </a>
+      <CopyButton value={address} />
+    </span>
+  )
+}
+
+export const TxLink = ({ hash }: { hash: string }) => (
+  <a href={`${EXPLORER}/tx/${hash}`} target="_blank" rel="noreferrer" className="mono">
+    {shortAddress(hash)}
+  </a>
+)
+
+type AsyncButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'onClick'> & {
+  onClick: () => Promise<unknown> | unknown
+  variant?: 'primary' | 'secondary' | 'danger'
+}
+
+/** Button that disables itself while its handler runs and shows the error it throws, if any. */
+export function AsyncButton({
+  onClick,
+  variant = 'secondary',
+  children,
+  disabled,
+  ...rest
+}: AsyncButtonProps) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const handle = async () => {
+    setBusy(true)
+    setError(undefined)
+    try {
+      await onClick()
+    } catch (err) {
+      setError(describeError(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <span className="async-button">
+      <button
+        type="button"
+        className={`btn btn-${variant}`}
+        disabled={disabled || busy}
+        onClick={handle}
+        {...rest}
+      >
+        {busy ? '…' : children}
+      </button>
+      {error && <span className="error-text">{error}</span>}
+    </span>
+  )
+}
+
+/** Shows exactly which calls the owners will be asked to sign. */
+export function SafeTxPreview({ txs }: { txs: readonly SafeTx[] }) {
+  if (txs.length === 0) return null
+  return (
+    <details className="tx-preview">
+      <summary>
+        {txs.length} Safe transaction{txs.length > 1 ? 's' : ''} (batched)
+      </summary>
+      <ol>
+        {txs.map((tx, i) => (
+          <li key={i}>
+            <div>{tx.description}</div>
+            <div className="muted">
+              to <AddressView address={tx.to} />
+            </div>
+            <code className="calldata">{tx.data}</code>
+          </li>
+        ))}
+      </ol>
+    </details>
+  )
+}
+
+export function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
+  return (
+    <label className="field">
+      <span className="field-label">{label}</span>
+      {children}
+      {hint && <span className="field-hint">{hint}</span>}
+    </label>
+  )
+}

@@ -1,0 +1,5 @@
+{
+  "name": "Safe Policy Sandbox",
+  "description": "Plug EOAs as modules and scope them with the Safe Policy Engine.",
+  "iconPath": "icon.svg"
+}

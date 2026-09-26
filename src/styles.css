@@ -1,0 +1,640 @@
+:root {
+  --bg: #f4f4f4;
+  --surface: #ffffff;
+  --text: #121312;
+  --muted: #636669;
+  --border: #dcdee0;
+  --accent: #12ff80;
+  --accent-ink: #0b7a3e;
+  --warn: #b26b00;
+  --warn-bg: #fff4e0;
+  --bad: #c31717;
+  --bad-bg: #ffe6e6;
+  --info-bg: #eaf2ff;
+  --radius: 8px;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0;
+}
+
+h2 {
+  font-size: 15px;
+  margin: 0;
+}
+
+h3 {
+  font-size: 13px;
+  margin: 16px 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+a {
+  color: var(--accent-ink);
+}
+
+code,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wrap {
+  flex-wrap: wrap;
+}
+
+.align-end {
+  align-items: flex-end;
+}
+
+.align-end > .tabs {
+  margin-bottom: 0;
+}
+
+.grow {
+  flex: 1;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 12px;
+}
+
+.break {
+  word-break: break-all;
+}
+
+input,
+select {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.field-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.btn {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--text);
+  color: var(--accent);
+  border-color: var(--text);
+}
+
+.btn-danger {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.link {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: var(--accent-ink);
+  cursor: pointer;
+  font: inherit;
+}
+
+.async-button {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.error-text {
+  color: var(--bad);
+  font-size: 12px;
+  max-width: 480px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #eeeeee;
+  color: var(--muted);
+  margin-left: 4px;
+}
+
+.badge-ok {
+  background: #d9fbe8;
+  color: var(--accent-ink);
+}
+
+.badge-warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.badge-bad {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.notice {
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin: 8px 0;
+  background: var(--info-bg);
+}
+
+.notice-warn {
+  background: var(--warn-bg);
+}
+
+.notice-bad {
+  background: var(--bad-bg);
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.tab {
+  font: inherit;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.tab.active {
+  background: var(--text);
+  color: var(--accent);
+  border-color: var(--text);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.address {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.plain {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0;
+}
+
+.tx-preview {
+  margin-top: 8px;
+}
+
+.tx-preview ol {
+  padding-left: 20px;
+}
+
+.calldata {
+  display: block;
+  word-break: break-all;
+  color: var(--muted);
+  max-height: 60px;
+  overflow: auto;
+}
+
+.propose {
+  display: flex;
+  flex-direction: column;
+}
+
+.pending {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
+.activity {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.activity li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.activity .detail {
+  color: var(--bad);
+  margin-top: 2px;
+}
+
+details summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.roles-table td {
+  vertical-align: middle;
+}
+
+/* Keep every non-role cell to a single line so all columns share the same middle. */
+.nowrap {
+  white-space: nowrap;
+}
+
+.roles-table .badge {
+  vertical-align: middle;
+}
+
+/* Buttons fill their column, so every row has the same button widths. */
+.roles-table td .btn,
+.roles-table td .propose,
+.roles-table td .async-button {
+  width: 100%;
+}
+
+.roles-table td .badge {
+  margin-left: 0;
+}
+
+.icon-btn {
+  font-size: 18px;
+  line-height: 1;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.icon-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.spin {
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.status-grid {
+  column-gap: 48px;
+}
+
+/* Icon-only actions (e.g. trash): muted until hovered, danger colour on hover. */
+.link.icon {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  color: var(--muted);
+  font-size: 15px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.link.icon:hover:not(:disabled) {
+  color: var(--bad);
+  background: var(--bad-bg);
+}
+
+.link.icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.roles-table th,
+.roles-table .badge {
+  white-space: nowrap;
+}
+
+.secret {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--warn-bg);
+  font-size: 12px;
+}
+
+.secret-label {
+  font-weight: 600;
+  color: var(--warn);
+}
+
+/* Keep addresses (name + link + copy) and short cells on one line; the table scrolls if needed. */
+.config-table td {
+  vertical-align: middle;
+}
+
+.config-table .address,
+.config-table td:nth-child(2),
+.config-table td:nth-child(3),
+.config-table td:nth-child(4) {
+  white-space: nowrap;
+  flex-wrap: nowrap;
+}
+
+.icon-btn-error {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.checklist label {
+  cursor: pointer;
+}
+
+/* Icon-only columns in the roles table stay narrow. */
+.roles-table td:has(> .link.icon) {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.modal {
+  width: min(400px, calc(100vw - 32px));
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgb(0 0 0 / 0.25);
+  color: var(--text);
+  /* Rendered inside table cells: do not inherit their nowrap / alignment. */
+  white-space: normal;
+  text-align: left;
+}
+
+.modal-content {
+  padding: 20px 20px 16px;
+}
+
+.modal::backdrop {
+  background: rgb(18 19 18 / 0.4);
+}
+
+.modal-title {
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+
+.modal-body {
+  margin: 0 0 20px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Beats the full-width button rule of the roles table the dialog is nested in. */
+.modal .modal-actions .btn {
+  width: auto;
+}
+
+.btn-danger-solid {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #fff;
+}
+
+.btn-danger-solid:hover {
+  filter: brightness(1.1);
+}
+
+.pending-actions {
+  margin-top: 12px;
+}
+
+.live-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 12px;
+}
+
+.rescan {
+  margin-top: 16px;
+}
+
+/* Custom select chevron: consistent across browsers, with room on the right. */
+select {
+  appearance: none;
+  padding-right: 32px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23636669' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+input:focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: var(--text);
+  box-shadow: 0 0 0 3px rgb(18 255 128 / 0.35);
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 148px 84px 92px minmax(60px, 120px) 1fr auto;
+  align-items: center;
+  column-gap: 12px;
+}
+
+.activity-row .badge {
+  margin-left: 0;
+}
+
+.activity-role,
+.activity-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-tx {
+  justify-self: end;
+}
+
+/* The decoded revert sits under the action column. */
+.activity-row .detail {
+  grid-column: 5 / -1;
+}
+
+/* Mode tags: outlined and square-ish, to read differently from the status badges. */
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.tag-simulate {
+  color: #3867d6;
+}
+
+.tag-execute {
+  color: var(--text);
+}
+
+.tag-force {
+  color: var(--bad);
+}
+
+.activity-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.rescan-row {
+  margin-top: 8px;
+}
