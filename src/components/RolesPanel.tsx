@@ -43,7 +43,7 @@ export function RolesPanel() {
     <>
       <Card title="Safe">
         <div className="row wrap">
-          <AddressView address={safe} full />
+          <AddressView address={safe} name="" full />
           {safeBalance && (
             <span className="muted">
               {formatAmount(safeBalance.eth, 18)} ETH ·{' '}
@@ -165,7 +165,7 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
         <div>
           <strong>{role.label}</strong>
         </div>
-        <AddressView address={role.address} full />
+        <AddressView address={role.address} name="" full />
         {showKey && (
           // Truncated so the revealed key never widens the column; copy still yields the full key.
           <div className="secret" title={role.privateKey}>

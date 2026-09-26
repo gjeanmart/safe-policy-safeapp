@@ -111,7 +111,8 @@ export function SafeStatus() {
             <ul className="plain">
               {state.modules.map((m) => (
                 <li key={m}>
-                  <AddressView address={m} /> {roleLabel(m) && <Badge tone="ok">{roleLabel(m)}</Badge>}{' '}
+                  <AddressView address={m} name="" />{' '}
+                  {roleLabel(m) && <Badge tone="ok">{roleLabel(m)}</Badge>}{' '}
                   <ProposeIconButton
                     txs={[safeTxs.disableModule(state, m)]}
                     title={`Disable module ${roleLabel(m) ?? shortAddress(m)}: proposes disableModule to the owners.`}

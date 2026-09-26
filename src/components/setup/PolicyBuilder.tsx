@@ -23,8 +23,8 @@ import { draftStore, guardPaths, pendingStore, rolesStore, settingsStore } from 
 import { AddressShortcuts } from '../AddressShortcuts'
 import { ProposeButton } from '../ProposeButton'
 import { ConfirmIconButton } from '../ConfirmIconButton'
-import { InfoTip } from '../Tooltip'
-import { AddressView, Card, Field, Notice } from '../ui'
+import { InfoTip, Tooltip } from '../Tooltip'
+import { AddressView, Card, Field, Notice, Tag } from '../ui'
 
 const ROOT_REFRESH_MS = 5_000
 
@@ -246,26 +246,42 @@ function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => void }) 
   )
 }
 
+/** DELEGATECALL runs foreign code in the Safe's own context, so it is flagged. */
+function OperationTag({ operation }: { operation: Operation }) {
+  return operation === Operation.CALL ? (
+    <Tag caps>call</Tag>
+  ) : (
+    <Tag tone="bad" caps>
+      delegatecall
+    </Tag>
+  )
+}
+
+/** Policy name as a tag, coloured by effect: allow, deny, or a conditional check. */
+function PolicyTag({ policy }: { policy: Address }) {
+  const name = ADDRESS_BOOK[policy.toLowerCase()]
+  if (!name) return <AddressView address={policy} />
+  const tone = isAddressEqual(policy, POLICIES.allow)
+    ? 'ok'
+    : isAddressEqual(policy, POLICIES.deny)
+      ? 'bad'
+      : 'info'
+  return (
+    <Tooltip content={`${name} · ${policy}`}>
+      <Tag tone={tone}>{name}</Tag>
+    </Tooltip>
+  )
+}
+
 const ADDRESS_PATTERN = /(0x[a-fA-F0-9]{40})/
 
 /** Renders a config summary with each embedded address shortened and labelled (known contract or role). */
 function ConfigSummary({ text }: { text: string }) {
-  const roles = rolesStore.use()
   return (
     <>
       {text
         .split(ADDRESS_PATTERN)
-        .map((part, i) =>
-          i % 2 === 1 ? (
-            <AddressView
-              key={i}
-              address={part}
-              name={roles.find((r) => isAddressEqual(r.address, part as Address))?.label}
-            />
-          ) : (
-            part
-          ),
-        )}
+        .map((part, i) => (i % 2 === 1 ? <AddressView key={i} address={part} /> : part))}
     </>
   )
 }
@@ -302,8 +318,12 @@ export function ConfigurationTable({
                 <AddressView address={c.target} />
               </td>
               <td className="mono small">{SELECTOR_LABELS[c.selector.toLowerCase()] ?? c.selector}</td>
-              <td>{c.operation === Operation.CALL ? 'CALL' : 'DELEGATECALL'}</td>
-              <td>{ADDRESS_BOOK[c.policy.toLowerCase()] ?? <AddressView address={c.policy} />}</td>
+              <td>
+                <OperationTag operation={c.operation} />
+              </td>
+              <td>
+                <PolicyTag policy={c.policy} />
+              </td>
               <td className="small">
                 {renderConfig?.(c) ?? <ConfigSummary text={describeConfigurationData(c)} />}
               </td>
@@ -422,7 +442,7 @@ export function PolicyBuilder() {
       label: 'Propose configuration request',
       help:
         'The guard is installed, so changes go through the delay: request the root now, then apply the same ' +
-        'configurations from “Pending configurations” once it matures.',
+        'configurations from “Pending policy changes” once it matures.',
       txs: [safeTxs.requestConfiguration(guard, root)],
       onProposed: () => {
         rememberPending()

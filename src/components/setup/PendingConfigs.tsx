@@ -124,7 +124,7 @@ export function PendingConfigs() {
 
   if (pending.length === 0) return null
   return (
-    <Card title={`Pending configurations (${pending.length})`}>
+    <Card title={`Pending policy changes (${pending.length})`}>
       {pending.map((p) => (
         <PendingRow key={p.root} pending={p} expiry={timing.data?.expiry} />
       ))}

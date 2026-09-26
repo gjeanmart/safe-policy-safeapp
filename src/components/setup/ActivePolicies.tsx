@@ -48,6 +48,7 @@ function LiveAllowlist({ guard, safe, config }: { guard: Address; safe: Address;
   if (!live.data) return <span className="muted">…</span>
   return (
     <span className="live-list">
+      <span className="muted">{isTransfer ? 'recipient' : 'spender'}</span>
       {live.data.map(({ account, configured, permission }) => (
         <span key={account} className="live-entry">
           <AddressView address={account} />
@@ -97,14 +98,6 @@ export function ActivePolicies() {
         <RefreshButton onClick={() => scan()} title="Scan new PolicyConfirmed events since the last scan" />
       }
     >
-      <p className="muted small row">
-        Scanned up to block {history?.scannedTo ?? '—'}
-        <InfoTip>
-          The guard has no getter to list a Safe&apos;s policies, so they are rebuilt from its PolicyConfirmed
-          events.
-          {guardInstalled && ' Anything not listed is denied for modules (no fallback policy configured).'}
-        </InfoTip>
-      </p>
       {!guardInstalled && active.length > 0 && (
         <Notice tone="warn">
           <strong>Stored, not enforced:</strong> these bindings are still recorded in this guard for the Safe,
@@ -136,25 +129,35 @@ export function ActivePolicies() {
           )}
         </>
       )}
-      <details className="rescan">
-        <summary>Rescan from a specific block</summary>
-        <div className="row rescan-row">
-          <input
-            placeholder="From block"
-            aria-label="From block"
-            inputMode="numeric"
-            value={fromBlock}
-            onChange={(e) => setFromBlock(e.target.value.replace(/\D/g, ''))}
-          />
-          <AsyncButton
-            disabled={!fromBlock}
-            onClick={() => scan(BigInt(fromBlock))}
-            title="Discard the cached history and rescan from this block"
-          >
-            Rescan
-          </AsyncButton>
-        </div>
-      </details>
+      <div className="card-footer">
+        <details className="rescan">
+          <summary>Rescan from a specific block</summary>
+          <div className="row rescan-row">
+            <input
+              placeholder="From block"
+              aria-label="From block"
+              inputMode="numeric"
+              value={fromBlock}
+              onChange={(e) => setFromBlock(e.target.value.replace(/\D/g, ''))}
+            />
+            <AsyncButton
+              disabled={!fromBlock}
+              onClick={() => scan(BigInt(fromBlock))}
+              title="Discard the cached history and rescan from this block"
+            >
+              Rescan
+            </AsyncButton>
+          </div>
+        </details>
+        <p className="muted small row scan-status">
+          Scanned up to block {history?.scannedTo ?? '—'}
+          <InfoTip>
+            The guard has no getter to list a Safe&apos;s policies, so they are rebuilt from its
+            PolicyConfirmed events.
+            {guardInstalled && ' Anything not listed is denied for modules (no fallback policy configured).'}
+          </InfoTip>
+        </p>
+      </div>
     </Card>
   )
 }

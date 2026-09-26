@@ -78,7 +78,7 @@ export function Notes() {
             Afterwards, owners <code>requestConfiguration(root)</code> with{' '}
             <code>root = keccak256(abi.encode(configs))</code>, wait <code>DELAY</code>, then{' '}
             <code>applyConfiguration(configs)</code> within <code>EXPIRY</code> (7 days). Only the root is
-            on-chain, which is why this app keeps pending configurations in localStorage.
+            on-chain, which is why this app keeps pending policy changes in localStorage.
           </li>
           <li>
             A pending root can be cancelled at any time with <code>invalidateRoot</code>.

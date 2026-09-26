@@ -599,7 +599,7 @@ select:focus-visible {
 
 .activity-row {
   display: grid;
-  grid-template-columns: 148px 84px 92px minmax(60px, 120px) 1fr auto;
+  grid-template-columns: 148px 104px 92px minmax(60px, 120px) 1fr auto;
   align-items: center;
   column-gap: 12px;
 }
@@ -624,27 +624,42 @@ select:focus-visible {
   grid-column: 5 / -1;
 }
 
-/* Mode tags: outlined and square-ish, to read differently from the status badges. */
+/* Tags: outlined and square-ish, to read differently from the filled status badges. */
 .tag {
   display: inline-block;
-  padding: 0 6px;
+  white-space: nowrap;
+  padding: 1px 6px;
   border: 1px solid currentColor;
   border-radius: 4px;
   font-size: 11px;
   font-weight: 600;
+  line-height: 1.4;
+}
+
+.tag-caps {
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
 
-.tag-simulate {
-  color: #3867d6;
+/* Same width for every tag of a column (fits FORCE-SEND). */
+.tag-fixed {
+  min-width: 92px;
+  text-align: center;
 }
 
-.tag-execute {
+.tag-neutral {
   color: var(--text);
 }
 
-.tag-force {
+.tag-info {
+  color: #3867d6;
+}
+
+.tag-ok {
+  color: var(--accent-ink);
+}
+
+.tag-bad {
   color: var(--bad);
 }
 
@@ -757,4 +772,57 @@ select:focus-visible {
 .field-label {
   display: inline-flex;
   align-items: center;
+}
+
+/* Pushes a tab (Settings) to the right end of the tab bar. */
+.tab-end {
+  margin-left: auto;
+}
+
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 32px;
+  padding: 16px 0 8px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.app-footer .link {
+  font-size: 12px;
+  padding: 0;
+}
+
+/* The action tabs sit under their "Action" label, level with the Role select. */
+.action-picker .tabs {
+  margin-bottom: 0;
+}
+
+/* Bottom row of a card: controls on the left, status on the right. */
+.card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.card-footer .rescan {
+  margin-top: 0;
+}
+
+.scan-status {
+  margin: 0 0 0 auto;
+}
+
+.live-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }

@@ -173,17 +173,22 @@ export function Playground() {
                   ))}
                 </select>
               </Field>
-              <div className="tabs">
-                {(Object.keys(ACTIONS) as ActionKey[]).map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    className={key === action ? 'tab active' : 'tab'}
-                    onClick={() => setAction(key)}
-                  >
-                    {ACTIONS[key]}
-                  </button>
-                ))}
+              <div className="field action-picker">
+                <span className="field-label" id="action-label">
+                  Action
+                </span>
+                <div className="tabs" role="group" aria-labelledby="action-label">
+                  {(Object.keys(ACTIONS) as ActionKey[]).map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      className={key === action ? 'tab active' : 'tab'}
+                      onClick={() => setAction(key)}
+                    >
+                      {ACTIONS[key]}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
