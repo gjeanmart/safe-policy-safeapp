@@ -1,16 +1,18 @@
 import { useState } from 'react'
-import { type Hex, isAddressEqual, isHex, parseEther } from 'viem'
+import { type Hex, isAddressEqual, parseEther } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
 import { TOKENS } from '../config/contracts'
 import { useSandbox } from '../context'
 import { useBalances } from '../hooks/useBalances'
 import { formatAmount } from '../lib/format'
 import { isModuleEnabled, safeTxs } from '../lib/safe'
+import { parsePrivateKeyInput } from '../lib/validation'
 import { type Role, rolesStore } from '../store'
 import { ConfirmIconButton } from './ConfirmIconButton'
 import { EyeIcon, EyeOffIcon } from './icons'
 import { ProposeButton } from './ProposeButton'
 import { RefreshButton } from './RefreshButton'
+import { Tooltip } from './Tooltip'
 import { AddressView, Badge, Card, CopyButton, Notice } from './ui'
 
 const TOP_UP = parseEther('0.01')
@@ -33,6 +35,7 @@ export function RolesPanel() {
   const balances = useBalances([safe, ...roles.map((r) => r.address)])
   const [label, setLabel] = useState('')
   const [importKey, setImportKey] = useState('')
+  const [importError, setImportError] = useState<string>()
 
   const safeBalance = balances.data?.[safe]
 
@@ -91,22 +94,33 @@ export function RolesPanel() {
             autoComplete="off"
             spellCheck={false}
             value={importKey}
-            onChange={(e) => setImportKey(e.target.value.trim())}
-            className="grow"
+            onChange={(e) => {
+              setImportKey(e.target.value.trim())
+              setImportError(undefined)
+            }}
+            className={importError ? 'grow input-invalid' : 'grow'}
+            aria-invalid={importError !== undefined}
           />
           <button
             type="button"
             className="btn"
             title="Add an existing EOA from its private key (e.g. a role created in another browser/origin)"
-            disabled={!isHex(importKey) || importKey.length !== 66}
+            disabled={!importKey}
             onClick={() => {
-              addRole(label, importKey as Hex)
+              const parsed = parsePrivateKeyInput(importKey)
+              if (!parsed.ok) return setImportError(parsed.error)
+              const { address } = privateKeyToAccount(parsed.value)
+              if (roles.some((r) => isAddressEqual(r.address, address))) {
+                return setImportError('This key is already imported (' + address + ').')
+              }
+              addRole(label, parsed.value)
               setImportKey('')
             }}
           >
             Import
           </button>
         </div>
+        {importError && <p className="field-error">{importError}</p>}
 
         {roles.length === 0 ? (
           <p className="muted">
@@ -207,15 +221,18 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
         />
       </td>
       <td>
-        <button
-          type="button"
-          className="link icon"
-          title={showKey ? 'Hide the private key' : 'Reveal the private key (e.g. to import it elsewhere)'}
-          aria-label={showKey ? 'Hide key' : 'Show key'}
-          onClick={() => setShowKey((v) => !v)}
+        <Tooltip
+          content={showKey ? 'Hide the private key' : 'Reveal the private key (e.g. to import it elsewhere)'}
         >
-          {showKey ? <EyeOffIcon /> : <EyeIcon />}
-        </button>
+          <button
+            type="button"
+            className="link icon"
+            aria-label={showKey ? 'Hide key' : 'Show key'}
+            onClick={() => setShowKey((v) => !v)}
+          >
+            {showKey ? <EyeOffIcon /> : <EyeIcon />}
+          </button>
+        </Tooltip>
       </td>
       <td>
         <ConfirmIconButton

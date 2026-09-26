@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { describeError } from '../lib/errors'
+import { Tooltip } from './Tooltip'
 
 /**
  * Square ↻ button for card headers. Spins while `onClick` runs (or while `busy` is set by the
@@ -31,15 +32,16 @@ export function RefreshButton({
   }
 
   return (
-    <button
-      type="button"
-      className={error ? 'icon-btn icon-btn-error' : 'icon-btn'}
-      title={error ? `${title} — failed: ${error}` : title}
-      aria-label={title}
-      disabled={spinning}
-      onClick={run}
-    >
-      <span className={spinning ? 'spin' : undefined}>↻</span>
-    </button>
+    <Tooltip content={error ? `${title} — failed: ${error}` : title}>
+      <button
+        type="button"
+        className={error ? 'icon-btn icon-btn-error' : 'icon-btn'}
+        aria-label={title}
+        disabled={spinning}
+        onClick={run}
+      >
+        <span className={spinning ? 'spin' : undefined}>↻</span>
+      </button>
+    </Tooltip>
   )
 }

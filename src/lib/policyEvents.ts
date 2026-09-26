@@ -46,11 +46,15 @@ export async function scanPolicyEvents(
  * Once applied or invalidated, the guard deletes a root, which then reads the same as a request
  * not executed yet. Its events tell the two apart. A request is only applicable for DELAY + EXPIRY
  * (7 days), so looking back two log chunks (~2 weeks of Sepolia blocks) covers it.
+ *
+ * Roots are content hashes: re-requesting a configuration applied earlier yields the same root,
+ * so only events at or after `since` (unix seconds, when this request was made) count.
  */
 export async function rootOutcome(
   guard: Address,
   safe: Address,
   root: Hex,
+  since: number,
 ): Promise<'applied' | 'invalidated' | undefined> {
   const head = await publicClient.getBlockNumber()
   for (const eventName of ['RootApplied', 'RootInvalidated'] as const) {
@@ -63,7 +67,10 @@ export async function rootOutcome(
         fromBlock: end - LOGS_BLOCK_RANGE,
         toBlock: end,
       })
-      if (logs.length > 0) return eventName === 'RootApplied' ? 'applied' : 'invalidated'
+      for (const log of logs) {
+        const block = await publicClient.getBlock({ blockNumber: log.blockNumber })
+        if (Number(block.timestamp) >= since) return eventName === 'RootApplied' ? 'applied' : 'invalidated'
+      }
     }
   }
   return undefined

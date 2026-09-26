@@ -1,4 +1,14 @@
-import { BaseError, ContractFunctionRevertedError, type Hex, decodeErrorResult } from 'viem'
+import {
+  BaseError,
+  ChainMismatchError,
+  ContractFunctionRevertedError,
+  type Hex,
+  HttpRequestError,
+  InsufficientFundsError,
+  TimeoutError,
+  UserRejectedRequestError,
+  decodeErrorResult,
+} from 'viem'
 import { policyErrorsAbi } from '../abi'
 import { ADDRESS_BOOK } from '../config/contracts'
 
@@ -45,6 +55,18 @@ export function describeRevertData(data: Hex): string {
 /** Best-effort human description for anything thrown by viem (or elsewhere). */
 export function describeError(error: unknown): string {
   if (error instanceof BaseError) {
+    // Infrastructure failures first: these are not policy decisions and read badly verbatim.
+    if (error.walk((e) => e instanceof InsufficientFundsError)) {
+      return 'Not enough Sepolia ETH to pay for gas on the sending account.'
+    }
+    if (error.walk((e) => e instanceof UserRejectedRequestError)) return 'Rejected in the wallet.'
+    if (error.walk((e) => e instanceof TimeoutError))
+      return 'The RPC did not answer in time. Try again or change it in Settings.'
+    if (error.walk((e) => e instanceof HttpRequestError)) {
+      return 'Could not reach the RPC endpoint. Check your connection or change it in Settings.'
+    }
+    if (error.walk((e) => e instanceof ChainMismatchError)) return 'The RPC endpoint is not on Sepolia.'
+
     const reverted = error.walk((e) => e instanceof ContractFunctionRevertedError)
     if (reverted instanceof ContractFunctionRevertedError && reverted.raw) {
       return describeRevertData(reverted.raw)

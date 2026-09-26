@@ -52,7 +52,10 @@ function PendingRow({ pending, expiry }: { pending: PendingConfiguration; expiry
 
   // A zero `rootConfigured` is ambiguous; the root's events tell whether it is already settled.
   const outcome = useAsync(
-    async () => (validFrom.data === 0n ? rootOutcome(pending.guard, safe, pending.root) : undefined),
+    async () =>
+      validFrom.data === 0n
+        ? rootOutcome(pending.guard, safe, pending.root, Math.floor(pending.createdAt / 1000))
+        : undefined,
     `${pending.guard}:${pending.root}:${safe}:${validFrom.data === 0n}`,
     OUTCOME_REFRESH_MS,
   )

@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { TrashIcon } from './icons'
+import { Tooltip } from './Tooltip'
 
 /**
  * Icon button for destructive actions: it opens a small modal and runs `onConfirm` only if the
@@ -37,16 +38,17 @@ export function ConfirmIconButton({
 
   return (
     <>
-      <button
-        type="button"
-        className="link icon"
-        title={title}
-        aria-label={title}
-        disabled={disabled}
-        onClick={() => setOpen(true)}
-      >
-        {icon}
-      </button>
+      <Tooltip content={title}>
+        <button
+          type="button"
+          className="link icon"
+          aria-label={title}
+          disabled={disabled}
+          onClick={() => setOpen(true)}
+        >
+          {icon}
+        </button>
+      </Tooltip>
       {open && (
         <dialog
           ref={dialog}

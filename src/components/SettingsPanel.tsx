@@ -11,6 +11,8 @@ import {
 } from '../config/client'
 import { GUARDS } from '../config/contracts'
 import { describeError } from '../lib/errors'
+import { fieldError, parseRpcUrlInput } from '../lib/validation'
+import { InfoTip } from './Tooltip'
 import { AsyncButton, Badge, Card, Field, Notice } from './ui'
 
 type CheckResult = { ok: boolean; lines: { label: string; ok: boolean; detail: string }[] }
@@ -56,26 +58,21 @@ export function SettingsPanel() {
 
   return (
     <Card title="Settings">
-      <h3>Sepolia RPC endpoint</h3>
+      <h3 className="row">
+        Sepolia RPC endpoint
+        <InfoTip>
+          Used for every read and for the transactions roles send as modules. Multisig proposals go through
+          Safe{'{Wallet}'} and are not affected. The endpoint must allow browser requests (CORS) and
+          eth_getLogs over 50k blocks.
+        </InfoTip>
+      </h3>
       <p className="small">
         In use: <span className="mono">{current}</span>{' '}
         {saved ? <Badge>custom</Badge> : <Badge tone="ok">default</Badge>}
       </p>
-      <p className="muted small">
-        Used for every read and for the transactions roles send as modules. Multisig proposals go through Safe
-        {'{Wallet}'} and are not affected. The endpoint must allow browser requests (CORS) and{' '}
-        <code>eth_getLogs</code> over 50k blocks.
-      </p>
 
       <div className="stack">
-        <Field
-          label="RPC URL"
-          hint={
-            input && !isValidUrl
-              ? 'Must be https:// (plain http:// only for localhost), without credentials in the URL.'
-              : undefined
-          }
-        >
+        <Field label="RPC URL" error={fieldError(parseRpcUrlInput(input, isAllowedRpcUrl), false)}>
           <input
             className="mono"
             value={input}
