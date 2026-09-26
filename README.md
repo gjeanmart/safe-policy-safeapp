@@ -66,20 +66,6 @@ Static site, no backend. In Cloudflare Pages, connect the GitHub repo with:
 `public/_headers` sets the security headers below and the CORS headers Safe{Wallet} needs to fetch `manifest.json`.
 Then add the Pages URL as a custom Safe App.
 
-## Security
-
-Proportionate hardening for a PoC (it does not make it safe for real funds):
-
-- **Framing / messaging**: the CSP `frame-ancestors` and the Safe Apps SDK `allowedDomains` only accept Safe{Wallet}
-  (`app.safe.global`, `*.5afe.dev`, localhost), so another site cannot embed the app and impersonate the wallet.
-- **Content Security Policy** (`public/_headers`): scripts and styles from the app origin only, no inline code, no
-  plugins; plus `nosniff`, `Referrer-Policy: no-referrer` and a restrictive `Permissions-Policy`.
-- **RPC**: only `https://` endpoints (plain `http://` for localhost), no credentials in the URL; the stored value
-  is re-validated on read.
-- **Keys**: generated in the browser, masked on import (no autofill/spellcheck), shown truncated.
-- **Supply chain**: pnpm with a frozen lockfile, dependency install scripts blocked, `minimumReleaseAge` of 1 day,
-  Dependabot with a cooldown, and GitHub Actions pinned to commit SHAs with read-only permissions.
-
 ## Walkthrough
 
 1. **Roles**: generate an EOA, top it up with gas from the Safe, and optionally enable it as a module.
@@ -128,6 +114,20 @@ src/
   hooks/         Safe App connection, polling, balances
   components/    Roles, Setup (status, builder, pending, active), Playground, Notes
 ```
+
+## Security
+
+Proportionate hardening for a PoC (it does not make it safe for real funds):
+
+- **Framing / messaging**: the CSP `frame-ancestors` and the Safe Apps SDK `allowedDomains` only accept Safe{Wallet}
+  (`app.safe.global`, `*.5afe.dev`, localhost), so another site cannot embed the app and impersonate the wallet.
+- **Content Security Policy** (`public/_headers`): scripts and styles from the app origin only, no inline code, no
+  plugins; plus `nosniff`, `Referrer-Policy: no-referrer` and a restrictive `Permissions-Policy`.
+- **RPC**: only `https://` endpoints (plain `http://` for localhost), no credentials in the URL; the stored value
+  is re-validated on read.
+- **Keys**: generated in the browser, masked on import (no autofill/spellcheck), shown truncated.
+- **Supply chain**: pnpm with a frozen lockfile, dependency install scripts blocked, `minimumReleaseAge` of 1 day,
+  Dependabot with a cooldown, and GitHub Actions pinned to commit SHAs with read-only permissions.
 
 ## Known limitations
 
