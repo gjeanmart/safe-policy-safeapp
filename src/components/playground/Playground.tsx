@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import { type Hex, encodeFunctionData, getAddress, isAddress, isHex, parseUnits } from 'viem'
+import { encodeFunctionData } from 'viem'
 import { erc20Abi } from '../../abi'
 import { TOKENS, type Token } from '../../config/contracts'
 import { useSandbox } from '../../context'
 import { Operation } from '../../lib/configurations'
 import type { Step } from '../../lib/runner'
 import { isModuleEnabled } from '../../lib/safe'
+import { fieldError, parseAddressInput, parseAmountInput, parseHexInput } from '../../lib/validation'
 import { type Role, rolesStore } from '../../store'
 import { Card, Field, Notice } from '../ui'
 import { ActivityLog } from './ActivityLog'
@@ -25,21 +26,21 @@ type ActionKey = keyof typeof ACTIONS
 const tokenList = Object.values(TOKENS) as Token[]
 
 /** Recipient input with shortcuts to the Safe, its owners and the local roles. */
-function RecipientInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function RecipientInput({
+  value,
+  onChange,
+  error,
+}: {
+  value: string
+  onChange: (value: string) => void
+  error?: string
+}) {
   return (
-    <Field label="Recipient">
+    <Field label="Recipient" error={error}>
       <input value={value} onChange={(e) => onChange(e.target.value.trim())} placeholder="0x…" />
       <AddressShortcuts onPick={onChange} />
     </Field>
   )
-}
-
-function parseAmount(value: string, decimals: number): bigint | undefined {
-  try {
-    return parseUnits(value, decimals)
-  } catch {
-    return undefined
-  }
 }
 
 /** Form + runner for the single-step actions (transfers and custom calls). */
@@ -51,45 +52,42 @@ function SimpleAction({ action, role }: { action: Exclude<ActionKey, 'cow'>; rol
   const [operation, setOperation] = useState<Operation>(Operation.CALL)
 
   const tokenInfo = tokenList.find((t) => t.address === token)!
-  let step: Step | string
-  if (!isAddress(recipient)) {
-    step = action === 'custom' ? 'Enter a target address' : 'Enter a recipient'
-  } else if (action === 'erc20') {
-    const value = parseAmount(amount, tokenInfo.decimals)
+  const decimals = action === 'erc20' ? tokenInfo.decimals : 18
+
+  // Invalid input is flagged under its field; there is no submit, so a missing value only
+  // shows as a prompt where the action buttons would be.
+  const fields = {
+    recipient: parseAddressInput(recipient, action === 'custom' ? 'target address' : 'address'),
+    amount: parseAmountInput(amount, decimals, { required: action === 'erc20' }),
+    data: action === 'custom' ? parseHexInput(data) : ({ ok: true, value: '0x' } as const),
+  }
+  const firstMissing = Object.values(fields).find((f) => !f.ok && f.missing)
+
+  let step: Step | undefined
+  if (fields.recipient.ok && fields.amount.ok && fields.data.ok) {
+    const to = fields.recipient.value
+    const value = fields.amount.value
     step =
-      value === undefined
-        ? 'Invalid amount'
-        : {
-            label: `transfer ${amount} ${tokenInfo.symbol} to ${recipient}`,
+      action === 'erc20'
+        ? {
+            label: `transfer ${amount} ${tokenInfo.symbol} to ${to}`,
             tx: {
               to: tokenInfo.address,
               value: 0n,
-              data: encodeFunctionData({
-                abi: erc20Abi,
-                functionName: 'transfer',
-                args: [getAddress(recipient), value],
-              }),
+              data: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to, value] }),
               operation: Operation.CALL,
             },
           }
-  } else {
-    const value = parseAmount(amount || '0', 18)
-    if (value === undefined) step = 'Invalid amount'
-    else if (action === 'custom' && !isHex(data)) step = 'Calldata must be hex'
-    else {
-      step = {
-        label:
-          action === 'native'
-            ? `send ${amount} ETH to ${recipient}`
-            : `call ${recipient} (${data.slice(0, 10)})`,
-        tx: {
-          to: getAddress(recipient),
-          value,
-          data: action === 'custom' ? (data as Hex) : '0x',
-          operation: action === 'custom' ? operation : Operation.CALL,
-        },
-      }
-    }
+        : {
+            label:
+              action === 'native' ? `send ${amount || 0} ETH to ${to}` : `call ${to} (${data.slice(0, 10)})`,
+            tx: {
+              to,
+              value,
+              data: fields.data.value,
+              operation: action === 'custom' ? operation : Operation.CALL,
+            },
+          }
   }
 
   return (
@@ -107,7 +105,7 @@ function SimpleAction({ action, role }: { action: Exclude<ActionKey, 'cow'>; rol
           </Field>
         )}
         {action === 'custom' ? (
-          <Field label="Target">
+          <Field label="Target" error={fieldError(fields.recipient, false)}>
             <input
               value={recipient}
               onChange={(e) => setRecipient(e.target.value.trim())}
@@ -115,17 +113,22 @@ function SimpleAction({ action, role }: { action: Exclude<ActionKey, 'cow'>; rol
             />
           </Field>
         ) : (
-          <RecipientInput value={recipient} onChange={setRecipient} />
+          <RecipientInput
+            value={recipient}
+            onChange={setRecipient}
+            error={fieldError(fields.recipient, false)}
+          />
         )}
         <Field
           label={action === 'erc20' ? `Amount (${tokenInfo.symbol})` : 'Value (ETH)'}
+          error={fieldError(fields.amount, false)}
           hint={<SafeBalance token={action === 'erc20' ? tokenInfo : ETH} onMax={setAmount} />}
         >
           <input value={amount} onChange={(e) => setAmount(e.target.value)} />
         </Field>
         {action === 'custom' && (
           <>
-            <Field label="Calldata">
+            <Field label="Calldata" error={fieldError(fields.data, false)}>
               <input value={data} onChange={(e) => setData(e.target.value.trim())} className="mono" />
             </Field>
             <Field label="Operation">
@@ -137,7 +140,11 @@ function SimpleAction({ action, role }: { action: Exclude<ActionKey, 'cow'>; rol
           </>
         )}
       </div>
-      {typeof step === 'string' ? <p className="muted">{step}</p> : <StepRunner role={role} steps={[step]} />}
+      {step ? (
+        <StepRunner role={role} steps={[step]} />
+      ) : (
+        firstMissing && !firstMissing.ok && <p className="muted">{firstMissing.error}</p>
+      )}
     </div>
   )
 }

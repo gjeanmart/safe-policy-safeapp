@@ -1,13 +1,5 @@
 import { useState } from 'react'
-import {
-  type Address,
-  type Hex,
-  encodeFunctionData,
-  getAddress,
-  isAddress,
-  isAddressEqual,
-  parseUnits,
-} from 'viem'
+import { type Address, type Hex, encodeFunctionData, isAddressEqual } from 'viem'
 import { cowSettlementAbi, erc20Abi } from '../../abi'
 import { publicClient } from '../../config/client'
 import { COW, TOKENS, type Token } from '../../config/contracts'
@@ -24,6 +16,7 @@ import {
 } from '../../lib/cow'
 import { formatAmount } from '../../lib/format'
 import type { Step } from '../../lib/runner'
+import { fieldError, parseAddressInput, parseAmountInput } from '../../lib/validation'
 import type { Role } from '../../store'
 import { AsyncButton, Field, Notice } from '../ui'
 import { SafeBalance } from './SafeBalance'
@@ -51,11 +44,19 @@ export function CowSwap({ role }: { role: Role }) {
   const [slippageBps, setSlippageBps] = useState(100)
   const [draft, setDraft] = useState<Draft>()
   const [posted, setPosted] = useState<Hex>()
+  const [submitted, setSubmitted] = useState(false)
 
   const sellToken = tokenBy(sell)
   const buyToken = tokenBy(buy)
-  const receiverValid = isAddress(receiver)
-  const foreignReceiver = receiverValid && !isAddressEqual(receiver, safe)
+  const fields = {
+    amount: parseAmountInput(amount, sellToken.decimals),
+    receiver: parseAddressInput(receiver, 'receiver address'),
+  }
+  const amountError =
+    fieldError(fields.amount, submitted) ??
+    (fields.amount.ok && fields.amount.value === 0n ? 'Enter an amount greater than 0.' : undefined)
+  const receiverError = fieldError(fields.receiver, submitted)
+  const foreignReceiver = fields.receiver.ok && !isAddressEqual(fields.receiver.value, safe)
 
   const reset = () => {
     setDraft(undefined)
@@ -64,12 +65,18 @@ export function CowSwap({ role }: { role: Role }) {
 
   const fetchQuote = async () => {
     reset()
+    if (!fields.amount.ok || fields.amount.value === 0n || !fields.receiver.ok) {
+      setSubmitted(true)
+      return
+    }
+    if (isAddressEqual(sellToken.address, buyToken.address))
+      throw new Error('Sell and buy tokens must differ.')
     const quote = await getQuote({
       from: safe,
-      receiver: getAddress(receiver),
+      receiver: fields.receiver.value,
       sellToken: sellToken.address,
       buyToken: buyToken.address,
-      sellAmount: parseUnits(amount, sellToken.decimals),
+      sellAmount: fields.amount.value,
     })
     const order = buildOrder(quote, slippageBps)
     const uid = orderUid(order, safe)
@@ -157,6 +164,8 @@ export function CowSwap({ role }: { role: Role }) {
         </Field>
         <Field
           label={`Amount (${sellToken.symbol})`}
+          info="Sepolia liquidity is thin: around 20 USDC or more usually gets a quote. The fee is included in the amount."
+          error={amountError}
           hint={
             <>
               <SafeBalance
@@ -166,8 +175,6 @@ export function CowSwap({ role }: { role: Role }) {
                   reset()
                 }}
               />
-              <br />
-              Sepolia liquidity is thin; ~20+ USDC usually quotes.
             </>
           }
         >
@@ -189,7 +196,11 @@ export function CowSwap({ role }: { role: Role }) {
             }}
           />
         </Field>
-        <Field label="Receiver" hint="Defaults to the Safe. Change it to see what the policies do NOT catch.">
+        <Field
+          label="Receiver"
+          error={receiverError}
+          info="Who receives the bought tokens. Defaults to the Safe; set another address to see that no deployed policy can stop it."
+        >
           <input
             value={receiver}
             onChange={(e) => {
@@ -209,7 +220,6 @@ export function CowSwap({ role }: { role: Role }) {
 
       <div className="row">
         <AsyncButton
-          disabled={!receiverValid || !amount}
           onClick={fetchQuote}
           title="Ask the CoW order book for a quote and build the order (nothing is posted yet)"
         >

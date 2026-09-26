@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 import { useSandbox } from '../context'
 import type { SafeTx } from '../lib/safe'
+import { InfoTip } from './Tooltip'
 import { AsyncButton, SafeTxPreview } from './ui'
 
 /**
@@ -11,6 +12,7 @@ export function ProposeButton({
   txs,
   label,
   title,
+  info,
   variant = 'primary',
   onProposed,
   preview = true,
@@ -19,6 +21,8 @@ export function ProposeButton({
   label: string
   /** Tooltip describing what the owners will be asked to sign. */
   title?: string
+  /** Explanatory copy behind an ⓘ next to the button. */
+  info?: ReactNode
   variant?: 'primary' | 'secondary' | 'danger'
   onProposed?: (safeTxHash: string) => void
   preview?: boolean
@@ -43,6 +47,7 @@ export function ProposeButton({
         >
           {label}
         </AsyncButton>
+        {info && <InfoTip>{info}</InfoTip>}
         {proposed && (
           <span className="muted">Proposed — sign &amp; execute it in the Safe{'{Wallet}'} queue.</span>
         )}

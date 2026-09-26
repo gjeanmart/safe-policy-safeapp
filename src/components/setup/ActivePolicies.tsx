@@ -10,6 +10,7 @@ import { activePolicies, scanPolicyEvents } from '../../lib/policyEvents'
 import { draftStore, historyKey, policyHistoryStore } from '../../store'
 import { AddressView, AsyncButton, Badge, Card, Notice } from '../ui'
 import { RefreshButton } from '../RefreshButton'
+import { InfoTip } from '../Tooltip'
 import { ConfigurationTable } from './PolicyBuilder'
 
 /** Default look-back for the first scan (~4 weeks of Sepolia blocks). */
@@ -96,10 +97,13 @@ export function ActivePolicies() {
         <RefreshButton onClick={() => scan()} title="Scan new PolicyConfirmed events since the last scan" />
       }
     >
-      <p className="muted small">
-        Rebuilt from PolicyConfirmed events (the guard has no enumeration getter). Scanned up to block{' '}
-        {history?.scannedTo ?? '—'}.
-        {guardInstalled && ' Anything not listed is denied for modules (no fallback configured).'}
+      <p className="muted small row">
+        Scanned up to block {history?.scannedTo ?? '—'}
+        <InfoTip>
+          The guard has no getter to list a Safe&apos;s policies, so they are rebuilt from its PolicyConfirmed
+          events.
+          {guardInstalled && ' Anything not listed is denied for modules (no fallback policy configured).'}
+        </InfoTip>
       </p>
       {!guardInstalled && active.length > 0 && (
         <Notice tone="warn">

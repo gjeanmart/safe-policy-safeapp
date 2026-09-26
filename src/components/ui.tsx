@@ -3,6 +3,7 @@ import { ADDRESS_BOOK, EXPLORER } from '../config/contracts'
 import { describeError } from '../lib/errors'
 import { shortAddress } from '../lib/format'
 import type { SafeTx } from '../lib/safe'
+import { InfoTip, Tooltip } from './Tooltip'
 
 export function Card({
   title,
@@ -67,14 +68,11 @@ export function CopyButton({ value }: { value: string }) {
     setTimeout(() => setStatus('idle'), 1200)
   }
   return (
-    <button
-      type="button"
-      className="link"
-      onClick={copy}
-      title={status === 'failed' ? 'Copy failed' : 'Copy'}
-    >
-      {status === 'copied' ? '✓' : status === 'failed' ? '✗' : '⧉'}
-    </button>
+    <Tooltip content={status === 'failed' ? 'Copy failed' : status === 'copied' ? 'Copied' : 'Copy'}>
+      <button type="button" className="link" onClick={copy} aria-label="Copy">
+        {status === 'copied' ? '✓' : status === 'failed' ? '✗' : '⧉'}
+      </button>
+    </Tooltip>
   )
 }
 
@@ -174,11 +172,29 @@ export function SafeTxPreview({ txs }: { txs: readonly SafeTx[] }) {
   )
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
+export function Field({
+  label,
+  hint,
+  info,
+  error,
+  children,
+}: {
+  label: string
+  hint?: ReactNode
+  /** Explanatory copy behind an ⓘ next to the label. */
+  info?: ReactNode
+  /** Validation message for the input, shown in red directly under it. */
+  error?: string
+  children: ReactNode
+}) {
   return (
-    <label className="field">
-      <span className="field-label">{label}</span>
+    <label className={error ? 'field field-invalid' : 'field'}>
+      <span className="field-label">
+        {label}
+        {info && <InfoTip>{info}</InfoTip>}
+      </span>
       {children}
+      {error && <span className="field-error">{error}</span>}
       {hint && <span className="field-hint">{hint}</span>}
     </label>
   )

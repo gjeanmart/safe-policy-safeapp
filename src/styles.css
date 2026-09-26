@@ -694,3 +694,67 @@ select:focus-visible {
   flex-wrap: nowrap;
   white-space: nowrap;
 }
+
+.field-error {
+  font-size: 12px;
+  color: var(--bad);
+}
+
+.field-invalid input,
+.field-invalid select,
+.input-invalid {
+  border-color: var(--bad);
+}
+
+/* Tooltips: rendered in a portal with fixed positioning (see Tooltip.tsx). */
+.tooltip-anchor {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Disabled buttons swallow mouse events; let the anchor receive them so the tooltip still shows. */
+.tooltip-anchor > button:disabled {
+  pointer-events: none;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 320px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  /* Long hex values (addresses, roots) wrap inside the bubble instead of overflowing it. */
+  overflow-wrap: anywhere;
+  background: var(--text);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+  pointer-events: none;
+}
+
+.info-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: help;
+  border-radius: 50%;
+}
+
+.info-icon:hover,
+.info-icon:focus-visible {
+  color: var(--text);
+  outline: none;
+}
+
+/* Field labels are block-ish spans; keep the ⓘ inline with the label text. */
+.field-label {
+  display: inline-flex;
+  align-items: center;
+}

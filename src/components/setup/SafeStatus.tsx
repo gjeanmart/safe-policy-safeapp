@@ -2,10 +2,11 @@ import { type Address, isAddressEqual, zeroAddress } from 'viem'
 import { GUARDS } from '../../config/contracts'
 import { useSandbox } from '../../context'
 import { useGuardTiming } from '../../hooks/useGuardTiming'
-import { formatDuration } from '../../lib/format'
+import { formatDuration, shortAddress } from '../../lib/format'
 import { type SafeTx, isKnownGuard, safeTxs } from '../../lib/safe'
 import { guardPaths, rolesStore, settingsStore } from '../../store'
 import { ProposeIconButton } from '../ProposeIconButton'
+import { InfoTip } from '../Tooltip'
 import { AddressView, Badge, Card, Notice } from '../ui'
 
 /** A guard slot, with a trash icon proposing its removal (`setModuleGuard(0)` / `setGuard(0)`). */
@@ -113,7 +114,7 @@ export function SafeStatus() {
                   <AddressView address={m} /> {roleLabel(m) && <Badge tone="ok">{roleLabel(m)}</Badge>}{' '}
                   <ProposeIconButton
                     txs={[safeTxs.disableModule(state, m)]}
-                    title={`Disable module ${m}: proposes disableModule to the owners`}
+                    title={`Disable module ${roleLabel(m) ?? shortAddress(m)}: proposes disableModule to the owners.`}
                   />
                 </li>
               ))}
@@ -148,27 +149,29 @@ export function SafeStatus() {
           </label>
           <span className="row">
             Enforce on:
-            <label
-              className="row"
-              title="Install as module guard (setModuleGuard): transactions from enabled modules (execTransactionFromModule) go through the policies."
-            >
+            <label className="row">
               <input
                 type="checkbox"
                 checked={paths.module}
                 onChange={(e) => settingsStore.set((s) => ({ ...s, guardModulePath: e.target.checked }))}
               />
               module path
+              <InfoTip>
+                Installs the guard as module guard (setModuleGuard): transactions from enabled modules
+                (execTransactionFromModule) go through the policies.
+              </InfoTip>
             </label>
-            <label
-              className="row"
-              title="Install as transaction guard (setGuard): multisig transactions (execTransaction) go through the same default-deny policies, and removing a guard needs a delayed AllowPolicy."
-            >
+            <label className="row">
               <input
                 type="checkbox"
                 checked={paths.multisig}
                 onChange={(e) => settingsStore.set((s) => ({ ...s, guardOwnerPath: e.target.checked }))}
               />
               multisig path
+              <InfoTip>
+                Installs the guard as transaction guard (setGuard): multisig transactions (execTransaction) go
+                through the same default-deny policies, and removing a guard then needs a delayed AllowPolicy.
+              </InfoTip>
             </label>
           </span>
         </div>
