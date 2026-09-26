@@ -1,0 +1,15 @@
+// Cloudflare Workers (static assets) configuration, used by Workers Builds for deploys and previews.
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  // Must match the Worker name in the Cloudflare dashboard.
+  "name": "safe-policy-safeapp",
+  "compatibility_date": "2026-09-26",
+  "assets": {
+    // Output of `pnpm build`; public/_headers is copied here and applied by Cloudflare.
+    "directory": "./dist",
+    // Unknown paths serve index.html (same behaviour as the current deployment).
+    "not_found_handling": "single-page-application",
+  },
+  // Enables `wrangler preview` (per-branch / pull request preview deployments). Empty = inherit the settings above.
+  "previews": {},
+}
