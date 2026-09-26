@@ -8,9 +8,13 @@ import {
   isHex,
   toFunctionSelector,
 } from 'viem'
+import { guardAbi } from '../../abi'
+import { publicClient } from '../../config/client'
 import { ADDRESS_BOOK, POLICIES, TOKENS } from '../../config/contracts'
 import { useSandbox } from '../../context'
+import { useAsync } from '../../hooks/useAsync'
 import { useGuardTiming } from '../../hooks/useGuardTiming'
+import { useNow } from '../../hooks/useNow'
 import {
   type Configuration,
   Operation,
@@ -21,11 +25,15 @@ import {
   describeConfigurationData,
   templates,
 } from '../../lib/configurations'
+import { formatDuration } from '../../lib/format'
 import { isModuleEnabled, safeTxs, type SafeTx } from '../../lib/safe'
-import { draftStore, pendingStore, rolesStore, settingsStore } from '../../store'
+import { draftStore, guardPaths, pendingStore, rolesStore, settingsStore } from '../../store'
+import { AddressShortcuts } from '../AddressShortcuts'
 import { ProposeButton } from '../ProposeButton'
 import { ConfirmIconButton } from '../ConfirmIconButton'
 import { AddressView, Card, Field, Notice } from '../ui'
+
+const ROOT_REFRESH_MS = 5_000
 
 const TEMPLATE_OPTIONS = {
   erc20Transfer: 'ERC-20 transfer to allowlisted recipients',
@@ -49,6 +57,13 @@ function parseSelector(input: string): Hex | undefined {
   } catch {
     return undefined
   }
+}
+
+/** Adds `address` to a comma-separated list, unless it is already in it. */
+function appendAddress(list: string, address: Address): string {
+  const parts = list.split(/[\s,]+/).filter(Boolean)
+  if (parts.some((p) => p.toLowerCase() === address.toLowerCase())) return list
+  return [...parts, address].join(', ')
 }
 
 const parseAddresses = (input: string): Address[] | undefined => {
@@ -137,8 +152,14 @@ function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => void }) 
           </Field>
         )}
         {needsRecipients && (
-          <Field label="Recipients" hint="Comma or space separated">
+          <Field
+            label="Recipients"
+            hint="Comma or space separated; the links below add an address to the list"
+          >
             <input value={recipients} onChange={(e) => setRecipients(e.target.value)} placeholder="0x…" />
+            <AddressShortcuts
+              onPick={(address) => setRecipients((current) => appendAddress(current, address))}
+            />
           </Field>
         )}
         {template === 'erc20Transfer' && (
@@ -295,9 +316,38 @@ export function PolicyBuilder() {
   const roles = rolesStore.use()
   const settings = settingsStore.use()
   const timing = useGuardTiming(guard)
+  const now = useNow()
   const [bootstrapRoles, setBootstrapRoles] = useState<Address[]>([])
+  const paths = guardPaths(settings)
+  const installGuard = paths.module || paths.multisig
 
   const root = configurationRoot(draft)
+  // Re-building a configuration gives the same root; requesting it again while it is pending
+  // reverts (RootAlreadyConfigured), so detect it and offer to apply instead.
+  const requested = useAsync(
+    () =>
+      draft.length
+        ? publicClient.readContract({
+            address: guard,
+            abi: guardAbi,
+            functionName: 'rootConfigured',
+            args: [safe, root],
+          })
+        : Promise.resolve(0n),
+    `${guard}:${safe}:${root}`,
+    ROOT_REFRESH_MS,
+  )
+  const validFrom = Number(requested.data ?? 0n)
+  const expiry = Number(timing.data?.expiry ?? 0n)
+  const rootStatus =
+    validFrom === 0 || !timing.data
+      ? 'none'
+      : now < validFrom
+        ? 'pending'
+        : now < validFrom + expiry
+          ? 'ready'
+          : 'expired'
+  const forgetPending = () => pendingStore.set((list) => list.filter((p) => p.root !== root))
   const rememberPending = () =>
     pendingStore.set((list) => [
       ...list.filter((p) => p.root !== root),
@@ -308,7 +358,35 @@ export function PolicyBuilder() {
   const disabledRoles = state ? roles.filter((r) => !isModuleEnabled(state, r.address)) : []
 
   let action: { label: string; txs: SafeTx[]; onProposed: () => void; help: string }
-  if (!guardInstalled) {
+  if (draft.length && rootStatus === 'pending') {
+    action = {
+      label: 'Already requested',
+      help: `This exact configuration was already requested; it can be applied in ${formatDuration(validFrom - now)}.`,
+      txs: [],
+      onProposed: () => undefined,
+    }
+  } else if (draft.length && rootStatus === 'ready') {
+    action = {
+      label: 'Propose apply',
+      help:
+        'This exact configuration was already requested and has matured: apply it (works whether or not the ' +
+        'guard is installed).',
+      txs: [safeTxs.applyConfiguration(guard, draft)],
+      onProposed: () => {
+        forgetPending()
+        draftStore.set([])
+      },
+    }
+  } else if (!guardInstalled && !installGuard) {
+    action = {
+      label: 'Propose configureImmediately',
+      help:
+        'No guard installed: the configurations are written instantly and the guard stays uninstalled ' +
+        '(e.g. to clean up policies after removing it). Nothing is enforced until a guard is installed.',
+      txs: draft.length ? [safeTxs.configureImmediately(guard, draft)] : [],
+      onProposed: () => draftStore.set([]),
+    }
+  } else if (!guardInstalled) {
     action = {
       label: 'Propose bootstrap batch',
       help:
@@ -317,8 +395,8 @@ export function PolicyBuilder() {
       txs: [
         ...(draft.length ? [safeTxs.configureImmediately(guard, draft)] : []),
         ...bootstrapRoles.map((r) => safeTxs.enableModule(safe, r)),
-        safeTxs.setModuleGuard(safe, guard),
-        ...(settings.guardOwnerPath ? [safeTxs.setGuard(safe, guard)] : []),
+        ...(paths.module ? [safeTxs.setModuleGuard(safe, guard)] : []),
+        ...(paths.multisig ? [safeTxs.setGuard(safe, guard)] : []),
       ],
       onProposed: () => draftStore.set([]),
     }
@@ -362,7 +440,7 @@ export function PolicyBuilder() {
         </>
       )}
 
-      {!guardInstalled && disabledRoles.length > 0 && (
+      {!guardInstalled && paths.module && disabledRoles.length > 0 && (
         // A plain group, not <Field>: that renders a <label>, which must not contain the checkbox labels.
         <div className="field">
           <span className="field-label">Also make these roles modules (enableModule) in this batch</span>
@@ -400,7 +478,13 @@ export function PolicyBuilder() {
       <ProposeButton
         label={action.label}
         title={action.help}
-        txs={guardInstalled && draft.length === 0 ? [] : action.txs}
+        txs={
+          // Never install the multisig-path guard alone: modules would bypass every policy.
+          (!guardInstalled && paths.multisig && !paths.module) ||
+          ((guardInstalled || !installGuard) && draft.length === 0)
+            ? []
+            : action.txs
+        }
         onProposed={action.onProposed}
       />
     </Card>

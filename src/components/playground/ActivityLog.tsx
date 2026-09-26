@@ -7,6 +7,7 @@ const TONES: Record<Activity['status'], 'ok' | 'warn' | 'bad' | 'neutral'> = {
   confirmed: 'ok',
   denied: 'bad',
   reverted: 'bad',
+  failed: 'bad',
   sent: 'warn',
   info: 'neutral',
 }

@@ -17,11 +17,19 @@ export type Settings = {
   standaloneSafe?: Address
   /** Guard to install when bootstrapping (the installed one always takes precedence). */
   guard: Address
-  /** Also install the guard as transaction guard, i.e. policies apply to owners too. */
+  /** Install the guard as module guard (`setModuleGuard`): policies apply to modules. Default on. */
+  guardModulePath?: boolean
+  /** Install the guard as transaction guard (`setGuard`): policies apply to the multisig too. */
   guardOwnerPath: boolean
 }
 
 export const settingsStore = persisted<Settings>('settings', { guard: DEFAULT_GUARD, guardOwnerPath: false })
+
+/** Which guard slots the bootstrap batch installs; settings saved before `guardModulePath` default to on. */
+export const guardPaths = (settings: Settings) => ({
+  module: settings.guardModulePath ?? true,
+  multisig: settings.guardOwnerPath,
+})
 
 /**
  * A configuration set whose root was (or is about to be) requested. The guard only stores the
@@ -50,7 +58,8 @@ export type Activity = {
   /** Optional: entries logged before this field existed carry the mode as a label prefix. */
   mode?: ActivityMode
   label: string
-  status: 'allowed' | 'denied' | 'sent' | 'confirmed' | 'reverted' | 'info'
+  /** failed: could not run at all (gas, RPC, CoW API…), as opposed to a policy decision (denied). */
+  status: 'allowed' | 'denied' | 'sent' | 'confirmed' | 'reverted' | 'failed' | 'info'
   detail?: string
   txHash?: Hash
   link?: string

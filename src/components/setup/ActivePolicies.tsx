@@ -91,15 +91,24 @@ export function ActivePolicies() {
 
   return (
     <Card
-      title={`Active policies (${active.length})`}
+      title={`${guardInstalled ? 'Active' : 'Stored'} policies (${active.length})`}
       actions={
         <RefreshButton onClick={() => scan()} title="Scan new PolicyConfirmed events since the last scan" />
       }
     >
       <p className="muted small">
         Rebuilt from PolicyConfirmed events (the guard has no enumeration getter). Scanned up to block{' '}
-        {history?.scannedTo ?? '—'}. Anything not listed is denied for modules (no fallback configured).
+        {history?.scannedTo ?? '—'}.
+        {guardInstalled && ' Anything not listed is denied for modules (no fallback configured).'}
       </p>
+      {!guardInstalled && active.length > 0 && (
+        <Notice tone="warn">
+          <strong>Stored, not enforced:</strong> these bindings are still recorded in this guard for the Safe,
+          but the guard is not installed, so nothing is checked. They would apply again if this guard were
+          re-installed. To clear them, use the trash icons, untick both &quot;Enforce on&quot; paths under
+          Safe status, and propose the draft (or apply an already-requested removal).
+        </Notice>
+      )}
       {active.length === 0 ? (
         <Notice>No policy bindings found for this Safe on this guard.</Notice>
       ) : (

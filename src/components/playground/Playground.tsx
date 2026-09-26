@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { type Address, type Hex, encodeFunctionData, getAddress, isAddress, isHex, parseUnits } from 'viem'
+import { type Hex, encodeFunctionData, getAddress, isAddress, isHex, parseUnits } from 'viem'
 import { erc20Abi } from '../../abi'
 import { TOKENS, type Token } from '../../config/contracts'
 import { useSandbox } from '../../context'
@@ -12,6 +12,7 @@ import { ActivityLog } from './ActivityLog'
 import { CowSwap } from './CowSwap'
 import { ETH, SafeBalance } from './SafeBalance'
 import { StepRunner } from './StepRunner'
+import { AddressShortcuts } from '../AddressShortcuts'
 
 const ACTIONS = {
   erc20: 'ERC-20 transfer',
@@ -25,29 +26,10 @@ const tokenList = Object.values(TOKENS) as Token[]
 
 /** Recipient input with shortcuts to the Safe, its owners and the local roles. */
 function RecipientInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  const { safe, state } = useSandbox()
-  const roles = rolesStore.use()
-  const shortcuts: { label: string; address: Address }[] = [
-    { label: 'Safe', address: safe },
-    ...(state?.owners ?? []).map((address, i) => ({ label: `Owner ${i + 1}`, address })),
-    ...roles.map((r) => ({ label: r.label, address: r.address })),
-  ]
   return (
     <Field label="Recipient">
       <input value={value} onChange={(e) => onChange(e.target.value.trim())} placeholder="0x…" />
-      <span className="row wrap small">
-        {shortcuts.map((s) => (
-          <button
-            key={`${s.label}${s.address}`}
-            type="button"
-            className="link"
-            title={s.address}
-            onClick={() => onChange(s.address)}
-          >
-            {s.label}
-          </button>
-        ))}
-      </span>
+      <AddressShortcuts onPick={onChange} />
     </Field>
   )
 }

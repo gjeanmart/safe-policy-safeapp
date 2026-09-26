@@ -196,10 +196,21 @@ select {
   font: inherit;
 }
 
+/* Buttons keep their natural size; an inline error wraps under its button instead of widening it. */
 .async-button {
   display: inline-flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 2px;
+  max-width: 100%;
+}
+
+.async-button .error-text {
+  max-width: 280px;
+}
+
+.step-actions {
+  align-items: flex-start;
 }
 
 .error-text {
@@ -412,8 +423,16 @@ details summary {
   }
 }
 
+/* Status on the left gets the room it needs on one line; modules sit further right. */
 .status-grid {
-  column-gap: 48px;
+  grid-template-columns: minmax(max-content, 3fr) minmax(240px, 2fr);
+  column-gap: 64px;
+}
+
+@media (max-width: 900px) {
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Icon-only actions (e.g. trash): muted until hovered, danger colour on hover. */
@@ -647,4 +666,31 @@ select:focus-visible {
 
 .preset-links .link {
   padding: 0;
+}
+
+/* Two-column label / value list (Safe status). Values stay on one line. */
+.kv-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 16px;
+  row-gap: 6px;
+  align-items: center;
+  align-content: start;
+}
+
+.kv-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.kv-value .badge {
+  margin-left: 0;
+}
+
+/* Keep a guard's name, address and copy button together. */
+.kv-value .address {
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
