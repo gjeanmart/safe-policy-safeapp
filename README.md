@@ -54,18 +54,6 @@ Requirements: a **Safe v1.5.0** (the module guard doesn't exist in 1.4.1), funde
 CI (`.github/workflows/ci.yml`) runs typecheck, build, lint, format check and `pnpm audit --prod` on every push to
 `main` and on pull requests.
 
-## Deploy (Cloudflare Pages)
-
-Static site, no backend. In Cloudflare Pages, connect the GitHub repo with:
-
-- Framework preset: **Vite** (or none)
-- Build command: `pnpm build` (pnpm is detected from `pnpm-lock.yaml` / `packageManager`)
-- Build output directory: `dist`
-- Node version: taken from `.nvmrc` (22)
-
-`public/_headers` sets the security headers below and the CORS headers Safe{Wallet} needs to fetch `manifest.json`.
-Then add the Pages URL as a custom Safe App.
-
 ## Walkthrough
 
 1. **Roles**: generate an EOA, top it up with gas from the Safe, and optionally enable it as a module.
