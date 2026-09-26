@@ -17,9 +17,11 @@ multisig keeps working as before.
 
 ## Run
 
+Requires Node 22 (`.nvmrc`) and [pnpm](https://pnpm.io) 10 (`corepack enable` picks the pinned version).
+
 ```bash
-npm install
-npm run dev          # http://localhost:5173
+pnpm install
+pnpm dev             # http://localhost:5173
 ```
 
 Safe{Wallet} must reach the app over public HTTPS, e.g. with a Cloudflare quick tunnel:
@@ -41,28 +43,42 @@ Requirements: a **Safe v1.5.0** (the module guard doesn't exist in 1.4.1), funde
 
 ## Scripts
 
-| Command                | What it does                        |
-| ---------------------- | ----------------------------------- |
-| `npm run dev`          | Vite dev server on port 5173        |
-| `npm run build`        | Typecheck + production build (dist) |
-| `npm run typecheck`    | TypeScript only                     |
-| `npm run lint`         | ESLint                              |
-| `npm run format:check` | Prettier check (`format` to fix)    |
+| Command             | What it does                        |
+| ------------------- | ----------------------------------- |
+| `pnpm dev`          | Vite dev server on port 5173        |
+| `pnpm build`        | Typecheck + production build (dist) |
+| `pnpm typecheck`    | TypeScript only                     |
+| `pnpm lint`         | ESLint                              |
+| `pnpm format:check` | Prettier check (`format` to fix)    |
 
-CI (`.github/workflows/ci.yml`) runs typecheck, build, lint and format check on every push to `main` and on
-pull requests.
+CI (`.github/workflows/ci.yml`) runs typecheck, build, lint, format check and `pnpm audit --prod` on every push to
+`main` and on pull requests.
 
 ## Deploy (Cloudflare Pages)
 
 Static site, no backend. In Cloudflare Pages, connect the GitHub repo with:
 
 - Framework preset: **Vite** (or none)
-- Build command: `npm run build`
+- Build command: `pnpm build` (pnpm is detected from `pnpm-lock.yaml` / `packageManager`)
 - Build output directory: `dist`
 - Node version: taken from `.nvmrc` (22)
 
-`public/_headers` adds the CORS headers Safe{Wallet} needs to fetch `manifest.json`. Then add the Pages URL as a
-custom Safe App.
+`public/_headers` sets the security headers below and the CORS headers Safe{Wallet} needs to fetch `manifest.json`.
+Then add the Pages URL as a custom Safe App.
+
+## Security
+
+Proportionate hardening for a PoC (it does not make it safe for real funds):
+
+- **Framing / messaging**: the CSP `frame-ancestors` and the Safe Apps SDK `allowedDomains` only accept Safe{Wallet}
+  (`app.safe.global`, `*.5afe.dev`, localhost), so another site cannot embed the app and impersonate the wallet.
+- **Content Security Policy** (`public/_headers`): scripts and styles from the app origin only, no inline code, no
+  plugins; plus `nosniff`, `Referrer-Policy: no-referrer` and a restrictive `Permissions-Policy`.
+- **RPC**: only `https://` endpoints (plain `http://` for localhost), no credentials in the URL; the stored value
+  is re-validated on read.
+- **Keys**: generated in the browser, masked on import (no autofill/spellcheck), shown truncated.
+- **Supply chain**: pnpm with a frozen lockfile, dependency install scripts blocked, `minimumReleaseAge` of 1 day,
+  Dependabot with a cooldown, and GitHub Actions pinned to commit SHAs with read-only permissions.
 
 ## Walkthrough
 

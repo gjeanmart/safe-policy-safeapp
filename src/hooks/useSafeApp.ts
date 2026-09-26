@@ -9,7 +9,21 @@ export type SafeAppConnection =
   | { mode: 'standalone' }
   | { mode: 'safe-app'; safe: Address; chainId: number; propose: (txs: SafeTx[]) => Promise<string> }
 
-const sdk = new SafeAppsSDK()
+/**
+ * Only accept postMessage traffic from Safe{Wallet} itself, so another site embedding this app in
+ * an iframe cannot impersonate it (fake Safe address, fake proposal results). Keep in sync with
+ * `frame-ancestors` in public/_headers.
+ */
+const SAFE_WALLET_ORIGINS = [
+  // Production
+  /^https:\/\/app\.safe\.global$/,
+  // Safe{Wallet} staging / dev / preview deployments
+  /^https:\/\/([a-z0-9-]+\.)*5afe\.dev$/,
+  // A locally running Safe{Wallet}
+  /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/,
+]
+
+const sdk = new SafeAppsSDK({ allowedDomains: SAFE_WALLET_ORIGINS })
 
 /** How long to wait for Safe{Wallet} to answer before assuming we are not in its iframe. */
 const HANDSHAKE_TIMEOUT_MS = 1500

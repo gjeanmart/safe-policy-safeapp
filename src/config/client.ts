@@ -18,7 +18,26 @@ export const DEFAULT_RPC_URL: string = RPC_PRESETS[0].url
 /** User-chosen RPC URL (Settings tab); `undefined` means the default. */
 export const rpcUrlStore = persisted<string | undefined>('rpc-url', undefined)
 
-export const rpcUrl = (): string => rpcUrlStore.get() ?? DEFAULT_RPC_URL
+/**
+ * Accepts HTTPS endpoints, plus plain HTTP only for a local node. Keeps traffic (including signed
+ * role transactions) off cleartext connections.
+ */
+export function isAllowedRpcUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    if (url.username || url.password) return false
+    if (url.protocol === 'https:') return true
+    return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+/** The stored URL is re-validated on read, in case localStorage was edited by hand. */
+export const rpcUrl = (): string => {
+  const stored = rpcUrlStore.get()
+  return stored && isAllowedRpcUrl(stored) ? stored : DEFAULT_RPC_URL
+}
 
 const createClient = (url: string) =>
   createPublicClient({ chain, transport: http(url), batch: { multicall: true } })

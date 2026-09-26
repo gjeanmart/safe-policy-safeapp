@@ -1,6 +1,14 @@
 import { useState } from 'react'
 import { createPublicClient, http } from 'viem'
-import { DEFAULT_RPC_URL, LOGS_BLOCK_RANGE, RPC_PRESETS, chain, rpcUrl, rpcUrlStore } from '../config/client'
+import {
+  DEFAULT_RPC_URL,
+  LOGS_BLOCK_RANGE,
+  RPC_PRESETS,
+  chain,
+  isAllowedRpcUrl,
+  rpcUrl,
+  rpcUrlStore,
+} from '../config/client'
 import { GUARDS } from '../config/contracts'
 import { describeError } from '../lib/errors'
 import { AsyncButton, Badge, Card, Field, Notice } from './ui'
@@ -38,7 +46,7 @@ export function SettingsPanel() {
   const [result, setResult] = useState<CheckResult>()
 
   const current = saved ?? DEFAULT_RPC_URL
-  const isValidUrl = /^https?:\/\/\S+$/.test(input.trim())
+  const isValidUrl = isAllowedRpcUrl(input)
 
   // Every cached read came from the previous endpoint: reload so all data is refetched.
   const apply = (url: string | undefined) => {
@@ -60,7 +68,14 @@ export function SettingsPanel() {
       </p>
 
       <div className="stack">
-        <Field label="RPC URL">
+        <Field
+          label="RPC URL"
+          hint={
+            input && !isValidUrl
+              ? 'Must be https:// (plain http:// only for localhost), without credentials in the URL.'
+              : undefined
+          }
+        >
           <input
             className="mono"
             value={input}

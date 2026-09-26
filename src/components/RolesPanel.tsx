@@ -86,6 +86,10 @@ export function RolesPanel() {
           </button>
           <input
             placeholder="…or import a private key (0x…)"
+            // Masked and kept out of autofill / spellcheck services.
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
             value={importKey}
             onChange={(e) => setImportKey(e.target.value.trim())}
             className="grow"

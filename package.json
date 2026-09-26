@@ -8,8 +8,10 @@
     "type": "git",
     "url": "https://github.com/gjeanmart/safe-policy-safeapp.git"
   },
+  "packageManager": "pnpm@10.30.3",
   "engines": {
-    "node": ">=20.19"
+    "node": ">=20.19",
+    "pnpm": ">=10.16"
   },
   "scripts": {
     "dev": "vite",

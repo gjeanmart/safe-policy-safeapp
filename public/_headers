@@ -1,4 +1,16 @@
-# Cloudflare Pages headers. Safe{Wallet} fetches the manifest cross-origin before loading the app.
+# Cloudflare Pages response headers.
+#
+# CSP: scripts and styles only from this origin (Vite emits no inline code). Network calls go to the
+# user-selected RPC (any https, or a local node) and the CoW API. Only Safe{Wallet} may frame the
+# app (production, *.5afe.dev deployments, local); keep in sync with SAFE_WALLET_ORIGINS in
+# src/hooks/useSafeApp.ts. X-Frame-Options is not set because it cannot express that allowlist.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; frame-ancestors https://app.safe.global https://*.5afe.dev http://localhost:* http://127.0.0.1:*; base-uri 'self'; form-action 'none'; object-src 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+
+# Safe{Wallet} fetches the manifest cross-origin before loading the app.
 /manifest.json
   Access-Control-Allow-Origin: *
   Access-Control-Allow-Methods: GET
