@@ -11,6 +11,8 @@ export type PersistedStore<T> = {
   get: () => T
   set: (next: T | ((previous: T) => T)) => void
   use: () => T
+  /** Non-React subscription; listeners run in registration order. */
+  subscribe: (listener: () => void) => () => void
 }
 
 /** A tiny localStorage-backed store with a React hook, shared across components. */
@@ -29,7 +31,8 @@ export function persisted<T>(key: string, initial: T): PersistedStore<T> {
   const set: PersistedStore<T>['set'] = (next) => {
     value = typeof next === 'function' ? (next as (previous: T) => T)(value) : next
     try {
-      localStorage.setItem(storageKey, JSON.stringify(value, replacer))
+      if (value === undefined) localStorage.removeItem(storageKey)
+      else localStorage.setItem(storageKey, JSON.stringify(value, replacer))
     } catch {
       // Storage full or blocked; keep the in-memory value.
     }
@@ -40,5 +43,5 @@ export function persisted<T>(key: string, initial: T): PersistedStore<T> {
     return () => listeners.delete(listener)
   }
 
-  return { get, set, use: () => useSyncExternalStore(subscribe, get) }
+  return { get, set, subscribe, use: () => useSyncExternalStore(subscribe, get) }
 }

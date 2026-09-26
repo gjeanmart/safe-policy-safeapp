@@ -638,3 +638,13 @@ select:focus-visible {
 .rescan-row {
   margin-top: 8px;
 }
+
+.preset-links {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.preset-links .link {
+  padding: 0;
+}

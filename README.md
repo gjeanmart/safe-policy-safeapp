@@ -6,8 +6,14 @@ A Safe App to experiment with the [Safe Policy Engine](https://github.com/safe-r
 plug plain EOAs into a Safe as **modules** and scope what they can do with `SafePolicyGuard` policies, while the
 multisig keeps working as before.
 
-> Research / PoC code. The policy contracts are unaudited, and role private keys are stored unencrypted in
-> localStorage. Sepolia only.
+> [!CAUTION]
+>
+> ## ⚠️ Research / PoC code — do not use with real funds
+>
+> - 🧪 **Sepolia testnet only.**
+> - 🔓 **The policy contracts are unaudited** and may contain serious security holes.
+> - 🔑 **Role private keys are stored unencrypted in the browser's localStorage.** Anyone with access to the
+>   browser (or a malicious script on the page) can read them.
 
 ## Run
 
@@ -27,8 +33,8 @@ tunnel URL. `*.trycloudflare.com` is already in Vite's `server.allowedHosts`; ad
 named tunnel on a custom domain. Opened directly in a browser, the app runs in standalone mode: you can inspect a Safe and
 act as its modules, but not propose multisig transactions.
 
-Optional: set `VITE_RPC_URL` (e.g. in `.env.local`) to use another Sepolia RPC. The default is
-`https://ethereum-sepolia-rpc.publicnode.com`.
+The Sepolia RPC defaults to `https://ethereum-sepolia-rpc.publicnode.com` and can be changed in the **Settings** tab
+(stored in the browser; the **Test** button checks the chain id, CORS and `eth_getLogs` over 50k blocks).
 
 Requirements: a **Safe v1.5.0** (the module guard doesn't exist in 1.4.1), funded with Sepolia ETH and
 [Circle USDC](https://faucet.circle.com/).
@@ -54,7 +60,6 @@ Static site, no backend. In Cloudflare Pages, connect the GitHub repo with:
 - Build command: `npm run build`
 - Build output directory: `dist`
 - Node version: taken from `.nvmrc` (22)
-- Optional env var: `VITE_RPC_URL`
 
 `public/_headers` adds the CORS headers Safe{Wallet} needs to fetch `manifest.json`. Then add the Pages URL as a
 custom Safe App.

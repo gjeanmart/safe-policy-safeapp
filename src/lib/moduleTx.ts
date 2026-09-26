@@ -1,7 +1,7 @@
 import { type Address, type Hash, type Hex, createWalletClient, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { guardAbi, policyErrorsAbi, safeAbi } from '../abi'
-import { RPC_URL, chain, publicClient } from '../config/client'
+import { chain, publicClient, rpcUrl } from '../config/client'
 import type { Operation } from './configurations'
 import { describeError } from './errors'
 
@@ -43,7 +43,7 @@ export async function sendModuleTx(
   { force = false }: { force?: boolean } = {},
 ): Promise<Hash> {
   const account = privateKeyToAccount(privateKey)
-  const wallet = createWalletClient({ account, chain, transport: http(RPC_URL) })
+  const wallet = createWalletClient({ account, chain, transport: http(rpcUrl()) })
   return wallet.writeContract({
     account,
     address: safe,

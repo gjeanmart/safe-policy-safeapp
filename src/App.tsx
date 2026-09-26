@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { type Address, getAddress, isAddress, zeroAddress } from 'viem'
 import { RolesPanel } from './components/RolesPanel'
 import { Notes } from './components/Notes'
+import { SettingsPanel } from './components/SettingsPanel'
 import { Playground } from './components/playground/Playground'
 import { SetupPanel } from './components/setup/SetupPanel'
 import { AddressView, Badge, Notice } from './components/ui'
@@ -18,6 +19,7 @@ const TABS = {
   setup: '2 · Guard & policies',
   playground: '3 · Playground',
   notes: 'Notes',
+  settings: 'Settings',
 } as const
 type TabKey = keyof typeof TABS
 
@@ -119,6 +121,7 @@ function Workspace({ safe, propose }: { safe: Address; propose?: Sandbox['propos
         {tab === 'setup' && <SetupPanel />}
         {tab === 'playground' && <Playground />}
         {tab === 'notes' && <Notes />}
+        {tab === 'settings' && <SettingsPanel />}
       </main>
     </SandboxContext.Provider>
   )
