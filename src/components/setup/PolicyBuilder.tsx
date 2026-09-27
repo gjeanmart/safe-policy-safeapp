@@ -14,6 +14,7 @@ import {
   Operation,
   Permission,
   SELECTOR_LABELS,
+  accessKey,
   addToDraft,
   configurationRoot,
   configurationRows,
@@ -22,12 +23,22 @@ import {
   templates,
 } from '../../lib/configurations'
 import { formatDuration } from '../../lib/format'
+import { activePolicies } from '../../lib/policyEvents'
 import { isModuleEnabled, safeTxs, type SafeTx } from '../../lib/safe'
 import { fieldError, parseAddressInput, parseAddressList, parseSelectorInput } from '../../lib/validation'
-import { draftStore, guardPaths, pendingStore, rolesStore, settingsStore } from '../../store'
+import {
+  draftStore,
+  guardPaths,
+  historyKey,
+  pendingStore,
+  policyHistoryStore,
+  rolesStore,
+  settingsStore,
+} from '../../store'
 import { AddressShortcuts } from '../AddressShortcuts'
 import { ProposeButton } from '../ProposeButton'
 import { ConfirmIconButton } from '../ConfirmIconButton'
+import { MinusIcon, PencilIcon, PlusIcon } from '../icons'
 import { InfoTip, Tooltip } from '../Tooltip'
 import { AddressView, Card, Field, Notice, Tag } from '../ui'
 
@@ -250,11 +261,9 @@ function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => DraftAdd
       )}
 
       <div className="row">
-        <Tooltip content="Add the configuration(s) from this template to the draft below">
-          <button type="button" className="btn btn-primary" onClick={submit}>
-            Add to draft
-          </button>
-        </Tooltip>
+        <button type="button" className="btn btn-primary" onClick={submit}>
+          Add to draft
+        </button>
         {feedback && <span className="muted small">{feedback}</span>}
       </div>
     </div>
@@ -323,12 +332,42 @@ function RemovalSummary({ row }: { row: ConfigurationRow }) {
   )
 }
 
+type ChangeKind = 'add' | 'update' | 'remove'
+
+const CHANGE_ICONS: Record<ChangeKind, ReactNode> = {
+  add: <PlusIcon />,
+  update: <PencilIcon />,
+  remove: <MinusIcon />,
+}
+
+const CHANGE_TAGS: Record<ChangeKind, { tone: 'ok' | 'info' | 'bad'; label: string; tip: string }> = {
+  add: { tone: 'ok', label: 'Add', tip: 'New binding: this function has no policy yet.' },
+  update: {
+    tone: 'info',
+    label: 'Update',
+    tip: 'This function already has a policy: its policy or configuration (e.g. recipients) changes.',
+  },
+  remove: {
+    tone: 'bad',
+    label: 'Remove',
+    tip: "Revokes the policy's grants, then detaches the binding (policy 0x0).",
+  },
+}
+
+/** Access selectors that currently have a policy for the Safe on the selected guard. */
+export function useActiveKeys(): ReadonlySet<string> {
+  const { guard, safe } = useSandbox()
+  const history = policyHistoryStore.use()[historyKey(guard, safe)]
+  return new Set(activePolicies(history?.events ?? []).map(accessKey))
+}
+
 export function ConfigurationTable({
   configurations,
   onRemove,
   removeTitle = 'Remove this entry from the draft',
   renderConfig,
   rowState,
+  activeKeys,
 }: {
   configurations: readonly Configuration[]
   /** Called with every underlying index of the row (a removal spans two configurations). */
@@ -337,14 +376,19 @@ export function ConfigurationTable({
   /** Replaces the default summary in the Config cell (e.g. with live on-chain state). */
   renderConfig?: (configuration: Configuration) => ReactNode
   rowState?: (configuration: Configuration) => RowState | undefined
+  /** For proposed changes (draft, pending): adds a Change column telling add / update / remove apart. */
+  activeKeys?: ReadonlySet<string>
 }) {
   const rows = configurationRows(configurations)
   const hasActions = Boolean(onRemove || rowState)
+  const changeOf = (row: ConfigurationRow): ChangeKind =>
+    row.kind === 'remove' ? 'remove' : activeKeys?.has(accessKey(row.configuration)) ? 'update' : 'add'
   return (
     <div className="table-scroll">
       <table className="config-table">
         <thead>
           <tr>
+            {activeKeys && <th aria-label="Change" />}
             <th>Target</th>
             <th>Function</th>
             <th>Op</th>
@@ -357,8 +401,22 @@ export function ConfigurationTable({
           {rows.map((row) => {
             const c = row.configuration
             const state = rowState?.(c)
+            const change = activeKeys ? changeOf(row) : undefined
             return (
               <tr key={row.indices.join('-')} className={state?.muted ? 'row-muted' : undefined}>
+                {change && (
+                  <td>
+                    <Tooltip content={`${CHANGE_TAGS[change].label}: ${CHANGE_TAGS[change].tip}`}>
+                      <span
+                        className={`change-icon change-${change}`}
+                        role="img"
+                        aria-label={CHANGE_TAGS[change].label}
+                      >
+                        {CHANGE_ICONS[change]}
+                      </span>
+                    </Tooltip>
+                  </td>
+                )}
                 <td>
                   <AddressView address={c.target} />
                 </td>
@@ -369,9 +427,11 @@ export function ConfigurationTable({
                 <td>
                   {row.kind === 'remove' ? (
                     <span className="row">
-                      <Tag tone="bad" caps>
-                        remove
-                      </Tag>
+                      {!activeKeys && (
+                        <Tag tone="bad" caps>
+                          remove
+                        </Tag>
+                      )}
                       {!isDetach(c) && <PolicyTag policy={c.policy} />}
                     </span>
                   ) : (
@@ -411,6 +471,7 @@ export function PolicyBuilder() {
   const roles = rolesStore.use()
   const settings = settingsStore.use()
   const timing = useGuardTiming(guard)
+  const activeKeys = useActiveKeys()
   const now = useNow()
   const [bootstrapRoles, setBootstrapRoles] = useState<Address[]>([])
   const paths = guardPaths(settings)
@@ -533,6 +594,7 @@ export function PolicyBuilder() {
         <>
           <ConfigurationTable
             configurations={draft}
+            activeKeys={activeKeys}
             onRemove={(indices) => draftStore.set((d) => d.filter((_, i) => !indices.includes(i)))}
           />
           <p className="muted small">

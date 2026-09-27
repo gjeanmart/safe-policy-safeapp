@@ -608,11 +608,15 @@ select:focus-visible {
   margin-left: 0;
 }
 
-.activity-role,
-.activity-label {
+.activity-role {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The full action stays readable: long labels (addresses) wrap instead of being truncated. */
+.activity-label {
+  overflow-wrap: anywhere;
 }
 
 .activity-tx {
@@ -866,4 +870,31 @@ select:focus-visible {
 
 .notice-row {
   justify-content: space-between;
+}
+
+/* Proposed changes: a small round icon per row (add / update / remove). */
+.change-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 13px;
+  cursor: help;
+}
+
+.change-add {
+  color: var(--accent-ink);
+  background: #d9fbe8;
+}
+
+.change-update {
+  color: #3867d6;
+  background: #e5edff;
+}
+
+.change-remove {
+  color: var(--bad);
+  background: var(--bad-bg);
 }

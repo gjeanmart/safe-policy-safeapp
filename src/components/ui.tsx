@@ -90,11 +90,9 @@ export function CopyButton({ value }: { value: string }) {
     setTimeout(() => setStatus('idle'), 1200)
   }
   return (
-    <Tooltip content={status === 'failed' ? 'Copy failed' : status === 'copied' ? 'Copied' : 'Copy'}>
-      <button type="button" className="link" onClick={copy} aria-label="Copy">
-        {status === 'copied' ? '✓' : status === 'failed' ? '✗' : '⧉'}
-      </button>
-    </Tooltip>
+    <button type="button" className="link" onClick={copy} aria-label="Copy">
+      {status === 'copied' ? '✓' : status === 'failed' ? '✗' : '⧉'}
+    </button>
   )
 }
 

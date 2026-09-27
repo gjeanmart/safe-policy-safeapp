@@ -12,7 +12,7 @@ import { safeTxs } from '../../lib/safe'
 import { type PendingConfiguration, pendingStore } from '../../store'
 import { ProposeButton } from '../ProposeButton'
 import { Badge, Card } from '../ui'
-import { ConfigurationTable } from './PolicyBuilder'
+import { ConfigurationTable, useActiveKeys } from './PolicyBuilder'
 import { Tooltip } from '../Tooltip'
 
 const REFRESH_MS = 5_000
@@ -37,6 +37,7 @@ function statusOf(validFrom: bigint | undefined, expiry: bigint | undefined, now
 function PendingRow({ pending, expiry }: { pending: PendingConfiguration; expiry?: bigint }) {
   const { safe } = useSandbox()
   const now = useNow()
+  const activeKeys = useActiveKeys()
   const validFrom = useAsync(
     () =>
       publicClient.readContract({
@@ -81,7 +82,7 @@ function PendingRow({ pending, expiry }: { pending: PendingConfiguration; expiry
         )}
         {status.kind === 'expired' && <Badge tone="bad">expired</Badge>}
       </div>
-      <ConfigurationTable configurations={pending.configurations} />
+      <ConfigurationTable configurations={pending.configurations} activeKeys={activeKeys} />
       <div className="row wrap pending-actions">
         {status.kind === 'ready' && (
           <ProposeButton

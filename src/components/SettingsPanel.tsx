@@ -112,7 +112,6 @@ export function SettingsPanel() {
           <AsyncButton
             variant="primary"
             disabled={!isValidUrl || input === current}
-            title="Save and reload the app with this endpoint"
             onClick={() => apply(input === DEFAULT_RPC_URL ? undefined : input)}
           >
             Save &amp; reload

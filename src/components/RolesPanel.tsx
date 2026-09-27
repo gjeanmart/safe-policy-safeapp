@@ -249,18 +249,14 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
         />
       </td>
       <td>
-        <Tooltip
-          content={showKey ? 'Hide the private key' : 'Reveal the private key (e.g. to import it elsewhere)'}
+        <button
+          type="button"
+          className="link icon"
+          aria-label={showKey ? 'Hide key' : 'Show key'}
+          onClick={toggleKey}
         >
-          <button
-            type="button"
-            className="link icon"
-            aria-label={showKey ? 'Hide key' : 'Show key'}
-            onClick={toggleKey}
-          >
-            {showKey ? <EyeOffIcon /> : <EyeIcon />}
-          </button>
-        </Tooltip>
+          {showKey ? <EyeOffIcon /> : <EyeIcon />}
+        </button>
       </td>
       <td>
         <ConfirmIconButton

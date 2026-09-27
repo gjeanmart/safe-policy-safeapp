@@ -113,18 +113,14 @@ export function ActivePolicies() {
         .flatMap((row) => row.indices)
       return d.filter((_, i) => !drop.includes(i))
     })
+  // A leaving binding is shown dimmed; the explanation sits on the icon in its action column.
   const rowState = (c: Configuration): RowState | undefined => {
     const key = accessKey(c)
     if (draftRemovals.has(key)) {
       return {
         muted: true,
-        badge: (
-          <Tooltip content="Still enforced. The removal is in the Policy builder draft below: propose it from there.">
-            <Badge tone="warn">removal in draft</Badge>
-          </Tooltip>
-        ),
         action: (
-          <Tooltip content="Undo: take this removal out of the draft">
+          <Tooltip content="Removal in the draft below (still enforced until proposed and applied). Click to undo it.">
             <button
               type="button"
               className="link icon"
@@ -140,12 +136,11 @@ export function ActivePolicies() {
     if (requestedRemovals.has(key)) {
       return {
         muted: true,
-        badge: (
-          <Tooltip content="Still enforced until the requested change is applied (see Pending policy changes).">
-            <Badge tone="warn">removal requested</Badge>
-          </Tooltip>
+        action: (
+          <InfoTip>
+            Removal requested: still enforced until it is applied (see Pending policy changes).
+          </InfoTip>
         ),
-        action: <span />,
       }
     }
     return undefined
