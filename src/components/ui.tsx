@@ -142,6 +142,7 @@ export function AsyncButton({
   variant = 'secondary',
   children,
   disabled,
+  title,
   ...rest
 }: AsyncButtonProps) {
   const [busy, setBusy] = useState(false)
@@ -159,15 +160,19 @@ export function AsyncButton({
   }
   return (
     <span className="async-button">
-      <button
-        type="button"
-        className={`btn btn-${variant}`}
-        disabled={disabled || busy}
-        onClick={handle}
-        {...rest}
-      >
-        {busy ? '…' : children}
-      </button>
+      {/* The title becomes an instant tooltip rather than the delayed native one. */}
+      <Tooltip content={title}>
+        <button
+          type="button"
+          className={`btn btn-${variant}`}
+          disabled={disabled || busy}
+          onClick={handle}
+          aria-label={typeof children === 'string' ? undefined : title}
+          {...rest}
+        >
+          {busy ? '…' : children}
+        </button>
+      </Tooltip>
       {error && <span className="error-text">{error}</span>}
     </span>
   )

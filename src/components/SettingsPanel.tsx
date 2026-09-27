@@ -12,7 +12,7 @@ import {
 import { GUARDS } from '../config/contracts'
 import { describeError } from '../lib/errors'
 import { fieldError, parseRpcUrlInput } from '../lib/validation'
-import { InfoTip } from './Tooltip'
+import { InfoTip, Tooltip } from './Tooltip'
 import { AsyncButton, Badge, Card, Field, Notice } from './ui'
 
 type CheckResult = { ok: boolean; lines: { label: string; ok: boolean; detail: string }[] }
@@ -84,18 +84,19 @@ export function SettingsPanel() {
           />
           <span className="preset-links">
             {RPC_PRESETS.map((preset) => (
-              <button
-                key={preset.url}
-                type="button"
-                className="link"
-                title={`Use ${preset.url}`}
-                onClick={() => {
-                  setInput(preset.url)
-                  setResult(undefined)
-                }}
-              >
-                {preset.label}
-              </button>
+              <Tooltip content={`Use ${preset.url}`}>
+                <button
+                  key={preset.url}
+                  type="button"
+                  className="link"
+                  onClick={() => {
+                    setInput(preset.url)
+                    setResult(undefined)
+                  }}
+                >
+                  {preset.label}
+                </button>
+              </Tooltip>
             ))}
           </span>
         </Field>

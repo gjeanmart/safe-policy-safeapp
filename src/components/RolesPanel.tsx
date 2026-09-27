@@ -1,58 +1,94 @@
 import { useState } from 'react'
 import { type Hex, isAddressEqual, parseEther } from 'viem'
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts'
-import { TOKENS } from '../config/contracts'
 import { useSandbox } from '../context'
 import { useBalances } from '../hooks/useBalances'
 import { formatAmount } from '../lib/format'
 import { isModuleEnabled, safeTxs } from '../lib/safe'
 import { parsePrivateKeyInput } from '../lib/validation'
+import {
+  UNLOCK_CANCELLED,
+  lockVault,
+  protectKey,
+  revealKey,
+  unlockForSession,
+  useVaultUnlocked,
+  vaultStore,
+} from '../lib/vault'
 import { type Role, rolesStore } from '../store'
 import { ConfirmIconButton } from './ConfirmIconButton'
 import { EyeIcon, EyeOffIcon } from './icons'
+import { SetPasswordDialog } from './PasswordDialogs'
 import { ProposeButton } from './ProposeButton'
+import { SafeStatus } from './setup/SafeStatus'
 import { RefreshButton } from './RefreshButton'
 import { Tooltip } from './Tooltip'
-import { AddressView, Badge, Card, CopyButton, Notice } from './ui'
+import { AddressView, AsyncButton, Badge, Card, CopyButton, Notice } from './ui'
 
 const TOP_UP = parseEther('0.01')
 
-function addRole(label: string, privateKey: Hex) {
+async function addRole(label: string, privateKey: Hex) {
   const { address } = privateKeyToAccount(privateKey)
+  const key = await protectKey(privateKey)
   rolesStore.set((roles) =>
     roles.some((r) => isAddressEqual(r.address, address))
       ? roles
-      : [
-          ...roles,
-          { address, privateKey, label: label || `Role ${roles.length + 1}`, createdAt: Date.now() },
-        ],
+      : [...roles, { address, ...key, label: label || `Role ${roles.length + 1}`, createdAt: Date.now() }],
+  )
+}
+
+/** Where the keys stand: plain text (offer a password), or encrypted and locked / unlocked. */
+function KeyProtection() {
+  const vault = vaultStore.use()
+  const unlocked = useVaultUnlocked()
+  const [settingPassword, setSettingPassword] = useState(false)
+
+  if (!vault) {
+    return (
+      <Notice tone="warn">
+        <div className="row wrap notice-row">
+          <span>
+            Private keys are stored <strong>unencrypted</strong> in this browser&apos;s localStorage. Sepolia
+            / PoC use only.
+          </span>
+          <button type="button" className="btn" onClick={() => setSettingPassword(true)}>
+            Protect with a password
+          </button>
+        </div>
+        {settingPassword && <SetPasswordDialog onClose={() => setSettingPassword(false)} />}
+      </Notice>
+    )
+  }
+  return (
+    <Notice>
+      <div className="row wrap notice-row">
+        <span>
+          🔒 Keys are encrypted with your password.{' '}
+          {unlocked ? 'Unlocked for this session.' : 'Locked: the password is asked to reveal a key or sign.'}
+        </span>
+        {unlocked ? (
+          <button type="button" className="btn" onClick={lockVault}>
+            Lock
+          </button>
+        ) : (
+          <AsyncButton onClick={unlockForSession}>Unlock</AsyncButton>
+        )}
+      </div>
+    </Notice>
   )
 }
 
 export function RolesPanel() {
   const roles = rolesStore.use()
-  const { safe, state, reloadState } = useSandbox()
-  const balances = useBalances([safe, ...roles.map((r) => r.address)])
+  const { state, reloadState } = useSandbox()
+  const balances = useBalances(roles.map((r) => r.address))
   const [label, setLabel] = useState('')
   const [importKey, setImportKey] = useState('')
   const [importError, setImportError] = useState<string>()
 
-  const safeBalance = balances.data?.[safe]
-
   return (
     <>
-      <Card title="Safe">
-        <div className="row wrap">
-          <AddressView address={safe} name="" full />
-          {safeBalance && (
-            <span className="muted">
-              {formatAmount(safeBalance.eth, 18)} ETH ·{' '}
-              {formatAmount(safeBalance.usdc, TOKENS.USDC.decimals, 2)} USDC ·{' '}
-              {formatAmount(safeBalance.weth, 18)} WETH
-            </span>
-          )}
-        </div>
-      </Card>
+      <SafeStatus />
 
       <Card
         title="Roles (EOAs to plug as modules)"
@@ -67,26 +103,25 @@ export function RolesPanel() {
           />
         }
       >
-        <Notice tone="warn">
-          Private keys are stored unencrypted in this browser&apos;s localStorage. Sepolia / PoC use only.
-        </Notice>
+        <KeyProtection />
         <div className="row wrap">
           <input
             placeholder="Label, e.g. Trader bot"
             value={label}
             onChange={(e) => setLabel(e.target.value)}
           />
-          <button
-            type="button"
-            className="btn btn-primary"
-            title="Create a new EOA with a random private key, stored in this browser"
-            onClick={() => {
-              addRole(label, generatePrivateKey())
-              setLabel('')
-            }}
-          >
-            Generate role
-          </button>
+          <Tooltip content="Create a new EOA with a random private key, stored in this browser">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={async () => {
+                await addRole(label, generatePrivateKey()).catch(() => undefined)
+                setLabel('')
+              }}
+            >
+              Generate role
+            </button>
+          </Tooltip>
           <input
             placeholder="…or import a private key (0x…)"
             // Masked and kept out of autofill / spellcheck services.
@@ -101,24 +136,26 @@ export function RolesPanel() {
             className={importError ? 'grow input-invalid' : 'grow'}
             aria-invalid={importError !== undefined}
           />
-          <button
-            type="button"
-            className="btn"
-            title="Add an existing EOA from its private key (e.g. a role created in another browser/origin)"
-            disabled={!importKey}
-            onClick={() => {
-              const parsed = parsePrivateKeyInput(importKey)
-              if (!parsed.ok) return setImportError(parsed.error)
-              const { address } = privateKeyToAccount(parsed.value)
-              if (roles.some((r) => isAddressEqual(r.address, address))) {
-                return setImportError('This key is already imported (' + address + ').')
-              }
-              addRole(label, parsed.value)
-              setImportKey('')
-            }}
-          >
-            Import
-          </button>
+          <Tooltip content="Add an existing EOA from its private key (e.g. a role created in another browser/origin)">
+            <button
+              type="button"
+              className="btn"
+              disabled={!importKey}
+              onClick={() => {
+                const parsed = parsePrivateKeyInput(importKey)
+                if (!parsed.ok) return setImportError(parsed.error)
+                const { address } = privateKeyToAccount(parsed.value)
+                if (roles.some((r) => isAddressEqual(r.address, address))) {
+                  return setImportError('This key is already imported (' + address + ').')
+                }
+                addRole(label, parsed.value)
+                  .then(() => setImportKey(''))
+                  .catch((error: Error) => setImportError(error.message))
+              }}
+            >
+              Import
+            </button>
+          </Tooltip>
         </div>
         {importError && <p className="field-error">{importError}</p>}
 
@@ -157,7 +194,21 @@ export function RolesPanel() {
 
 function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: boolean }) {
   const { safe, state } = useSandbox()
-  const [showKey, setShowKey] = useState(false)
+  const [revealed, setRevealed] = useState<Hex>()
+  const [revealError, setRevealError] = useState<string>()
+  const unlocked = useVaultUnlocked()
+  const key = role.privateKey ?? (unlocked ? revealed : undefined)
+  const showKey = key !== undefined && revealed !== undefined
+
+  const toggleKey = async () => {
+    setRevealError(undefined)
+    if (showKey) return setRevealed(undefined)
+    try {
+      setRevealed(await revealKey(role, `Enter your password to reveal the key of ${role.label}.`))
+    } catch (error) {
+      if ((error as Error).message !== UNLOCK_CANCELLED) setRevealError((error as Error).message)
+    }
+  }
 
   return (
     <tr>
@@ -166,16 +217,17 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
           <strong>{role.label}</strong>
         </div>
         <AddressView address={role.address} name="" full />
-        {showKey && (
+        {showKey && key && (
           // Truncated so the revealed key never widens the column; copy still yields the full key.
-          <div className="secret" title={role.privateKey}>
+          <div className="secret">
             <span className="secret-label">Private key</span>
             <span className="mono">
-              {role.privateKey.slice(0, 10)}…{role.privateKey.slice(-8)}
+              {key.slice(0, 10)}…{key.slice(-8)}
             </span>
-            <CopyButton value={role.privateKey} />
+            <CopyButton value={key} />
           </div>
         )}
+        {revealError && <div className="field-error">{revealError}</div>}
       </td>
       <td className="nowrap">
         {eth === undefined ? '…' : `${formatAmount(eth, 18)} ETH`}{' '}
@@ -228,7 +280,7 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
             type="button"
             className="link icon"
             aria-label={showKey ? 'Hide key' : 'Show key'}
-            onClick={() => setShowKey((v) => !v)}
+            onClick={toggleKey}
           >
             {showKey ? <EyeOffIcon /> : <EyeIcon />}
           </button>

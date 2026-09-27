@@ -3,6 +3,7 @@ import { publicClient } from '../../config/client'
 import { formatTime } from '../../lib/format'
 import { type Activity, type ActivityMode, activityStore, rolesStore, updateActivity } from '../../store'
 import { Badge, Card, Tag, type TagTone, TxLink } from '../ui'
+import { Tooltip } from '../Tooltip'
 
 const TONES: Record<Activity['status'], 'ok' | 'warn' | 'bad' | 'neutral'> = {
   allowed: 'ok',
@@ -80,14 +81,11 @@ export function ActivityLog() {
       title="Activity"
       actions={
         activity.length > 0 && (
-          <button
-            type="button"
-            className="btn"
-            title="Clear the local activity log"
-            onClick={() => activityStore.set([])}
-          >
-            Clear
-          </button>
+          <Tooltip content="Clear the local activity log">
+            <button type="button" className="btn" onClick={() => activityStore.set([])}>
+              Clear
+            </button>
+          </Tooltip>
         )
       }
     >
@@ -120,9 +118,9 @@ export function ActivityLog() {
                   <Badge tone={TONES[a.status]}>{a.status}</Badge>
                 </span>
                 <strong className="activity-role">{roleLabel(a.role)}</strong>
-                <span className="activity-label" title={label}>
-                  {label}
-                </span>
+                <Tooltip content={label}>
+                  <span className="activity-label">{label}</span>
+                </Tooltip>
                 <span className="activity-tx">{a.txHash && <TxLink hash={a.txHash} />}</span>
                 {a.detail && <div className="detail mono small">{a.detail}</div>}
               </li>

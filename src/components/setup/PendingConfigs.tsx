@@ -13,6 +13,7 @@ import { type PendingConfiguration, pendingStore } from '../../store'
 import { ProposeButton } from '../ProposeButton'
 import { Badge, Card } from '../ui'
 import { ConfigurationTable } from './PolicyBuilder'
+import { Tooltip } from '../Tooltip'
 
 const REFRESH_MS = 5_000
 const OUTCOME_REFRESH_MS = 15_000
@@ -99,14 +100,11 @@ function PendingRow({ pending, expiry }: { pending: PendingConfiguration; expiry
             preview={false}
           />
         )}
-        <button
-          type="button"
-          className="btn"
-          title="Drop this entry from the browser only; nothing changes on-chain"
-          onClick={forget}
-        >
-          Forget locally
-        </button>
+        <Tooltip content="Drop this entry from the browser only; nothing changes on-chain">
+          <button type="button" className="btn" onClick={forget}>
+            Forget locally
+          </button>
+        </Tooltip>
       </div>
     </div>
   )

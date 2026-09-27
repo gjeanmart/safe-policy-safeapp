@@ -9,11 +9,16 @@ import { useGuardTiming } from '../../hooks/useGuardTiming'
 import { useNow } from '../../hooks/useNow'
 import {
   type Configuration,
+  type ConfigurationRow,
+  type DraftAddResult,
   Operation,
   Permission,
   SELECTOR_LABELS,
+  addToDraft,
   configurationRoot,
+  configurationRows,
   describeConfigurationData,
+  isDetach,
   templates,
 } from '../../lib/configurations'
 import { formatDuration } from '../../lib/format'
@@ -52,7 +57,7 @@ function appendAddress(list: string, address: Address): string {
  * validated on its own (see lib/validation); empty required fields are only flagged after a
  * submit attempt.
  */
-function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => void }) {
+function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => DraftAddResult }) {
   const roles = rolesStore.use()
   const [template, setTemplate] = useState<TemplateKey>('erc20Transfer')
   const [token, setToken] = useState<string>(TOKENS.USDC.address)
@@ -63,6 +68,7 @@ function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => void }) 
   const [operation, setOperation] = useState<Operation>(Operation.CALL)
   const [role, setRole] = useState<string>(roles[0]?.address ?? '')
   const [submitted, setSubmitted] = useState(false)
+  const [feedback, setFeedback] = useState<string>()
 
   const needsToken = template === 'erc20Transfer' || template === 'cowSwap'
   const needsRecipients = template === 'erc20Transfer' || template === 'nativeTransfer'
@@ -118,7 +124,16 @@ function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => void }) 
       setSubmitted(true)
       return
     }
-    onAdd(configs)
+    const { added, merged, skipped } = onAdd(configs)
+    setFeedback(
+      [
+        added && `${added} added`,
+        merged && `${merged} merged into an existing allowlist`,
+        skipped && `${skipped} already in the draft (skipped)`,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    )
     setRecipients('')
     setTarget('')
     setSelector('')
@@ -235,14 +250,12 @@ function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => void }) 
       )}
 
       <div className="row">
-        <button
-          type="button"
-          className="btn btn-primary"
-          title="Add the configuration(s) from this template to the draft below"
-          onClick={submit}
-        >
-          Add to draft
-        </button>
+        <Tooltip content="Add the configuration(s) from this template to the draft below">
+          <button type="button" className="btn btn-primary" onClick={submit}>
+            Add to draft
+          </button>
+        </Tooltip>
+        {feedback && <span className="muted small">{feedback}</span>}
       </div>
     </div>
   )
@@ -288,18 +301,45 @@ function ConfigSummary({ text }: { text: string }) {
   )
 }
 
+/** Per-row decoration, e.g. an active policy whose removal is already queued. */
+export type RowState = {
+  muted?: boolean
+  badge?: ReactNode
+  /** Replaces the trash icon (e.g. an "undo" action). */
+  action?: ReactNode
+}
+
+/** Config cell of a removal: what gets revoked before the binding is detached. */
+function RemovalSummary({ row }: { row: ConfigurationRow }) {
+  if (row.indices.length === 1) return <span className="muted">detach (no grants to revoke)</span>
+  // Allowlists read "0x… (none)"; AllowedModulePolicy already reads "revoke module 0x…".
+  const summary = describeConfigurationData(row.configuration).replace(/ \((none|revoke)\)/g, '')
+  const text = summary.startsWith('revoke') ? summary : `revoke ${summary}`
+  return (
+    <>
+      <ConfigSummary text={text} />
+      <span className="muted">, then detach</span>
+    </>
+  )
+}
+
 export function ConfigurationTable({
   configurations,
   onRemove,
   removeTitle = 'Remove this entry from the draft',
   renderConfig,
+  rowState,
 }: {
   configurations: readonly Configuration[]
-  onRemove?: (index: number) => void
+  /** Called with every underlying index of the row (a removal spans two configurations). */
+  onRemove?: (indices: number[]) => void
   removeTitle?: string
   /** Replaces the default summary in the Config cell (e.g. with live on-chain state). */
   renderConfig?: (configuration: Configuration) => ReactNode
+  rowState?: (configuration: Configuration) => RowState | undefined
 }) {
+  const rows = configurationRows(configurations)
+  const hasActions = Boolean(onRemove || rowState)
   return (
     <div className="table-scroll">
       <table className="config-table">
@@ -310,32 +350,55 @@ export function ConfigurationTable({
             <th>Op</th>
             <th>Policy</th>
             <th>Config</th>
-            {onRemove && <th />}
+            {hasActions && <th />}
           </tr>
         </thead>
         <tbody>
-          {configurations.map((c, i) => (
-            <tr key={i}>
-              <td>
-                <AddressView address={c.target} />
-              </td>
-              <td className="mono small">{SELECTOR_LABELS[c.selector.toLowerCase()] ?? c.selector}</td>
-              <td>
-                <OperationTag operation={c.operation} />
-              </td>
-              <td>
-                <PolicyTag policy={c.policy} />
-              </td>
-              <td className="small">
-                {renderConfig?.(c) ?? <ConfigSummary text={describeConfigurationData(c)} />}
-              </td>
-              {onRemove && (
+          {rows.map((row) => {
+            const c = row.configuration
+            const state = rowState?.(c)
+            return (
+              <tr key={row.indices.join('-')} className={state?.muted ? 'row-muted' : undefined}>
                 <td>
-                  <ConfirmIconButton title={removeTitle} onConfirm={() => onRemove(i)} />
+                  <AddressView address={c.target} />
                 </td>
-              )}
-            </tr>
-          ))}
+                <td className="mono small">{SELECTOR_LABELS[c.selector.toLowerCase()] ?? c.selector}</td>
+                <td>
+                  <OperationTag operation={c.operation} />
+                </td>
+                <td>
+                  {row.kind === 'remove' ? (
+                    <span className="row">
+                      <Tag tone="bad" caps>
+                        remove
+                      </Tag>
+                      {!isDetach(c) && <PolicyTag policy={c.policy} />}
+                    </span>
+                  ) : (
+                    <span className="row">
+                      <PolicyTag policy={c.policy} />
+                      {state?.badge}
+                    </span>
+                  )}
+                </td>
+                <td className="small">
+                  {row.kind === 'remove' ? (
+                    <RemovalSummary row={row} />
+                  ) : (
+                    (renderConfig?.(c) ?? <ConfigSummary text={describeConfigurationData(c)} />)
+                  )}
+                </td>
+                {hasActions && (
+                  <td>
+                    {state?.action ??
+                      (onRemove && (
+                        <ConfirmIconButton title={removeTitle} onConfirm={() => onRemove(row.indices)} />
+                      ))}
+                  </td>
+                )}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -455,7 +518,13 @@ export function PolicyBuilder() {
 
   return (
     <Card title="Policy builder">
-      <TemplateForm onAdd={(configs) => draftStore.set((d) => [...d, ...configs])} />
+      <TemplateForm
+        onAdd={(configs) => {
+          const result = addToDraft(draftStore.get(), configs)
+          draftStore.set(result.draft)
+          return result
+        }}
+      />
 
       <h3>Draft ({draft.length})</h3>
       {draft.length === 0 ? (
@@ -464,7 +533,7 @@ export function PolicyBuilder() {
         <>
           <ConfigurationTable
             configurations={draft}
-            onRemove={(index) => draftStore.set((d) => d.filter((_, i) => i !== index))}
+            onRemove={(indices) => draftStore.set((d) => d.filter((_, i) => !indices.includes(i)))}
           />
           <p className="muted small">
             Root <span className="mono">{root}</span>

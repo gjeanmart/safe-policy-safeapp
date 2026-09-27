@@ -5,13 +5,22 @@ import { LOGS_BLOCK_RANGE, publicClient } from '../../config/client'
 import { POLICIES } from '../../config/contracts'
 import { useSandbox } from '../../context'
 import { useAsync } from '../../hooks/useAsync'
-import { type Configuration, PERMISSION_LABELS, removalConfigurations } from '../../lib/configurations'
+import {
+  type Configuration,
+  PERMISSION_LABELS,
+  accessKey,
+  addToDraft,
+  configurationRows,
+  detachedKeys,
+  removalConfigurations,
+} from '../../lib/configurations'
 import { activePolicies, scanPolicyEvents } from '../../lib/policyEvents'
-import { draftStore, historyKey, policyHistoryStore } from '../../store'
+import { draftStore, historyKey, pendingStore, policyHistoryStore } from '../../store'
 import { AddressView, AsyncButton, Badge, Card, Notice } from '../ui'
 import { RefreshButton } from '../RefreshButton'
-import { InfoTip } from '../Tooltip'
-import { ConfigurationTable } from './PolicyBuilder'
+import { UndoIcon } from '../icons'
+import { InfoTip, Tooltip } from '../Tooltip'
+import { ConfigurationTable, type RowState } from './PolicyBuilder'
 
 /** Default look-back for the first scan (~4 weeks of Sepolia blocks). */
 const DEFAULT_LOOKBACK = 4n * (LOGS_BLOCK_RANGE + 1n)
@@ -69,7 +78,10 @@ export function ActivePolicies() {
   const key = historyKey(guard, safe)
   const history = histories[key]
   const [fromBlock, setFromBlock] = useState('')
-  const [queued, setQueued] = useState(false)
+  const draft = draftStore.use()
+  const pending = pendingStore
+    .use()
+    .filter((p) => isAddressEqual(p.safe, safe) && isAddressEqual(p.guard, guard))
 
   const scan = async (from?: bigint) => {
     const head = await publicClient.getBlockNumber()
@@ -90,6 +102,54 @@ export function ActivePolicies() {
   }, [key, guardInstalled])
 
   const active = activePolicies(history?.events ?? [])
+
+  // Removals already queued for a binding: it stays enforced until applied, but is shown as leaving.
+  const draftRemovals = detachedKeys(draft)
+  const requestedRemovals = detachedKeys(pending.flatMap((p) => p.configurations))
+  const undoRemoval = (key: string) =>
+    draftStore.set((d) => {
+      const drop = configurationRows(d)
+        .filter((row) => row.kind === 'remove' && accessKey(row.configuration) === key)
+        .flatMap((row) => row.indices)
+      return d.filter((_, i) => !drop.includes(i))
+    })
+  const rowState = (c: Configuration): RowState | undefined => {
+    const key = accessKey(c)
+    if (draftRemovals.has(key)) {
+      return {
+        muted: true,
+        badge: (
+          <Tooltip content="Still enforced. The removal is in the Policy builder draft below: propose it from there.">
+            <Badge tone="warn">removal in draft</Badge>
+          </Tooltip>
+        ),
+        action: (
+          <Tooltip content="Undo: take this removal out of the draft">
+            <button
+              type="button"
+              className="link icon"
+              aria-label="Undo removal"
+              onClick={() => undoRemoval(key)}
+            >
+              <UndoIcon />
+            </button>
+          </Tooltip>
+        ),
+      }
+    }
+    if (requestedRemovals.has(key)) {
+      return {
+        muted: true,
+        badge: (
+          <Tooltip content="Still enforced until the requested change is applied (see Pending policy changes).">
+            <Badge tone="warn">removal requested</Badge>
+          </Tooltip>
+        ),
+        action: <span />,
+      }
+    }
+    return undefined
+  }
 
   return (
     <Card
@@ -116,17 +176,11 @@ export function ActivePolicies() {
               isAllowlistPolicy(c) ? <LiveAllowlist guard={guard} safe={safe} config={c} /> : undefined
             }
             removeTitle="Queue a removal in the draft: revoke the policy's grants, then bind this selector to 0x0"
-            onRemove={(index) => {
-              draftStore.set((draft) => [...draft, ...removalConfigurations(active[index]!, active)])
-              setQueued(true)
-            }}
+            rowState={rowState}
+            onRemove={([index]) =>
+              draftStore.set((d) => addToDraft(d, removalConfigurations(active[index!]!, active)).draft)
+            }
           />
-          {queued && (
-            <Notice>
-              Removal added to the draft in the Policy builder below (grants revoked, then the binding set to
-              0x0). Propose it from there; it goes through the guard delay like any change.
-            </Notice>
-          )}
         </>
       )}
       <div className="card-footer">

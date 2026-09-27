@@ -831,3 +831,24 @@ select:focus-visible {
 .builder-actions {
   margin-top: 20px;
 }
+
+/* A binding on its way out: still enforced, shown faded with its policy struck through. */
+.row-muted td {
+  opacity: 0.55;
+}
+
+.row-muted td:last-child {
+  opacity: 1;
+}
+
+.row-muted .tag {
+  text-decoration: line-through;
+}
+
+.row-muted .badge {
+  text-decoration: none;
+}
+
+.notice-row {
+  justify-content: space-between;
+}

@@ -220,3 +220,88 @@ export function removalConfigurations(
   }
   return [detach]
 }
+
+const ZERO_POLICY = /^0x0+$/
+
+/** Binding the zero address: the access selector loses its policy. */
+export const isDetach = (c: Configuration): boolean => ZERO_POLICY.test(c.policy)
+
+const sameConfiguration = (a: Configuration, b: Configuration): boolean =>
+  accessKey(a) === accessKey(b) &&
+  a.policy.toLowerCase() === b.policy.toLowerCase() &&
+  a.data.toLowerCase() === b.data.toLowerCase()
+
+/**
+ * A row as shown to the user. A removal is stored as two configurations (revoke the policy's
+ * grants, then detach the binding) but reads as one action.
+ */
+export type ConfigurationRow = {
+  /** Positions in the underlying list, so a row can be removed as a whole. */
+  indices: number[]
+  kind: 'set' | 'remove'
+  /** The configuration to describe: the revoke for a removal (or the detach when there is none). */
+  configuration: Configuration
+}
+
+export function configurationRows(configurations: readonly Configuration[]): ConfigurationRow[] {
+  const rows: ConfigurationRow[] = []
+  for (let i = 0; i < configurations.length; i++) {
+    const current = configurations[i]!
+    const next = configurations[i + 1]
+    if (!isDetach(current) && next && isDetach(next) && accessKey(next) === accessKey(current)) {
+      rows.push({ indices: [i, i + 1], kind: 'remove', configuration: current })
+      i++
+    } else {
+      rows.push({ indices: [i], kind: isDetach(current) ? 'remove' : 'set', configuration: current })
+    }
+  }
+  return rows
+}
+
+/** Access selectors (see accessKey) that a list of configurations would detach. */
+export const detachedKeys = (configurations: readonly Configuration[]): Set<string> =>
+  new Set(configurations.filter(isDetach).map(accessKey))
+
+export type DraftAddResult = { draft: Configuration[]; added: number; merged: number; skipped: number }
+
+/**
+ * Adds configurations to a draft for clarity: exact duplicates are skipped, and a new allowlist for
+ * the same token and policy is merged into the existing entry (later permissions win). Entries
+ * that are part of a removal are never merged into.
+ */
+export function addToDraft(
+  draft: readonly Configuration[],
+  additions: readonly Configuration[],
+): DraftAddResult {
+  const next = [...draft]
+  let added = 0
+  let merged = 0
+  let skipped = 0
+  for (const addition of additions) {
+    if (next.some((c) => sameConfiguration(c, addition))) {
+      skipped++
+      continue
+    }
+    const policy = addition.policy.toLowerCase()
+    const isAllowlist =
+      policy === POLICIES.erc20Transfer.toLowerCase() || policy === POLICIES.erc20Approve.toLowerCase()
+    const removing = detachedKeys(next).has(accessKey(addition))
+    const index =
+      isAllowlist && !removing
+        ? next.findIndex((c) => accessKey(c) === accessKey(addition) && c.policy.toLowerCase() === policy)
+        : -1
+    if (index >= 0) {
+      const existing = next[index]!
+      const [current] = decodeAbiParameters(allowlistParam, existing.data)
+      const [incoming] = decodeAbiParameters(allowlistParam, addition.data)
+      const byAccount = new Map(current.map((e) => [e.account.toLowerCase(), e]))
+      for (const entry of incoming) byAccount.set(entry.account.toLowerCase(), entry)
+      next[index] = { ...existing, data: encodeAllowlist([...byAccount.values()] as AllowlistEntry[]) }
+      merged++
+      continue
+    }
+    next.push(addition)
+    added++
+  }
+  return { draft: next, added, merged, skipped }
+}

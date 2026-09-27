@@ -32,6 +32,9 @@ export function Tooltip({ content, children }: { content: ReactNode; children: R
     setPlacement({ top: below ? a.bottom + GAP : a.top - b.height - GAP, left, below })
   }, [open])
 
+  // No content (e.g. an AsyncButton without a title): render the children untouched.
+  if (content === undefined || content === null || content === '') return <>{children}</>
+
   const show = () => setOpen(true)
   const hide = () => {
     setOpen(false)
