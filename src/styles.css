@@ -774,9 +774,24 @@ select:focus-visible {
   align-items: center;
 }
 
-/* Pushes a tab (Settings) to the right end of the tab bar. */
-.tab-end {
+/* Right end of the tab bar: key lock state and Settings. */
+.tabs-end {
+  display: flex;
+  gap: 4px;
   margin-left: auto;
+}
+
+.tab-icon {
+  display: inline-flex;
+  align-items: center;
+  font-size: 16px;
+  padding: 6px 10px;
+}
+
+/* Unlocked keys are a (session) risk worth noticing. */
+.tab-unlocked {
+  color: var(--warn);
+  border-color: var(--warn);
 }
 
 .app-footer {

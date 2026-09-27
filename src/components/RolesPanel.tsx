@@ -6,15 +6,7 @@ import { useBalances } from '../hooks/useBalances'
 import { formatAmount } from '../lib/format'
 import { isModuleEnabled, safeTxs } from '../lib/safe'
 import { parsePrivateKeyInput } from '../lib/validation'
-import {
-  UNLOCK_CANCELLED,
-  lockVault,
-  protectKey,
-  revealKey,
-  unlockForSession,
-  useVaultUnlocked,
-  vaultStore,
-} from '../lib/vault'
+import { UNLOCK_CANCELLED, protectKey, revealKey, useVaultUnlocked, vaultStore } from '../lib/vault'
 import { type Role, rolesStore } from '../store'
 import { ConfirmIconButton } from './ConfirmIconButton'
 import { EyeIcon, EyeOffIcon } from './icons'
@@ -23,7 +15,7 @@ import { ProposeButton } from './ProposeButton'
 import { SafeStatus } from './setup/SafeStatus'
 import { RefreshButton } from './RefreshButton'
 import { Tooltip } from './Tooltip'
-import { AddressView, AsyncButton, Badge, Card, CopyButton, Notice } from './ui'
+import { AddressView, Badge, Card, CopyButton, Notice } from './ui'
 
 const TOP_UP = parseEther('0.01')
 
@@ -37,10 +29,9 @@ async function addRole(label: string, privateKey: Hex) {
   )
 }
 
-/** Where the keys stand: plain text (offer a password), or encrypted and locked / unlocked. */
+/** Warns while keys are plain text and offers to set a password. */
 function KeyProtection() {
   const vault = vaultStore.use()
-  const unlocked = useVaultUnlocked()
   const [settingPassword, setSettingPassword] = useState(false)
 
   if (!vault) {
@@ -59,23 +50,8 @@ function KeyProtection() {
       </Notice>
     )
   }
-  return (
-    <Notice>
-      <div className="row wrap notice-row">
-        <span>
-          🔒 Keys are encrypted with your password.{' '}
-          {unlocked ? 'Unlocked for this session.' : 'Locked: the password is asked to reveal a key or sign.'}
-        </span>
-        {unlocked ? (
-          <button type="button" className="btn" onClick={lockVault}>
-            Lock
-          </button>
-        ) : (
-          <AsyncButton onClick={unlockForSession}>Unlock</AsyncButton>
-        )}
-      </div>
-    </Notice>
-  )
+  // Encrypted: the lock / unlock state lives in the tab bar (VaultLockButton).
+  return null
 }
 
 export function RolesPanel() {
