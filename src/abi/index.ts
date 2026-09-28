@@ -10,6 +10,8 @@ export const safeAbi = parseAbi([
   'function setGuard(address guard)',
   'function setModuleGuard(address moduleGuard)',
   'function execTransactionFromModule(address to, uint256 value, bytes data, uint8 operation) returns (bool success)',
+  'function nonce() view returns (uint256)',
+  'function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) payable returns (bool success)',
 ])
 
 export const guardAbi = parseAbi([

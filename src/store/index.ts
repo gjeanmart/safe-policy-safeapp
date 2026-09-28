@@ -12,13 +12,25 @@ export type Encrypted = { iv: string; data: string }
  * encrypted with the vault password (`encryptedKey`) or, before a password is set, stored in
  * plain text (`privateKey`). Never both.
  */
+/**
+ * What a role is, which decides how it acts:
+ * - `eoa`: a local key signs and sends execTransactionFromModule (default, and roles saved before
+ *   kinds existed).
+ * - `safe`: another Safe is the module; it acts through its own transactions (nested call).
+ * - `contract`: any other contract; the app can only simulate its calls.
+ */
+export type RoleKind = 'eoa' | 'safe' | 'contract'
+
 export type Role = {
+  kind?: RoleKind
   address: Address
   label: string
   createdAt: number
   privateKey?: Hex
   encryptedKey?: Encrypted
 }
+
+export const roleKind = (role: Role): RoleKind => role.kind ?? 'eoa'
 
 export const rolesStore = persisted<Role[]>('roles', [])
 
