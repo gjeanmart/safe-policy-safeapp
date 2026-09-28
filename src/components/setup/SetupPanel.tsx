@@ -6,7 +6,7 @@ import { SafeStatus } from './SafeStatus'
 export function SetupPanel() {
   return (
     <>
-      <SafeStatus />
+      <SafeStatus showGuardSetup />
       <ActivePolicies />
       <PendingConfigs />
       <PolicyBuilder />

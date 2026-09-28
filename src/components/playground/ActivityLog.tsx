@@ -80,12 +80,7 @@ export function ActivityLog() {
       title="Activity"
       actions={
         activity.length > 0 && (
-          <button
-            type="button"
-            className="btn"
-            title="Clear the local activity log"
-            onClick={() => activityStore.set([])}
-          >
+          <button type="button" className="btn" onClick={() => activityStore.set([])}>
             Clear
           </button>
         )
@@ -120,9 +115,7 @@ export function ActivityLog() {
                   <Badge tone={TONES[a.status]}>{a.status}</Badge>
                 </span>
                 <strong className="activity-role">{roleLabel(a.role)}</strong>
-                <span className="activity-label" title={label}>
-                  {label}
-                </span>
+                <span className="activity-label">{label}</span>
                 <span className="activity-tx">{a.txHash && <TxLink hash={a.txHash} />}</span>
                 {a.detail && <div className="detail mono small">{a.detail}</div>}
               </li>

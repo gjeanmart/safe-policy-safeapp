@@ -4,11 +4,21 @@ import type { Configuration } from '../lib/configurations'
 import type { ConfirmedPolicy } from '../lib/policyEvents'
 import { persisted } from './persisted'
 
+/** AES-GCM ciphertext and its IV, base64-encoded (see lib/vault). */
+export type Encrypted = { iv: string; data: string }
+
 /**
- * A role is a locally generated EOA meant to be enabled as a Safe module.
- * PoC only: the private key lives in plain localStorage.
+ * A role is a locally generated EOA meant to be enabled as a Safe module. Its key is either
+ * encrypted with the vault password (`encryptedKey`) or, before a password is set, stored in
+ * plain text (`privateKey`). Never both.
  */
-export type Role = { address: Address; privateKey: Hex; label: string; createdAt: number }
+export type Role = {
+  address: Address
+  label: string
+  createdAt: number
+  privateKey?: Hex
+  encryptedKey?: Encrypted
+}
 
 export const rolesStore = persisted<Role[]>('roles', [])
 

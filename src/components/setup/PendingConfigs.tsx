@@ -12,7 +12,8 @@ import { safeTxs } from '../../lib/safe'
 import { type PendingConfiguration, pendingStore } from '../../store'
 import { ProposeButton } from '../ProposeButton'
 import { Badge, Card } from '../ui'
-import { ConfigurationTable } from './PolicyBuilder'
+import { ConfigurationTable, useActiveKeys } from './PolicyBuilder'
+import { Tooltip } from '../Tooltip'
 
 const REFRESH_MS = 5_000
 const OUTCOME_REFRESH_MS = 15_000
@@ -36,6 +37,7 @@ function statusOf(validFrom: bigint | undefined, expiry: bigint | undefined, now
 function PendingRow({ pending, expiry }: { pending: PendingConfiguration; expiry?: bigint }) {
   const { safe } = useSandbox()
   const now = useNow()
+  const activeKeys = useActiveKeys()
   const validFrom = useAsync(
     () =>
       publicClient.readContract({
@@ -80,7 +82,7 @@ function PendingRow({ pending, expiry }: { pending: PendingConfiguration; expiry
         )}
         {status.kind === 'expired' && <Badge tone="bad">expired</Badge>}
       </div>
-      <ConfigurationTable configurations={pending.configurations} />
+      <ConfigurationTable configurations={pending.configurations} activeKeys={activeKeys} />
       <div className="row wrap pending-actions">
         {status.kind === 'ready' && (
           <ProposeButton
@@ -99,14 +101,11 @@ function PendingRow({ pending, expiry }: { pending: PendingConfiguration; expiry
             preview={false}
           />
         )}
-        <button
-          type="button"
-          className="btn"
-          title="Drop this entry from the browser only; nothing changes on-chain"
-          onClick={forget}
-        >
-          Forget locally
-        </button>
+        <Tooltip content="Drop this entry from the browser only; nothing changes on-chain">
+          <button type="button" className="btn" onClick={forget}>
+            Forget locally
+          </button>
+        </Tooltip>
       </div>
     </div>
   )

@@ -4,6 +4,8 @@ import type { SafeTx } from '../lib/safe'
 import { InfoTip } from './Tooltip'
 import { AsyncButton, SafeTxPreview } from './ui'
 
+const STANDALONE_NOTE = 'open this app inside Safe{Wallet} to propose'
+
 /**
  * Proposes a batch to the Safe owners via Safe{Wallet}. The owners then sign and execute it in
  * the Safe{Wallet} queue as usual (the multisig entrypoint is untouched by this app).
@@ -36,9 +38,8 @@ export function ProposeButton({
         <AsyncButton
           variant={variant}
           disabled={!propose || txs.length === 0}
-          title={
-            propose ? title : `${title ? `${title} — ` : ''}open this app inside Safe{Wallet} to propose`
-          }
+          // With an ⓘ next to the button, the explanation lives there only (no duplicate tooltip).
+          title={info ? undefined : propose ? title : `${title ? `${title} — ` : ''}${STANDALONE_NOTE}`}
           onClick={async () => {
             const hash = await propose!(txs)
             setProposed(hash)
@@ -47,7 +48,12 @@ export function ProposeButton({
         >
           {label}
         </AsyncButton>
-        {info && <InfoTip>{info}</InfoTip>}
+        {info && (
+          <InfoTip>
+            {info}
+            {!propose && ` (${STANDALONE_NOTE})`}
+          </InfoTip>
+        )}
         {proposed && (
           <span className="muted">Proposed — sign &amp; execute it in the Safe{'{Wallet}'} queue.</span>
         )}

@@ -3,6 +3,7 @@ import { publicClient } from '../config/client'
 import { EXPLORER } from '../config/contracts'
 import { type Role, logActivity, updateActivity } from '../store'
 import { type ModuleTx, sendModuleTx, simulateModuleTx } from './moduleTx'
+import { revealKey } from './vault'
 
 export type RunMode = 'simulate' | 'execute' | 'force'
 
@@ -37,7 +38,8 @@ export async function runSteps(
       continue
     }
 
-    const hash = await sendModuleTx(safe, role.privateKey, tx, { force: mode === 'force' })
+    const privateKey = await revealKey(role, `Enter your password to sign as ${role.label}.`)
+    const hash = await sendModuleTx(safe, privateKey, tx, { force: mode === 'force' })
     const id = logActivity({
       role: role.address,
       mode,

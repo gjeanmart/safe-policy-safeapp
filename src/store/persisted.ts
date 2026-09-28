@@ -45,3 +45,19 @@ export function persisted<T>(key: string, initial: T): PersistedStore<T> {
 
   return { get, set, subscribe, use: () => useSyncExternalStore(subscribe, get) }
 }
+
+/** Same API as `persisted`, but memory only: gone on reload (e.g. an unlocked session). */
+export function ephemeral<T>(initial: T): PersistedStore<T> {
+  const listeners = new Set<() => void>()
+  let value = initial
+  const get = () => value
+  const set: PersistedStore<T>['set'] = (next) => {
+    value = typeof next === 'function' ? (next as (previous: T) => T)(value) : next
+    listeners.forEach((listener) => listener())
+  }
+  const subscribe = (listener: () => void) => {
+    listeners.add(listener)
+    return () => listeners.delete(listener)
+  }
+  return { get, set, subscribe, use: () => useSyncExternalStore(subscribe, get) }
+}
