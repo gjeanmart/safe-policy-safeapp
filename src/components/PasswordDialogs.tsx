@@ -1,4 +1,5 @@
-import { type FormEvent, useEffect, useRef, useState } from 'react'
+import { type FormEvent, useState } from 'react'
+import { Modal } from './Modal'
 import {
   MIN_PASSWORD_LENGTH,
   UNLOCK_CANCELLED,
@@ -7,22 +8,6 @@ import {
   unlockRequestStore,
   unlockVault,
 } from '../lib/vault'
-
-/** Native modal <dialog> that is shown while mounted (focus trap, Esc to close). */
-function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
-  const ref = useRef<HTMLDialogElement>(null)
-  useEffect(() => ref.current?.showModal(), [])
-  return (
-    <dialog
-      ref={ref}
-      className="modal"
-      onClose={onClose}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="modal-content">{children}</div>
-    </dialog>
-  )
-}
 
 /**
  * Answers unlock requests (see lib/vault): shown whenever an action needs a role key while the

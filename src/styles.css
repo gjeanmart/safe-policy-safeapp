@@ -898,3 +898,23 @@ select:focus-visible {
   color: var(--bad);
   background: var(--bad-bg);
 }
+
+/* Nested module calls to propose from a Safe / contract role. */
+.nested-calls {
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+.nested-call {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.nested-call:last-child {
+  border-bottom: none;
+}
+
+.nested-call .calldata {
+  max-width: 100%;
+}

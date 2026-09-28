@@ -2,8 +2,8 @@ import type { Address } from 'viem'
 import { publicClient } from '../config/client'
 import { EXPLORER } from '../config/contracts'
 import { type Role, logActivity, updateActivity } from '../store'
-import { type ModuleTx, sendModuleTx, simulateModuleTx } from './moduleTx'
-import { revealKey } from './vault'
+import { type ModuleTx, simulateModuleTx } from './moduleTx'
+import { sendAsRole } from './roleExec'
 
 export type RunMode = 'simulate' | 'execute' | 'force'
 
@@ -38,8 +38,7 @@ export async function runSteps(
       continue
     }
 
-    const privateKey = await revealKey(role, `Enter your password to sign as ${role.label}.`)
-    const hash = await sendModuleTx(safe, privateKey, tx, { force: mode === 'force' })
+    const hash = await sendAsRole(safe, role, tx, { force: mode === 'force' })
     const id = logActivity({
       role: role.address,
       mode,
