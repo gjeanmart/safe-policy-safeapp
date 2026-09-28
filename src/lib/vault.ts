@@ -76,6 +76,36 @@ export async function enableVault(password: string): Promise<void> {
   sessionKeyStore.set(key)
 }
 
+/**
+ * Re-encrypts every role key under a new password (and a fresh salt). All keys are decrypted and
+ * re-encrypted first, then saved together, so a failure leaves the old password in place.
+ */
+export async function changeVaultPassword(current: string, next: string): Promise<void> {
+  const meta = vaultStore.get()
+  if (!meta) throw new Error('No password is set.')
+  if (next.length < MIN_PASSWORD_LENGTH) throw new Error(`Use at least ${MIN_PASSWORD_LENGTH} characters.`)
+  const oldKey = await deriveKey(current, fromBase64(meta.salt))
+  try {
+    if ((await decrypt(oldKey, meta.check)) !== CHECK_PLAINTEXT) throw new Error()
+  } catch {
+    throw new Error('The current password is wrong.')
+  }
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const newKey = await deriveKey(next, salt)
+  const roles = await Promise.all(
+    rolesStore.get().map(async (role): Promise<Role> => {
+      // Plain-text keys from before passwords were required get encrypted on the way.
+      const privateKey = role.encryptedKey ? await decrypt(oldKey, role.encryptedKey) : role.privateKey
+      if (!privateKey) return role
+      return { ...role, privateKey: undefined, encryptedKey: await encrypt(newKey, privateKey) }
+    }),
+  )
+  const check = await encrypt(newKey, CHECK_PLAINTEXT)
+  rolesStore.set(roles)
+  vaultStore.set({ salt: toBase64(salt), check })
+  sessionKeyStore.set(newKey)
+}
+
 export async function unlockVault(password: string): Promise<void> {
   const meta = vaultStore.get()
   if (!meta) throw new Error('No password is set.')
