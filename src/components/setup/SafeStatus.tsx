@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { type Address, isAddressEqual, zeroAddress } from 'viem'
 import { GUARDS, TOKENS } from '../../config/contracts'
 import { useSandbox } from '../../context'
@@ -27,11 +28,14 @@ function GuardSlot({
   address,
   removeTx,
   removeTitle,
+  badge,
 }: {
   label: string
   address: Address
   removeTx: SafeTx
   removeTitle: string
+  /** Extra status after the value, e.g. that this Safe version has no such guard slot. */
+  badge?: ReactNode
 }) {
   return (
     <>
@@ -50,6 +54,7 @@ function GuardSlot({
             <ProposeIconButton txs={[removeTx]} title={removeTitle} />
           </>
         )}
+        {badge}
       </span>
     </>
   )
@@ -118,14 +123,7 @@ export function SafeStatus({ showGuardSetup = false }: { showGuardSetup?: boolea
             )}
           </span>
           <span className="field-label">Version</span>
-          <span className="kv-value">
-            {state.version}
-            {supportsModuleGuard ? (
-              <Badge tone="ok">module guard supported</Badge>
-            ) : (
-              <Badge tone="bad">needs 1.5.0</Badge>
-            )}
-          </span>
+          <span className="kv-value">{state.version}</span>
           <span className="field-label">Multisig</span>
           <span className="kv-value">
             {state.threshold}-of-{state.owners.length}
@@ -138,6 +136,7 @@ export function SafeStatus({ showGuardSetup = false }: { showGuardSetup?: boolea
           />
           <GuardSlot
             label="Module path (guard)"
+            badge={!supportsModuleGuard && <Badge tone="bad">needs Safe 1.5.0</Badge>}
             address={state.moduleGuard}
             removeTx={safeTxs.setModuleGuard(state.address, zeroAddress)}
             removeTitle={`Remove the module-path guard: proposes setModuleGuard(0x0).${moduleWarning}${ownerPathNote}`}

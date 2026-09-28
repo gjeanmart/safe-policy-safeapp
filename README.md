@@ -12,8 +12,8 @@ multisig keeps working as before.
 >
 > - 🧪 **Sepolia testnet only.**
 > - 🔓 **The policy contracts are unaudited** and may contain serious security holes.
-> - 🔑 **Role private keys live in the browser's localStorage**, unencrypted unless you set a password (Roles
->   tab). Even encrypted, a malicious script running in the page could capture them once unlocked.
+> - 🔑 **Role private keys live in the browser's localStorage**, encrypted with a password you create when adding
+>   your first role. A malicious script running in the page could still capture them once unlocked.
 
 ## Run
 
@@ -113,8 +113,9 @@ Proportionate hardening for a PoC (it does not make it safe for real funds):
   plugins; plus `nosniff`, `Referrer-Policy: no-referrer` and a restrictive `Permissions-Policy`.
 - **RPC**: only `https://` endpoints (plain `http://` for localhost), no credentials in the URL; the stored value
   is re-validated on read.
-- **Keys**: generated in the browser, masked on import (no autofill/spellcheck), shown truncated. Optional password
-  protection (`src/lib/vault.ts`): PBKDF2-SHA-256 (600k iterations) derives a non-extractable AES-GCM key that
+- **Keys**: generated in the browser, masked on import (no autofill/spellcheck), shown truncated, and always
+  encrypted (`src/lib/vault.ts`): a password is created with the first role (or from the lock icon), and
+  PBKDF2-SHA-256 (600k iterations) derives a non-extractable AES-GCM key that
   encrypts each role key; the password is asked to reveal a key or sign, and the unlocked key lives in memory only
   (reload or Lock forgets it). No recovery if the password is lost.
 - **Supply chain**: pnpm with a frozen lockfile, dependency install scripts blocked, `minimumReleaseAge` of 1 day,

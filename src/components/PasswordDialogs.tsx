@@ -3,6 +3,7 @@ import {
   MIN_PASSWORD_LENGTH,
   UNLOCK_CANCELLED,
   enableVault,
+  setupRequestStore,
   unlockRequestStore,
   unlockVault,
 } from '../lib/vault'
@@ -27,7 +28,7 @@ function Modal({ onClose, children }: { onClose: () => void; children: React.Rea
  * Answers unlock requests (see lib/vault): shown whenever an action needs a role key while the
  * vault is locked. Mounted once for the whole app.
  */
-export function UnlockDialog() {
+function UnlockDialog() {
   const request = unlockRequestStore.use()
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string>()
@@ -87,18 +88,33 @@ export function UnlockDialog() {
   )
 }
 
-/** Sets the vault password and encrypts every existing role key with it. */
-export function SetPasswordDialog({ onClose }: { onClose: () => void }) {
+/**
+ * Answers create-password requests (see lib/vault): sets the vault password and encrypts every
+ * existing role key with it. Mounted once for the whole app.
+ */
+function SetPasswordDialog() {
+  const request = setupRequestStore.use()
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [submitted, setSubmitted] = useState(false)
   const [error, setError] = useState<string>()
   const [busy, setBusy] = useState(false)
+  if (!request) return null
 
   const tooShort = password.length < MIN_PASSWORD_LENGTH
   const mismatch = confirm !== password
   const passwordError = submitted && tooShort ? `Use at least ${MIN_PASSWORD_LENGTH} characters.` : undefined
   const confirmError = submitted && !tooShort && mismatch ? 'The passwords do not match.' : undefined
+
+  const close = (outcome: 'set' | 'cancelled') => {
+    setupRequestStore.set(undefined)
+    setPassword('')
+    setConfirm('')
+    setSubmitted(false)
+    setError(undefined)
+    if (outcome === 'set') request.resolve()
+    else request.reject(new Error(UNLOCK_CANCELLED))
+  }
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -107,7 +123,7 @@ export function SetPasswordDialog({ onClose }: { onClose: () => void }) {
     setBusy(true)
     try {
       await enableVault(password)
-      onClose()
+      close('set')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -116,13 +132,13 @@ export function SetPasswordDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal onClose={onClose}>
+    <Modal onClose={() => close('cancelled')}>
       <form onSubmit={submit} className="stack">
-        <h2 className="modal-title">Protect role keys with a password</h2>
+        <h2 className="modal-title">Create a password</h2>
         <p className="modal-body">
-          Keys are encrypted in this browser (PBKDF2 + AES-GCM) and the password is asked before revealing a
-          key or signing. There is no recovery: if you forget it, the keys are lost, so keep a backup of any
-          key you need.
+          {request.reason} Keys are encrypted in this browser (PBKDF2 + AES-GCM) and the password is asked
+          before revealing a key or signing. There is no recovery: if you forget it, the keys are lost, so
+          keep a backup of any key you need.
         </p>
         <label className={passwordError ? 'field field-invalid' : 'field'}>
           <span className="field-label">Password</span>
@@ -147,14 +163,24 @@ export function SetPasswordDialog({ onClose }: { onClose: () => void }) {
         </label>
         {error && <p className="field-error">{error}</p>}
         <div className="modal-actions">
-          <button type="button" className="btn" onClick={onClose}>
+          <button type="button" className="btn" onClick={() => close('cancelled')}>
             Cancel
           </button>
           <button type="submit" className="btn btn-primary" disabled={busy}>
-            {busy ? 'Encrypting…' : 'Set password'}
+            {busy ? 'Encrypting…' : 'Create password'}
           </button>
         </div>
       </form>
     </Modal>
+  )
+}
+
+/** Password prompts (unlock / create), mounted once at the app root. */
+export function VaultDialogs() {
+  return (
+    <>
+      <UnlockDialog />
+      <SetPasswordDialog />
+    </>
   )
 }

@@ -6,16 +6,22 @@ import { useBalances } from '../hooks/useBalances'
 import { formatAmount } from '../lib/format'
 import { isModuleEnabled, safeTxs } from '../lib/safe'
 import { parsePrivateKeyInput } from '../lib/validation'
-import { UNLOCK_CANCELLED, protectKey, revealKey, useVaultUnlocked, vaultStore } from '../lib/vault'
+import {
+  UNLOCK_CANCELLED,
+  protectKey,
+  revealKey,
+  unlockForSession,
+  useVaultUnlocked,
+  vaultStore,
+} from '../lib/vault'
 import { type Role, rolesStore } from '../store'
 import { ConfirmIconButton } from './ConfirmIconButton'
 import { EyeIcon, EyeOffIcon } from './icons'
-import { SetPasswordDialog } from './PasswordDialogs'
 import { ProposeButton } from './ProposeButton'
 import { SafeStatus } from './setup/SafeStatus'
 import { RefreshButton } from './RefreshButton'
 import { Tooltip } from './Tooltip'
-import { AddressView, Badge, Card, CopyButton, Notice } from './ui'
+import { AddressView, AsyncButton, Badge, Card, CopyButton, Notice } from './ui'
 
 const TOP_UP = parseEther('0.01')
 
@@ -29,29 +35,25 @@ async function addRole(label: string, privateKey: Hex) {
   )
 }
 
-/** Warns while keys are plain text and offers to set a password. */
-function KeyProtection() {
+/**
+ * Keys created before passwords were required are still plain text: offer to encrypt them.
+ * Nothing is shown otherwise (new keys are always encrypted).
+ */
+function LegacyKeysNotice() {
   const vault = vaultStore.use()
-  const [settingPassword, setSettingPassword] = useState(false)
-
-  if (!vault) {
-    return (
-      <Notice tone="warn">
-        <div className="row wrap notice-row">
-          <span>
-            Private keys are stored <strong>unencrypted</strong> in this browser&apos;s localStorage. Sepolia
-            / PoC use only.
-          </span>
-          <button type="button" className="btn" onClick={() => setSettingPassword(true)}>
-            Protect with a password
-          </button>
-        </div>
-        {settingPassword && <SetPasswordDialog onClose={() => setSettingPassword(false)} />}
-      </Notice>
-    )
-  }
-  // Encrypted: the lock / unlock state lives in the tab bar (VaultLockButton).
-  return null
+  const plain = rolesStore.use().filter((r) => r.privateKey).length
+  if (vault || plain === 0) return null
+  return (
+    <Notice tone="warn">
+      <div className="row wrap notice-row">
+        <span>
+          {plain} role key{plain > 1 ? 's' : ''} from before passwords were required{' '}
+          {plain > 1 ? 'are' : 'is'} stored <strong>unencrypted</strong>.
+        </span>
+        <AsyncButton onClick={unlockForSession}>Create a password</AsyncButton>
+      </div>
+    </Notice>
+  )
 }
 
 export function RolesPanel() {
@@ -79,7 +81,7 @@ export function RolesPanel() {
           />
         }
       >
-        <KeyProtection />
+        <LegacyKeysNotice />
         <div className="row wrap">
           <input
             placeholder="Label, e.g. Trader bot"
@@ -126,7 +128,9 @@ export function RolesPanel() {
                 }
                 addRole(label, parsed.value)
                   .then(() => setImportKey(''))
-                  .catch((error: Error) => setImportError(error.message))
+                  .catch(
+                    (error: Error) => error.message !== UNLOCK_CANCELLED && setImportError(error.message),
+                  )
               }}
             >
               Import

@@ -97,13 +97,25 @@ export const lockVault = () => sessionKeyStore.set(undefined)
 export type UnlockRequest = { reason: string; resolve: () => void; reject: (error: Error) => void }
 export const unlockRequestStore = ephemeral<UnlockRequest | undefined>(undefined)
 
-/** Rejection message when the user closes the unlock dialog. */
+/** Rejection message when the user closes the unlock / create-password dialog. */
 export const UNLOCK_CANCELLED = 'Unlock cancelled.'
 
-async function ensureUnlocked(reason: string): Promise<CryptoKey> {
+/**
+ * A pending "create a password" request, answered by the SetPasswordDialog. Role keys are always
+ * encrypted, so the first action that needs one (adding a role, the lock icon) creates the vault.
+ */
+export type SetupRequest = { reason: string; resolve: () => void; reject: (error: Error) => void }
+export const setupRequestStore = ephemeral<SetupRequest | undefined>(undefined)
+
+/** Asks the user to create the vault password; resolves once it is set (and unlocked). */
+export const requestPasswordSetup = (reason: string) =>
+  new Promise<void>((resolve, reject) => setupRequestStore.set({ reason, resolve, reject }))
+
+async function ensureUnlocked(reason: string, setupReason = reason): Promise<CryptoKey> {
   const current = sessionKeyStore.get()
   if (current) return current
-  await new Promise<void>((resolve, reject) => unlockRequestStore.set({ reason, resolve, reject }))
+  if (!isVaultEnabled()) await requestPasswordSetup(setupReason)
+  else await new Promise<void>((resolve, reject) => unlockRequestStore.set({ reason, resolve, reject }))
   const key = sessionKeyStore.get()
   if (!key) throw new Error('The vault is locked.')
   return key
@@ -112,16 +124,21 @@ async function ensureUnlocked(reason: string): Promise<CryptoKey> {
 /** Unlocks without a pending action (the "Unlock" button); cancelling is not an error there. */
 export async function unlockForSession(): Promise<void> {
   try {
-    await ensureUnlocked('Unlock your role keys for this session.')
+    await ensureUnlocked(
+      'Unlock your role keys for this session.',
+      'Role keys are always encrypted in this browser. Create the password that protects them.',
+    )
   } catch (error) {
     if ((error as Error).message !== UNLOCK_CANCELLED) throw error
   }
 }
 
-/** Encrypts a new role key when a password is set; plain text otherwise. */
-export async function protectKey(privateKey: Hex): Promise<Pick<Role, 'privateKey' | 'encryptedKey'>> {
-  if (!isVaultEnabled()) return { privateKey }
-  const key = await ensureUnlocked('Enter your password to add a role.')
+/** Encrypts a new role key, creating the password first if there is none yet. */
+export async function protectKey(privateKey: Hex): Promise<Pick<Role, 'encryptedKey'>> {
+  const key = await ensureUnlocked(
+    'Enter your password to add a role.',
+    'Role keys are always encrypted in this browser. Create a password to add your first role.',
+  )
   return { encryptedKey: await encrypt(key, privateKey) }
 }
 
