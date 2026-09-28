@@ -3,7 +3,7 @@ import { type Address, getAddress, isAddress, zeroAddress } from 'viem'
 import { RolesPanel } from './components/RolesPanel'
 import { Footer } from './components/Footer'
 import { Notes } from './components/Notes'
-import { UnlockDialog } from './components/PasswordDialogs'
+import { VaultDialogs } from './components/PasswordDialogs'
 import { VaultLockButton } from './components/VaultLockButton'
 import { SettingsPanel } from './components/SettingsPanel'
 import { Playground } from './components/playground/Playground'
@@ -137,7 +137,7 @@ function Workspace({ safe, propose }: { safe: Address; propose?: Sandbox['propos
       </main>
 
       <Footer onOpenNotes={() => setTab('notes')} />
-      <UnlockDialog />
+      <VaultDialogs />
     </SandboxContext.Provider>
   )
 }
