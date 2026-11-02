@@ -61,6 +61,16 @@ Things to know:
   fails closed when nested.
 - **Detaching leaves inner state.** As with any policy, revoke the inner configuration explicitly before detaching.
 
+## Policy Engine V2 (in progress)
+
+[`contracts/v2`](contracts/v2) holds the V2 prototype: scopes per actor, every match runs, built-in Allow/Deny,
+pass-or-deny policies. The interfaces and [`SPEC.md`](contracts/v2/SPEC.md) are frozen first; the app's TypeScript
+mirror is generated from them:
+
+```bash
+pnpm export:v2-abi     # compile, then write ../src/lib/v2/abi.ts (run `pnpm format` at the root afterwards)
+```
+
 ## Develop
 
 ```bash

@@ -13,6 +13,7 @@
     "build": "hardhat compile",
     "test": "hardhat test",
     "typecheck": "hardhat compile --quiet && tsc --noEmit",
+    "export:v2-abi": "hardhat compile --quiet && ts-node scripts/export-v2-abi.ts",
     "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia"
   },
   "devDependencies": {
