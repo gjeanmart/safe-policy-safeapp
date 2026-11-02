@@ -80,7 +80,8 @@ function ensurePlan(config: Config, tx: ModuleTx): Plan {
 const QUEUE_NEXT: Record<QueueEntry['status'], (id: string, e: Pick<QueueEntry, 'countdown'>) => string> = {
   waiting: (id, e) => `wait ${e.countdown}, then simulate ${id} and exec ${id}`,
   ready: (id) => `ready: simulate ${id}, then exec ${id}`,
-  expired: () => 'expired: cannot be scheduled again until a canceller cancels it',
+  expired: (id) =>
+    `expired: schedule ${id} again (it replaces the expired schedule), wait, then exec in the window`,
   cleared: (id) => `cleared by a freeze: schedule ${id} again once not frozen`,
   untimelocked: (id) => `no Timelock applies any more: simulate ${id}, then exec`,
 }

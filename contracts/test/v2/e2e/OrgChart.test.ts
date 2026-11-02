@@ -45,6 +45,9 @@ import {
   type World,
 } from './world'
 
+/** Module-path proof deadline (CoSigner, Safenet) far past any time the story advances to. */
+const PROOF_DEADLINE = 2n ** 40n
+
 /**
  * Story: the design doc's example organisation (§3 table) on a real Safe 1.5.0 with the real
  * engine. Owners act after 24h, Ops pays two vendors within a monthly budget, an AI agent signs
@@ -55,10 +58,15 @@ describe('E2E story: the example organisation (design doc §3)', () => {
   /** Co-signs `tx` for the agent (anyone relays the co-signer's signature), then executes it. */
   async function agentExec(w: World, tx: Awaited<ReturnType<typeof signCowOrderCall>>) {
     const callHash = await moduleCallHash(w, w.agent.address, tx)
-    const digest = await w.cosignerPolicy.moduleTxDigest(w.engineAddress, w.safeAddress, callHash)
+    const digest = await w.cosignerPolicy.moduleTxDigest(
+      w.engineAddress,
+      w.safeAddress,
+      callHash,
+      PROOF_DEADLINE,
+    )
     await w.cosignerPolicy
       .connect(w.outsider)
-      .cosign(w.engineAddress, w.safeAddress, callHash, w.cosigner.address, cosign(w, digest))
+      .cosign(w.engineAddress, w.safeAddress, callHash, w.cosigner.address, PROOF_DEADLINE, cosign(w, digest))
     return execModule(w, w.agent, tx)
   }
 

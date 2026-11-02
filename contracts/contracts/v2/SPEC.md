@@ -5,9 +5,21 @@ D4', F1–F13, §3a), `analysis-fable.md`, the V2 design doc. Where this file an
 difference is listed in §13. Deviations accepted after implementation are fixed inline and listed in §14.
 
 The words MUST / MUST NOT / MAY are normative. "Engine" means `SafePolicyGuardV2` (engine + guard, one address);
-policies see it as `msg.sender`. Its code is split in two (§14, D-6): `SafePolicyGuardV2` holds the hooks, `preview` and
-the views, and DELEGATECALLs `PolicyEngineV2` (deployed by its constructor) for configuration and freeze, so everything
-runs on the guard's storage at the guard's address. Nobody calls `PolicyEngineV2` directly.
+policies see it as `msg.sender`, Safes install it, the app and guardians call it. Its code is six contracts, each deployed
+in its own transaction because a Sepolia transaction cannot deploy more than ≈ 10 KB of code (§14, D-6 and D-18); all
+of it runs on the guard's storage at the guard's address, reached by DELEGATECALL, and nobody calls a module directly:
+
+| Contract (`engine/` unless noted) | Holds                                                                                                    | Reached by                                  |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `SafePolicyGuardV2` (`v2/`)       | The hooks: engine rules, scope lookup, built-in DENY / ALLOW, batch decoding; `freezeStatus`, `SIGN_LIB` | Safes, policies (the hot path)              |
+| `PolicyEngineV2Runner`            | Policy runs: grouping, owner-path `txHash` and policy context, encoding, the policy calls                | the hooks and `preview`, one call per check |
+| `PolicyEngineV2Config`            | `configureImmediately`, `requestConfiguration`, `invalidateRoot`, `applyConfiguration`, roles            | the guard's fallback                        |
+| `PolicyEngineV2Freeze`            | `freeze`, `freezeActor`, `lift`, and every small view (immutables, roles, freeze state, ids, batches)    | the guard's fallback (its default)          |
+| `PolicyEngineV2Preview`           | `preview`: the hooks' evaluation compiled to report every gate                                           | the guard's fallback                        |
+| `PolicyEngineV2Views`             | `getScopes`, `getAttachments`, `getScopeAttachments`, `getAttachment`, `getMatchingAttachments`          | the guard's fallback                        |
+
+The guard's compiled ABI is therefore partial; `interfaces/ISafePolicyGuardV2.sol` (`IPolicyEngineV2` + both guard
+interfaces + `engineModules()`) is the full ABI of the address.
 
 Files frozen by WP0 (change them only together with this spec, the TS mirror and the tests):
 
@@ -37,7 +49,7 @@ Pinned values (asserted in `test/v2/Scope.test.ts`, mirrored in `scopes.ts`):
 
 A Safe transaction has an **actor** (`OWNERS` on `execTransaction`, the module on `execTransactionFromModule`) and one
 or more **calls** (one, or the sub-calls of a trusted batch). Each call is looked up at **8 scopes** (actor ∈ {ANY,
-actor} × call ∈ {any, `to`.\*, \*.`selector`, `to`.`selector`}). Each scope holds up to 8 **attachments**: the built-ins
+actor} × call ∈ {any, `to`.\*, \*.`selector`, `to`.`selector`}). Each scope holds up to 4 **attachments**: the built-ins
 ALLOW and DENY, or a POLICY contract with per-attachment settings. Every matching attachment runs. Any deny reverts the
 transaction; every call needs at least one ALLOW that counts; policies only pass or deny. Call-level policies run per
 call; transaction-level policies run once per transaction with the union of what all calls matched. Configuration is
@@ -154,7 +166,7 @@ SET:
   kind ALLOW && opMask has DELEGATECALL: level == 7                 else DelegateCallNotExact
   kind POLICY: policy has code, supportsInterface(0x55872811) true,
                policyLevel() decodes to 0 or 1                     else InvalidPolicy(policy)
-  if new: attachments[safe][key].length < 8                        else TooManyAttachments(key)
+  if new: attachments[safe][key].length < 4                        else TooManyAttachments(key)
           push; levelCounts[safe][level]++; if first in scope → add to scope list
   else:   overwrite opMask and policyLevel in place
   kind POLICY: delayFloor = policy.configure(safe, id, scope, opMask, data)
@@ -180,15 +192,20 @@ Timelocks on other actors (Recovery R, Agent) are not bounded by `DELAY`.
 
 ### 5.4 Constructor
 
-`constructor(uint256 delay, uint256 expiry, uint256 maxFreeze, uint256 freezeCooldown, address[] trustedBatches, address signLib)`
+`constructor(uint256 delay, uint256 expiry, uint256 maxFreeze, uint256 freezeCooldown, address[] trustedBatches, address signLib, address[5] modules)`
 
 - `expiry > 0`, `maxFreeze > 0`, `expiry ≥ maxFreeze + freezeCooldown + delay` (F3) else `InvalidTiming`.
 - `signLib != 0`, `1 ≤ trustedBatches.length ≤ 4`, no zero, no duplicates, else `InvalidDeployment`. All immutable.
+- `modules = [config, freeze, preview, views, runner]` (§14, D-18), each deployed first with the same six arguments
+  (each module runs the same checks in its own constructor); the guard checks every module's
+  `engineParams() == keccak256(abi.encode(delay, expiry, maxFreeze, freezeCooldown, trustedBatches, signLib))`, else
+  `InvalidDeployment`. `engineModules()` returns them.
 - Deploy (`scripts/deploy-v2.ts`): `DELAY` 5 s (play) and 24 h (freeze story); `MAX_FREEZE` 7 d; `FREEZE_COOLDOWN`
   12 h; `EXPIRY` 9 d for both (F3 needs ≥ 8.5 d for the 24 h engine, so V1's 7 d does not fit); trusted batches = the
   canonical MultiSendCallOnly 1.4.1 and 1.5.0, no full `MultiSend` (§14, D-11). `PolicySignLib` is deployed first (its
-  address is a constructor argument). A Safe installs the engine as **both** guard and module guard (`setGuard` and
-  `setModuleGuard`).
+  address is a constructor argument), then per engine its five modules and the guard, one transaction each
+  (`scripts/lib/v2-deployment.ts`, also used by the tests). A Safe installs the engine as **both** guard and module
+  guard (`setGuard` and `setModuleGuard`).
 
 ## 6. Evaluation
 
@@ -366,9 +383,11 @@ nonce = current nonce)`, `nonce = current`, `executor = address(0)`, no signatur
   consumed.
 - `callHash` has no chain id and no engine: policies that verify **signatures** over a module transaction sign an
   EIP-712 `ModuleTransaction` digest under their own domain `(name, "1", chainid, policy address)`; never the raw
-  `callHash`. SafenetPolicyV2: `ModuleTransaction(address engine,address safe,bytes32 callHash)`. CoSignerPolicyV2 adds
-  its own use counter: `ModuleTransaction(address engine,address safe,bytes32 callHash,uint256 nonce)` with `nonce =
-moduleTxNonce(engine, safe, callHash)` (§8.6, §14, D-1).
+  `callHash`. SafenetPolicyV2: `ModuleTransaction(address engine,address safe,bytes32 callHash,uint256 deadline)`.
+  CoSignerPolicyV2 adds its own use counter: `ModuleTransaction(address engine,address safe,bytes32 callHash,uint256
+nonce,uint256 deadline)` with `nonce = moduleTxNonce(engine, safe, callHash)` (§8.6, §14, D-1). Both proofs can only be
+  pushed and consumed while `block.timestamp <= deadline` (`CoSignatureExpired`, `AttestationExpired`): an approval
+  given long ago does not authorise the call today (§14, D-15).
 - Owner path: proofs ride in the policy context (§6.6), or (Timelock) are pushed with owner signatures over the Safe
   transaction hash. An owner schedule dies when the Safe nonce moves past it.
 
@@ -482,7 +501,9 @@ Per call, the "party" checked against **every** matched attachment (the Safe its
 Lists ≤ 64 entries each. Native-value check works next to `Allow (Owners, *)` because every matching scope runs (Akshay's
 case). Malformed calldata for a known selector → deny with the contract-level error `MalformedCall(selector)` (also in
 LimitPolicy; not in the frozen interfaces, so the app's error ABI declares it). Inside a batch, `increaseAllowance` is
-checked against the allowance expected after the earlier sub-calls (transient storage), not only the on-chain one.
+checked against the allowance expected after the earlier `approve` / `increaseAllowance` of the same pair (transient
+storage, keyed by the Safe transaction `ctx.txHash`) when there is one, else the on-chain one: `[approve(x, 0),
+increaseAllowance(x, a)]` is judged as `a` (§14, D-17).
 
 ### 8.4 LimitPolicy ("Transfer budget")
 
@@ -497,7 +518,7 @@ checked against the allowance expected after the earlier sub-calls (transient st
 | `transfer(to, amount)` on token T          | `amount` of T                                                                                                                                                                      |
 | `transferFrom(from, to, amount)`           | `amount` of T if `from == safe`, else 0                                                                                                                                            |
 | `approve(spender, amount)`                 | reservation: `delta = amount − allowance(safe, spender)` (STATICCALL); `delta > 0` spends it; `delta < 0` gives back `min(−delta, reserved[spender] in the current window, spent)` |
-| `signPermit` (DELEGATECALL to `SIGN_LIB`)  | reservation of `delta` when `delta > 0`; never gives back (the allowance only moves if someone submits the permit)                                                                 |
+| `signPermit` (DELEGATECALL to `SIGN_LIB`)  | plain spend of the full `value` of `token`: no reservation, no give-back, the token is never read (anyone can submit the permit at any time before its deadline)                   |
 | `signPermit2` (DELEGATECALL to `SIGN_LIB`) | plain spend of the full `amount` (a Permit2 allowance is not the ERC-20 allowance): no reservation, no give-back                                                                   |
 | `increaseAllowance(spender, added)`        | `added` (reservation)                                                                                                                                                              |
 | `decreaseAllowance(spender, sub)`          | give-back `min(sub, allowance, reserved, spent)`                                                                                                                                   |
@@ -519,28 +540,33 @@ approve(x, a)]` cannot give back without spending (§14, D-4).
 
 `ArgConstraint {bytes4 selector; uint16 argIndex; ArgOp op; bytes32[] values}`, `ArgOp {EQ, NEQ, IN, NOT_IN, LTE, GTE,
 EQ_SAFE}` on the static word `w = data[4 + 32·i : 4 + 32·(i+1)]` (`ArgMissing` if too short). Constraints whose
-selector equals the call's apply (AND across all matched attachments); none applies → pass, or `NoConstraint` if any
-attachment is `strict`. ≤ 16 constraints, ≤ 32 values.
+selector equals the call's apply (AND across all matched attachments); none applies → pass. `strict` is per attachment:
+a strict attachment none of whose own constraints applies denies with `NoConstraint`, whatever other attachments
+constrain (§14, D-16). ≤ 16 constraints, ≤ 32 values.
 
 ### 8.6 CoSignerPolicyV2 (port of V1, both paths)
 
 - Owner path: `policyData = abi.encode(CoSignature[] {address cosigner; bytes signature})`; for each distinct co-signer of
   the matched attachments a valid signature over `ctx.txHash` (ECDSA 65 bytes low-s, or ERC-1271 for a contract), as
   V1. `MissingCoSignature` / `InvalidCoSignature` / `MalformedPolicyData`.
-- Module path: `cosign(engine, safe, callHash, cosigner, signature)` (anyone relays) over `moduleTxDigest(engine, safe,
-callHash)`; the check requires and consumes one per co-signer. The digest is the 4-field `ModuleTransaction(engine,
-safe, callHash, nonce)` (§7), `nonce = moduleTxNonce(engine, safe, callHash)`, a use counter the check increments: a
-  consumed co-signature can never be pushed again (deterministic ECDSA would reproduce the same bytes; ERC-1271
-  approvals are usually permanent), and the same call executed twice needs two (§14, D-1).
+- Module path: `cosign(engine, safe, callHash, cosigner, deadline, signature)` (anyone relays) over
+  `moduleTxDigest(engine, safe, callHash, deadline)`; the check requires and consumes one per co-signer. The digest is
+  `ModuleTransaction(engine, safe, callHash, nonce, deadline)` (§7), `nonce = moduleTxNonce(engine, safe, callHash)`, a
+  use counter the check increments: a consumed co-signature can never be pushed again (deterministic ECDSA would
+  reproduce the same bytes; ERC-1271 approvals are usually permanent), and the same call executed twice needs two (§14,
+  D-1). A co-signature is pushed and consumed only while `block.timestamp <= deadline`, else
+  `CoSignatureExpired(cosigner, deadline)` (§14, D-15).
 - One run per transaction: one co-signature covers the whole batch (fixes V1's per-sub-call spend).
 
 ### 8.7 SafenetPolicyV2 (port of V1, both paths)
 
 Owner path: `policyData` = V1's 256-byte attestation over the Safe transaction hash (`ctx.txHash`), epoch forest as V1.
-Module path: `submitAttestation(engine, safe, callHash, attestation)` over `moduleTxDigest(engine, safe, callHash)` in
-place of the safeTxHash; consumed by the check. One attestation per transaction (batches no longer fail closed). Each
-FROST signature can be submitted once (`AttestationAlreadySpent`, keyed by the signature hash) and credits one
-execution of `callHash`: the same call twice needs two signatures (§14, D-2).
+Module path: `submitAttestation(engine, safe, callHash, deadline, attestation)` over `moduleTxDigest(engine, safe,
+callHash, deadline)` in place of the safeTxHash; consumed by the check. One attestation per transaction (batches no
+longer fail closed). Each FROST signature can be submitted once (`AttestationAlreadySpent`, keyed by the signature hash)
+and credits one execution of `callHash`: the same call twice needs two signatures (§14, D-2). Credits are submitted and
+consumed only while `block.timestamp <= deadline` (`AttestationExpired(deadline)`); the credits of one call share the
+earliest deadline, and an expired credit is dropped when a new attestation arrives (§14, D-15).
 Constructor and `updateEpoch` as V1; WP5 vendors the FROST libraries from 8ee68a8 under `contracts/v2/` (not under
 `vendor/policy-engine`).
 
@@ -579,15 +605,19 @@ gas: [`GAS.md`](GAS.md) (F12 expects ~30–40 k end to end for an ops payment).
 
 - `PolicyFallbackHandler.isValidSignature(hash, sig)` returns the magic value iff `sig` is empty and
   `signedMessages[getMessageHashForSafe(safe, abi.encode(hash))] != 0`; never checks owner signatures (no off-chain
-  1271). Legacy `isValidSignature(bytes, bytes)`: the same check with `hash = keccak256(data)`, i.e. the message
-  `abi.encode(keccak256(data))`. Safe's `CompatibilityFallbackHandler` hashes `getMessageHashForSafe(safe, data)`
-  instead, so a message approved with `SignMessageLib.signMessage(bytes)` does not
-  validate through the legacy overload here (§14, D-9). Approvals are permanent (no revoke).
+  1271). Legacy `isValidSignature(bytes data, bytes)`: the same check over the message `data` itself
+  (`signedMessages[getMessageHashForSafe(safe, data)]`), exactly as Safe's `CompatibilityFallbackHandler`, so a message
+  approved with Safe's `SignMessageLib.signMessage(data)` validates here too, and the bytes32 overload equals the legacy
+  one over `abi.encode(hash)` (§14, D-9). Approvals are permanent (no revoke).
 - `PolicySignLib` (DELEGATECALL, `SIGN_LIB`): writes `signedMessages[msgHash] = 1` in the Safe's storage (slot 7 in
   Safe 1.5.0 `SafeStorage`, as `SignMessageLib`) and emits `SignMsg(msgHash)`, `msgHash = getMessageHashForSafe(safe,
 abi.encode(digest))`:
   - `signPermit(token, spender, value, deadline, nonce)`: EIP-2612 `Permit(owner = safe, spender, value, nonce,
-deadline)` digest under `token.DOMAIN_SEPARATOR()`.
+deadline)` digest under `token.DOMAIN_SEPARATOR()`, which must be the token's own domain: it must equal an
+    `EIP712Domain` rebuilt with `verifyingContract = token` and `block.chainid`, from ERC-5267 `eip712Domain()` (fields
+    `0x0f` or `0x0d`) or `name()` / `version()` (`"1"` when there is no `version()`), with or without a version field;
+    otherwise `DomainMismatch(token)`. Without it, a contract returning another token's domain would make the Safe sign
+    that token's permit while Limit, Recipients and Quorum price it under the contract's address (§14, D-14).
   - `signCowOrder(GPv2Order)`: `GPv2Order.hash` under the settlement's `domainSeparator()` (settlement immutable).
   - `signPermit2(token, spender, amount, expiration, nonce, sigDeadline)` (stretch): `PermitSingle` digest.
   - `signMessage(bytes32 digest)`: raw; stays DELEGATECALL, so only an exact-scope ALLOW covering DELEGATECALL grants it.
@@ -669,7 +699,7 @@ to.selector)`; level 3 `(ANY, to.selector)` does not count (it would grant every
    transaction-level policies (Co-signer, Safenet, Quorum) can need context in the same transaction. Co-signer services
    still sign the plain Safe transaction hash.
 9. **`callHash` has no chain id / engine** (plan formula kept); signature-based proofs wrap it in an EIP-712
-   `ModuleTransaction(engine, safe, callHash)` under the policy's domain.
+   `ModuleTransaction(engine, safe, callHash, ...)` under the policy's domain (with a `deadline` since D-15).
 10. **Timelock**: delay recomputed at execution from current attachments; cancellers snapshotted at schedule time
     (via `getMatchingAttachments`); optional `window` expiry (module-path schedules have no nonce and would otherwise
     live forever); freeze clearing by epoch + "frozen at schedule"; owner cancel digest is EIP-712 under the policy.
@@ -688,16 +718,21 @@ Accepted when the work packages were merged. Each is already applied in the sect
 
 | #    | What                                                                                                                                                                                                      | Why                                                                                                                                                                                            | Who |
 | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
-| D-1  | CoSigner module digest is 4-field `ModuleTransaction(engine, safe, callHash, nonce)` with a per-`callHash` use counter (`moduleTxNonce`) (§7, §8.6)                                                       | `callHash` has no nonce: a consumed co-signature (deterministic ECDSA, permanent ERC-1271 approval) could be pushed again for the next identical call                                          | WP5 |
+| D-1  | CoSigner module digest `ModuleTransaction(engine, safe, callHash, nonce, deadline)` with a per-`callHash` use counter (`moduleTxNonce`); `deadline` since D-15 (§7, §8.6)                                 | `callHash` has no nonce: a consumed co-signature (deterministic ECDSA, permanent ERC-1271 approval) could be pushed again for the next identical call                                          | WP5 |
 | D-2  | Safenet module path: one submission per FROST signature (`AttestationAlreadySpent`), one credit each (§8.7)                                                                                               | Same replay problem as D-1: without a spent set one attestation would credit any number of executions                                                                                          | WP5 |
 | D-3  | Timelock `AlreadyScheduled` relaxed: a schedule voided by a freeze (`clearOnFreeze`, would fail `ClearedByFreeze`) can be replaced (§8.2)                                                                 | Otherwise a voided module-path schedule blocks the same call forever                                                                                                                           | WP3 |
-| D-4  | Limit: give-back capped at `min(sub, allowance, reserved, spent)`; `signPermit` reserves but never gives back; `signPermit2` is a plain spend; batch-aware expected allowance in transient storage (§8.4) | A permit or Permit2 signature may never be used, so giving back on it would refill the budget for free; without the transient allowance a batch could give back and re-spend                   | WP4 |
+| D-4  | Limit: give-back capped at `min(sub, allowance, reserved, spent)`; `signPermit` and `signPermit2` are now plain spends of the full value; batch-aware expected allowance kept in transient storage (§8.4) | A signature may never be used (no give-back); `value - allowance` pricing let each permit re-arm a drained allowance (review M-1); the transient allowance stops batch give-and-re-spend       | WP4 |
 | D-5  | Recipients: `approve(x, 0)` passes for any spender (§8.3)                                                                                                                                                 | Revoking an approval must never be blocked by a recipients list                                                                                                                                | WP4 |
-| D-6  | Engine code split: `SafePolicyGuardV2` (hooks, preview, views) + `PolicyEngineV2` (configuration, freeze) reached by DELEGATECALL, one address and one storage (header)                                   | One contract does not fit 24 KiB (guard alone is ≈ 22.9 KiB)                                                                                                                                   | WP2 |
+| D-6  | Engine code split: `SafePolicyGuardV2` (hooks, preview, views) + `PolicyEngineV2` (configuration, freeze) reached by DELEGATECALL, one address and one storage (header). Split further by D-18 | One contract does not fit 24 KiB (guard alone is ≈ 22.9 KiB)                                                                                                                                   | WP2 |
 | D-7  | `RoleChange` with `account == 0` reverts `InvalidActor(address(0))` (§5.2)                                                                                                                                | The frozen interface has no dedicated error                                                                                                                                                    | WP2 |
 | D-8  | `preview` keeps a 300 000 gas reserve per policy call (§6.7)                                                                                                                                              | An out-of-gas policy is reported as a gate instead of aborting the whole preview                                                                                                               | WP2 |
-| D-9  | Legacy `isValidSignature(bytes, bytes)` hashes `abi.encode(keccak256(data))`, unlike Safe's `CompatibilityFallbackHandler` (§10)                                                                          | Follows this spec; one approval format for both overloads. Incompatible with `SignMessageLib.signMessage(bytes)`: open for review                                                              | WP6 |
+| D-9  | Closed: legacy `isValidSignature(bytes data, bytes)` checks the message `data` itself, as Safe's `CompatibilityFallbackHandler` (§10)                                                                     | `abi.encode(keccak256(data))` matched no integrator's approvals (review F6); `SignMessageLib.signMessage(data)` approvals now validate, and both overloads agree as in Compat                  | WP6 |
 | D-10 | Post-hooks: owner-path `ExecutionFailed` unreachable on 1.5.0; module-path failure reverts `ModuleExecutionFailed` instead of returning `false` (§6.1)                                                    | A post-hook can only revert; failing closed means a failed module call consumes no proof and no budget                                                                                         | WP1 |
 | D-11 | Deploy: `EXPIRY` 9 d; trusted batches = MultiSendCallOnly 1.4.1 and 1.5.0 only, no full `MultiSend` (§5.4)                                                                                                | F3 needs ≥ 8.5 d; the app batches with MultiSendCallOnly, which refuses DELEGATECALL sub-calls itself                                                                                          | WP7 |
 | D-12 | `MalformedCall(bytes4)` in RecipientsPolicy and LimitPolicy, outside the frozen interfaces (§8.3)                                                                                                         | Malformed calldata for a known selector needs a named deny reason                                                                                                                              | WP4 |
 | D-13 | Caps lowered to 4 attachments per scope and 8 calls per batch; policy dispatch grouped by policy in linear time (§9)                                                                                      | At 8 × 16 the engine (then quadratic in the matches) could not fit a full batch in the 2^24 gas cap; at 4 × 8 the linear engine needs ≈ 3.1 M in the worst case, leaving room for the policies | Gas |
+| D-14 | `PolicySignLib.signPermit` requires `token.DOMAIN_SEPARATOR()` to be the token's own domain (`verifyingContract == token`, this chain), else `DomainMismatch(token)`, a contract-level error (§10)        | A contract returning USDC's separator made the Safe sign a real USDC permit that Limit, Recipients and Quorum priced under that contract (review H-1). CoW / Permit2 domains are pinned        | Rev |
+| D-15 | Module-path proofs expire: `deadline` in both `ModuleTransaction` digests and in `cosign` / `submitAttestation` / `moduleTxDigest`; `CoSignatureExpired`, `AttestationExpired` (§7, §8.6, §8.7)           | A pushed co-signature or Safenet credit authorised the same call forever, even once the co-signer or validators would refuse it (review L-1 / F4). Interface change                            | Rev |
+| D-16 | ArgsPolicy `strict` is evaluated per attachment (§8.5)                                                                                                                                                    | Merged strictness let another attachment's constraint satisfy a strict attachment with none for the selector (review L-2)                                                                      | Rev |
+| D-17 | Recipients: once an earlier sub-call set the expected allowance (transient, keyed by `ctx.txHash`), `increaseAllowance` uses it instead of `max(on-chain, expected)` (§8.3)                               | `[approve(x, 0), increaseAllowance(x, a)]` was judged as on-chain + a, a false `ApprovalTooLarge` (review F8); the key keeps other Safe transactions' values out                               | Rev |
+| D-18 | Deployable on Sepolia: every contract ≤ 10,000 B of runtime, one create per transaction. The engine is the guard plus five DELEGATECALLed modules (header, §5.4): policy runs in `PolicyEngineV2Runner`, one call per check and only when a policy matched or an owner-path policy context is present; the runner decodes the context before any other deny, so `MalformedContext` still comes first, and before a built-in deny of call `i` the guard sends the runs of the calls before `i`, so the same deny wins as before. `preview`, the enumeration views, configuration, freeze and the small views move to modules routed by the guard's `fallback`. The constructor takes the modules (`InvalidDeployment` if their arguments differ). `TimelockPolicy` DELEGATECALLs `TimelockPolicyQueue` for `scheduleOwnerTx` / `scheduleModuleTx` (shared `TimelockPolicyStorage`). Interfaces, errors, events, ids and hashes unchanged; `ISafePolicyGuardV2` is the guard's full ABI | Sepolia charges ≈ 1,542 gas per byte of code plus ≈ 210 k per create, under the 2^24 cap: ≈ 10.4 KB per transaction. The guard (22.2 KB) and the logic its constructor created (19.6 KB) needed ≈ 65 M gas in one transaction, TimelockPolicy (13.7 KB) 21 M. Cost: +5 to +7 k gas on a transaction that runs policies, −0.9 to −1.6 k on an ALLOW-only one (GAS.md) | Split |

@@ -20,19 +20,20 @@ import {
   zeroPadValue,
 } from 'ethers'
 import { ethers } from 'hardhat'
+import { deployEngineV2, deployTimelockPolicy, engineAt } from '../../../scripts/lib/v2-deployment'
 import type {
   CoSignerPolicyV2,
   CowSettlementStub,
   E2eToken,
   FreezePolicy,
   FrostChallenge,
+  ISafePolicyGuardV2,
   LimitPolicy,
   Permit2Stub,
   PolicyFallbackHandler,
   PolicySignLib,
   QuorumPolicyV2,
   RecipientsPolicy,
-  SafePolicyGuardV2,
   SafenetPolicyV2,
   TimelockPolicy,
 } from '../../../typechain-types'
@@ -229,18 +230,23 @@ export async function deployWorld(opts: { delay?: bigint; infra?: SafeInfra } = 
   const permit2 = (await ethers.deployContract('Permit2Stub')) as unknown as Permit2Stub
   const signLib = (await ethers.deployContract('PolicySignLib', [cow, permit2])) as unknown as PolicySignLib
   const delay = opts.delay ?? DELAY
-  const engine = (await ethers.deployContract('SafePolicyGuardV2', [
+  // The guard and its modules, and TimelockPolicy with its queue, as scripts/deploy-v2.ts deploys them.
+  const { engine: engineAddress } = await deployEngineV2({
     delay,
-    EXPIRY,
-    F,
-    C,
-    [await infra.multiSendCallOnly.getAddress(), await infra.multiSend.getAddress()],
-    await signLib.getAddress(),
-  ])) as unknown as SafePolicyGuardV2
+    expiry: EXPIRY,
+    maxFreeze: F,
+    freezeCooldown: C,
+    trustedBatches: [await infra.multiSendCallOnly.getAddress(), await infra.multiSend.getAddress()],
+    signLib: await signLib.getAddress(),
+  })
+  const engine = await engineAt(engineAddress)
   const handler = (await ethers.deployContract('PolicyFallbackHandler')) as unknown as PolicyFallbackHandler
 
   const freeze = (await ethers.deployContract('FreezePolicy')) as unknown as FreezePolicy
-  const timelock = (await ethers.deployContract('TimelockPolicy')) as unknown as TimelockPolicy
+  const timelock = (await ethers.getContractAt(
+    'TimelockPolicy',
+    await deployTimelockPolicy(),
+  )) as unknown as TimelockPolicy
   const recipients = (await ethers.deployContract('RecipientsPolicy')) as unknown as RecipientsPolicy
   const limit = (await ethers.deployContract('LimitPolicy')) as unknown as LimitPolicy
   const cosignerPolicy = (await ethers.deployContract('CoSignerPolicyV2')) as unknown as CoSignerPolicyV2
@@ -695,7 +701,7 @@ export async function expectError(
  */
 export async function expectPolicyDenied(
   action: Promise<unknown>,
-  engine: SafePolicyGuardV2,
+  engine: ISafePolicyGuardV2,
   policy: BaseContract,
   name: string,
   args?: unknown[],

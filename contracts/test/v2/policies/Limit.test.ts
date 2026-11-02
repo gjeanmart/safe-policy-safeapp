@@ -1,6 +1,6 @@
 import { time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
-import { Interface, ZeroAddress, ZeroHash, getAddress, id, zeroPadValue } from 'ethers'
+import { Interface, MaxUint256, ZeroAddress, ZeroHash, getAddress, id, zeroPadValue } from 'ethers'
 import { ethers } from 'hardhat'
 import type { LimitEngineStub, LimitPolicy, MockTokenV2 } from '../../../typechain-types'
 import { expectRevert } from '../helpers'
@@ -403,15 +403,29 @@ describe('V2 LimitPolicy', () => {
       ])
     })
 
-    it('reserves a permit increase but never gives back on a lower permit', async () => {
+    it('debits a permit in full, whatever the current allowance, and never gives it back (review M-1)', async () => {
       await check(sign('signPermit', [usdc, router, 40n, 1n, 0n]))
       expect(await spent()).to.equal(40n)
-      expect(await reserved()).to.equal(40n)
-      await token.setAllowance(safe, router, 40n) // permit submitted
-      await check(sign('signPermit', [usdc, router, 0n, 1n, 1n]))
-      expect(await spent()).to.equal(40n)
+      expect(await reserved()).to.equal(0n)
+      // An allowance already at the permit value does not make the next permit free.
+      await token.setAllowance(safe, router, 40n)
+      await check(sign('signPermit', [usdc, router, 40n, 1n, 1n]))
+      expect(await spent()).to.equal(80n)
+      // Revoking the allowance gives nothing back: the permits stay submittable.
       await check(tokenCall('approve', [router, 0n]))
-      expect(await spent()).to.equal(0n)
+      expect(await spent()).to.equal(80n)
+      await expectRevert(check(sign('signPermit', [usdc, router, 21n, 1n, 2n])), policy, 'LimitExceeded', [
+        A,
+        usdc,
+        21n,
+        20n,
+      ])
+    })
+
+    it('never reads the token for a permit: an unlimited allowance does not price it lower', async () => {
+      await token.setAllowance(safe, router, MaxUint256)
+      await check(sign('signPermit', [usdc, router, 30n, 1n, 0n]))
+      expect(await spent()).to.equal(30n)
     })
 
     it('debits a Permit2 signature in full', async () => {

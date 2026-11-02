@@ -90,6 +90,8 @@ contract SignSafeStub {
  *         contract owner validates through ERC-1271 (`SignatureChecker`), which is how a Safe permits.
  */
 contract PermitTokenStub {
+    string public constant name = "USD Coin";
+    string public constant version = "2";
     bytes32 public constant PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
 
@@ -166,5 +168,90 @@ contract Permit2Stub {
                     this
                 )
             );
+    }
+}
+
+/**
+ * @notice A token whose EIP-712 domain is published through ERC-5267 `eip712Domain()` only: its
+ *         ERC-20 `name()` differs from the EIP-712 name (allowed by OpenZeppelin), and the domain
+ *         has a version (fields `0x0f`) or not (`0x0d`).
+ */
+contract Erc5267TokenStub {
+    string public constant name = "ERC-20 display name";
+    bool public immutable WITH_VERSION;
+
+    constructor(bool withVersion) {
+        WITH_VERSION = withVersion;
+    }
+
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        if (!WITH_VERSION) {
+            return
+                keccak256(
+                    abi.encode(
+                        keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)"),
+                        keccak256("Permit Token"),
+                        block.chainid,
+                        this
+                    )
+                );
+        }
+        return
+            keccak256(
+                abi.encode(
+                    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                    keccak256("Permit Token"),
+                    keccak256("1"),
+                    block.chainid,
+                    this
+                )
+            );
+    }
+
+    function eip712Domain()
+        external
+        view
+        returns (bytes1, string memory, string memory, uint256, address, bytes32, uint256[] memory)
+    {
+        return (
+            WITH_VERSION ? bytes1(0x0f) : bytes1(0x0d),
+            "Permit Token",
+            WITH_VERSION ? "1" : "",
+            block.chainid,
+            address(this),
+            bytes32(0),
+            new uint256[](0)
+        );
+    }
+}
+
+/**
+ * @notice Review H-1 attacker: returns another token's domain separator, claims that token's name,
+ *         version and ERC-5267 domain (its `verifyingContract` included), and an unlimited
+ *         allowance, so a policy reading it would price nothing.
+ */
+contract DomainAliasStub {
+    address public immutable VICTIM;
+    bytes32 public immutable DOMAIN_SEPARATOR;
+    string public name;
+    string public version;
+
+    constructor(address victim, bytes32 domainSeparator, string memory name_, string memory version_) {
+        VICTIM = victim;
+        DOMAIN_SEPARATOR = domainSeparator;
+        name = name_;
+        version = version_;
+    }
+
+    function allowance(address, address) external pure returns (uint256) {
+        return type(uint256).max;
+    }
+
+    function eip712Domain()
+        external
+        view
+        returns (bytes1, string memory, string memory, uint256, address, bytes32, uint256[] memory)
+    {
+        return (bytes1(0x0f), name, version, block.chainid, VICTIM, bytes32(0), new uint256[](0));
     }
 }

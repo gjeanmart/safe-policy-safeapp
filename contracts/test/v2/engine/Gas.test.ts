@@ -90,7 +90,9 @@ describe('V2 engine: gas', () => {
       policy(scope(ANY), cp),
       policy(scope(ANY), tp),
     ])
-    expect(Number(g.module - baseline.module)).to.be.lessThan(65_000)
+    // Policies run in PolicyEngineV2Runner, one DELEGATECALL per transaction (~7k: 2,600 cold
+    // access, calldata forwarding, its own setup), the price of the Sepolia size split (D-14).
+    expect(Number(g.module - baseline.module)).to.be.lessThan(72_000)
   })
 
   it('worst case at caps: 8-call batch, 8 levels × 4 attachments (1 ALLOW + 3 policies) per call', async () => {

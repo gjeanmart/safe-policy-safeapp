@@ -169,6 +169,19 @@ describe('V2 engine: owner-path policy context (§6.6)', () => {
     // An empty context list is fine.
     await execOwner(f.safe, f.targetAddr, SEL.ping, Op.CALL, 0n, withContext([]))
   })
+
+  it('MalformedContext comes before the engine rules (the runner checks it before any deny)', async () => {
+    const { f } = await ctxSetup()
+    const engine = await f.engine.getAddress()
+    // A call to the engine outside the configuration path is GuardTargetDenied...
+    await expectRevert(execOwner(f.safe, engine, SEL.ping), f.engine, 'GuardTargetDenied')
+    // ...unless the context is malformed: that deny comes first, as when the hook decoded it.
+    await expectRevert(
+      execOwner(f.safe, engine, SEL.ping, Op.CALL, 0n, envelope('0x1234')),
+      f.engine,
+      'MalformedContext',
+    )
+  })
 })
 
 describe('V2 engine: re-entrancy', () => {

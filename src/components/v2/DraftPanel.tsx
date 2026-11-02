@@ -13,6 +13,7 @@ import {
   type LintFinding,
   type SafeV2Model,
   type V2Deployment,
+  changeAttachmentId,
   changeSetRoot,
   describeChange,
   describeRoleChange,
@@ -275,7 +276,14 @@ export function DraftPanel({
             const own = problems.filter((p) => !p.role && p.index === i)
             return (
               <li key={`c${i}`} className="row wrap">
-                <span>{describeChange(c, deployment, ctx)}</span>
+                <span>
+                  {describeChange(
+                    c,
+                    deployment,
+                    ctx,
+                    model.attachments.some((a) => a.attachmentId === changeAttachmentId(c)),
+                  )}
+                </span>
                 <ConfirmIconButton title="Remove from the draft" onConfirm={() => remove(i)} />
                 {own.map((p) => (
                   <span key={p.message} className="error-text">

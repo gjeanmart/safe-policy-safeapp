@@ -1,9 +1,25 @@
 import { ethers, network } from 'hardhat'
+import {
+  DEPLOYED_V2_CONTRACTS,
+  type Deploy,
+  ENGINE_MODULES,
+  FQN,
+  SEPOLIA,
+  deployEngineV2,
+  deployTimelockPolicy,
+  runtimeSize,
+  sepoliaCreateGas,
+} from './lib/v2-deployment'
+
+/** What each engine deploys on its own: its modules and the guard. */
+const ENGINE_PIECES = new Set<string>([...ENGINE_MODULES, FQN.engine])
 
 /**
- * Deploys the Policy Engine V2 prototype (SPEC.md §5.4) on Sepolia:
+ * Deploys the Policy Engine V2 prototype (SPEC.md §5.4) on Sepolia, one contract per transaction:
  *
- *   PolicySignLib → 2 × SafePolicyGuardV2 (DELAY 5 s and 24 h) → PolicyFallbackHandler → 8 policies
+ *   PolicySignLib
+ *   → per engine (DELAY 5 s, then 24 h): the five engine modules, then SafePolicyGuardV2
+ *   → PolicyFallbackHandler → FreezePolicy → TimelockPolicyQueue → TimelockPolicy → the other policies
  *
  *   npx hardhat vars set SEPOLIA_DEPLOYER_KEY      # read by hardhat.config.ts, never by this script
  *   pnpm deploy:v2:sepolia
@@ -12,9 +28,13 @@ import { ethers, network } from 'hardhat'
  *
  *   DRY_RUN=1 npx hardhat run scripts/deploy-v2.ts
  *
- * Prints one JSON block per engine, shaped like `V2Deployment` (src/lib/v2/policies.ts), for
- * src/config/contracts.ts. The policies, the sign library and the fallback handler are shared: policies
- * key their state by engine (msg.sender), so one instance serves both engines.
+ * Sepolia charges ~1,542 gas per byte of deployed code plus ~210k per create, and caps a
+ * transaction at 2^24 gas: before each create the script checks `210,000 + 1,542 × runtime bytes`
+ * stays under 16,000,000 and aborts otherwise. Prints each contract's address, gas and block, then
+ * one JSON block per engine shaped like `V2Deployment` (src/lib/v2/policies.ts) and a ready-to-paste
+ * `V2_ENGINES` entry for src/config/contracts.ts (its `fromBlock` is the engine's deployment block,
+ * where the app starts its timelock queue scan). The policies, the sign library and the fallback
+ * handler are shared: policies key their state by engine (msg.sender), so one instance serves both.
  */
 
 const DRY_RUN = process.env.DRY_RUN === '1'
@@ -65,27 +85,34 @@ const SAFENET_PLACEHOLDER = {
   },
 }
 
-/** Fully qualified names: some V1 vendor names (ISafe, IERC165) clash in the artifact namespace. */
-const FQN = {
-  signLib: 'contracts/v2/erc1271/PolicySignLib.sol:PolicySignLib',
-  engine: 'contracts/v2/SafePolicyGuardV2.sol:SafePolicyGuardV2',
-  fallbackHandler: 'contracts/v2/erc1271/PolicyFallbackHandler.sol:PolicyFallbackHandler',
-  freeze: 'contracts/v2/policies/FreezePolicy.sol:FreezePolicy',
-  timelock: 'contracts/v2/policies/TimelockPolicy.sol:TimelockPolicy',
-  recipients: 'contracts/v2/policies/RecipientsPolicy.sol:RecipientsPolicy',
-  limit: 'contracts/v2/policies/LimitPolicy.sol:LimitPolicy',
-  args: 'contracts/v2/policies/ArgsPolicy.sol:ArgsPolicy',
-  coSigner: 'contracts/v2/policies/CoSignerPolicyV2.sol:CoSignerPolicyV2',
-  safenet: 'contracts/v2/policies/SafenetPolicyV2.sol:SafenetPolicyV2',
-  quorum: 'contracts/v2/policies/QuorumPolicyV2.sol:QuorumPolicyV2',
-} as const
+/** Block of each deployed contract by label, for the engines' `fromBlock`. */
+const blocks = new Map<string, number>()
 
-async function deploy(label: string, fqn: string, args: unknown[] = []): Promise<string> {
+/** Sepolia's create cost of `fqn`; throws if it does not fit the per-transaction budget. */
+async function checkedCreateGas(label: string, fqn: string): Promise<{ size: number; estimate: number }> {
+  const size = await runtimeSize(fqn)
+  const estimate = sepoliaCreateGas(size)
+  if (estimate >= SEPOLIA.maxCreateGas)
+    throw new Error(
+      `${label}: ${size} bytes of runtime would cost ~${estimate.toLocaleString('en-US')} gas on Sepolia ` +
+        `(${SEPOLIA.createBase} + ${SEPOLIA.gasPerByte} × ${size}), above the ${SEPOLIA.maxCreateGas.toLocaleString('en-US')} ` +
+        'budget under the 2^24 transaction cap. Split the contract (SPEC.md §14, D-14) before deploying.',
+    )
+  return { size, estimate }
+}
+
+/** Checks the Sepolia create budget, deploys, waits, and prints address, gas and block. */
+const deploy: Deploy = async (label, fqn, args) => {
+  const { size, estimate } = await checkedCreateGas(label, fqn)
   const contract = await ethers.deployContract(fqn, args)
-  const tx = contract.deploymentTransaction()
-  const receipt = await tx?.wait(CONFIRMATIONS)
+  const receipt = await contract.deploymentTransaction()?.wait(CONFIRMATIONS)
+  if (!receipt) throw new Error(`${label}: no receipt`)
   const address = await contract.getAddress()
-  console.log(`${label.padEnd(30)} ${address}  (gas ${receipt?.gasUsed ?? '?'})`)
+  blocks.set(label, receipt.blockNumber)
+  console.log(
+    `${label.padEnd(36)} ${address}  runtime ${String(size).padStart(5)} B  ` +
+      `Sepolia est. ${String(estimate).padStart(10)}  gas ${String(receipt.gasUsed).padStart(9)}  block ${receipt.blockNumber}`,
+  )
   return address
 }
 
@@ -121,6 +148,28 @@ async function main() {
   console.log(`Deployer ${deployer.address}, balance ${ethers.formatEther(balance)} ETH`)
   if (balance < MIN_BALANCE)
     throw new Error(`Balance below ${ethers.formatEther(MIN_BALANCE)} ETH: fund the deployer first.`)
+
+  // Every create must fit on its own (checked again right before each one), and the whole plan must
+  // be affordable at today's fee: check both before the first transaction, so nothing is half-deployed.
+  const safenet = safenetArgs(chainId)
+  const plan = [
+    FQN.signLib,
+    ...ENGINES.flatMap(() => [...ENGINE_MODULES, FQN.engine]),
+    ...DEPLOYED_V2_CONTRACTS.filter((fqn) => !ENGINE_PIECES.has(fqn) && fqn !== FQN.signLib),
+  ].filter((fqn) => safenet || fqn !== FQN.safenet)
+  let planned = 0
+  for (const fqn of plan) planned += (await checkedCreateGas(fqn.split(':')[1], fqn)).estimate
+  const { maxFeePerGas, gasPrice } = await ethers.provider.getFeeData()
+  const fee = maxFeePerGas ?? gasPrice ?? 0n
+  const needed = BigInt(planned) * fee
+  console.log(
+    `Plan: ${plan.length} creates, ~${planned.toLocaleString('en-US')} gas at Sepolia's code pricing, ` +
+      `~${ethers.formatEther(needed)} ETH at ${ethers.formatUnits(fee, 'gwei')} gwei`,
+  )
+  if (balance < needed)
+    throw new Error(
+      `Balance below the ~${ethers.formatEther(needed)} ETH the plan needs: fund the deployer first.`,
+    )
   console.log('')
 
   // The engine constructor takes the sign library's address, so it goes first.
@@ -129,25 +178,28 @@ async function main() {
   const engines: { label: string; address: string }[] = []
   for (const { label, delay } of ENGINES) {
     const { expiry, maxFreeze, freezeCooldown } = TIMING
-    const args = [delay, expiry, maxFreeze, freezeCooldown, TRUSTED_BATCHES, signLib]
-    engines.push({ label, address: await deploy(`SafePolicyGuardV2 (${label})`, FQN.engine, args) })
+    const args = { delay, expiry, maxFreeze, freezeCooldown, trustedBatches: TRUSTED_BATCHES, signLib }
+    const { engine } = await deployEngineV2(args, deploy, ` (${label})`)
+    engines.push({ label, address: engine })
   }
 
-  const fallbackHandler = await deploy('PolicyFallbackHandler', FQN.fallbackHandler)
+  const fallbackHandler = await deploy('PolicyFallbackHandler', FQN.fallbackHandler, [])
 
   const policies = {
-    freeze: await deploy('FreezePolicy', FQN.freeze),
-    timelock: await deploy('TimelockPolicy', FQN.timelock),
-    recipients: await deploy('RecipientsPolicy', FQN.recipients),
-    limit: await deploy('LimitPolicy', FQN.limit),
-    args: await deploy('ArgsPolicy', FQN.args),
-    coSigner: await deploy('CoSignerPolicyV2', FQN.coSigner),
+    freeze: await deploy('FreezePolicy', FQN.freeze, []),
+    timelock: await deployTimelockPolicy(deploy),
+    recipients: await deploy('RecipientsPolicy', FQN.recipients, []),
+    limit: await deploy('LimitPolicy', FQN.limit, []),
+    args: await deploy('ArgsPolicy', FQN.args, []),
+    coSigner: await deploy('CoSignerPolicyV2', FQN.coSigner, []),
     safenet: ethers.ZeroAddress,
-    quorum: await deploy('QuorumPolicyV2', FQN.quorum),
+    quorum: await deploy('QuorumPolicyV2', FQN.quorum, []),
   }
-  const safenet = safenetArgs(chainId)
   if (safenet) policies.safenet = await deploy('SafenetPolicyV2', FQN.safenet, safenet)
-  else console.log('SafenetPolicyV2                SKIPPED: set all SAFENET_* variables (address left 0x0)')
+  else
+    console.log(
+      'SafenetPolicyV2                      SKIPPED: set all SAFENET_* variables (address left 0x0)',
+    )
 
   for (const { label, address } of engines) {
     const deployment = {
@@ -157,8 +209,14 @@ async function main() {
       trustedBatches: TRUSTED_BATCHES,
       policies,
     }
-    console.log(`\n// V2Deployment, engine DELAY ${label}`)
+    const fromBlock = blocks.get(`SafePolicyGuardV2 (${label})`)!
+    console.log(`\n// V2Deployment, engine DELAY ${label}: deployed in block ${fromBlock}`)
     console.log(JSON.stringify(deployment, null, 2))
+    console.log(`// src/config/contracts.ts, V2_ENGINES (fromBlock: the engine's deployment block)`)
+    console.log(
+      `{ label: '${label}', fromBlock: ${fromBlock}n, ` +
+        `deployment: parseV2Deployment(${JSON.stringify(deployment)}) },`,
+    )
   }
 }
 

@@ -2,7 +2,8 @@ import { time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import { ZeroAddress } from 'ethers'
 import { ethers } from 'hardhat'
-import { eventsOf, expectEvent } from '../helpers'
+import { FQN, deployEngineV2, engineAt } from '../../../scripts/lib/v2-deployment'
+import { eventsOf, expectAnyRevert, expectEvent } from '../helpers'
 import {
   ANY,
   Behaviour,
@@ -44,7 +45,25 @@ describe('V2 engine: configuration', () => {
       const { engine } = await deployEngine()
       const batch = ethers.Wallet.createRandom().address
       const lib = ethers.Wallet.createRandom().address
-      const deploy = (args: unknown[]) => ethers.deployContract('SafePolicyGuardV2', args)
+      // The modules check the arguments first (they share the guard's constructor checks).
+      const deploy = async ([delay, expiry, maxFreeze, freezeCooldown, trustedBatches, signLib]: [
+        number,
+        number,
+        number,
+        number,
+        string[],
+        string,
+      ]) => {
+        const deployed = await deployEngineV2({
+          delay: BigInt(delay),
+          expiry: BigInt(expiry),
+          maxFreeze: BigInt(maxFreeze),
+          freezeCooldown: BigInt(freezeCooldown),
+          trustedBatches,
+          signLib,
+        })
+        return engineAt(deployed.engine)
+      }
       await expectRevert(deploy([0, 0, 1, 0, [batch], lib]), engine, 'InvalidTiming')
       await expectRevert(deploy([0, 10, 0, 0, [batch], lib]), engine, 'InvalidTiming')
       await expectRevert(deploy([5, 10, 4, 2, [batch], lib]), engine, 'InvalidTiming') // 10 < 4 + 2 + 5
@@ -74,12 +93,58 @@ describe('V2 engine: configuration', () => {
       expect(await engine.supportsInterface('0xffffffff')).to.equal(false)
     })
 
-    it('rejects direct calls to the logic contract', async () => {
-      const { engine } = await deployEngine()
-      const logic = await ethers.getContractAt('PolicyEngineV2', await engine.engineLogic())
-      await expectRevert(logic.requestConfiguration(ethers.ZeroHash), logic, 'NotDelegated')
-      await expectRevert(logic.getAttachments(ZeroAddress), logic, 'NotDelegated')
-      await expectRevert(engine.delegateView('0x'), engine, 'GuardTargetDenied')
+    it('lists its modules and refuses modules deployed with other arguments', async () => {
+      const { engine, multiSend, signLib, modules } = await deployEngine()
+      expect([...(await engine.engineModules())]).to.deep.equal(modules)
+      const params = [
+        TIMING.delay,
+        TIMING.expiry,
+        TIMING.maxFreeze,
+        TIMING.cooldown,
+        [await multiSend.getAddress()],
+        signLib,
+      ]
+      await ethers.deployContract(FQN.engine, [...params, modules]) // same arguments: accepted
+      const other = [TIMING.delay + 1n, ...params.slice(1)]
+      await expectRevert(ethers.deployContract(FQN.engine, [...other, modules]), engine, 'InvalidDeployment')
+      const swapped = [modules[0], modules[1], modules[2], modules[3], ethers.Wallet.createRandom().address]
+      await expectRevert(ethers.deployContract(FQN.engine, [...params, swapped]), engine, 'InvalidDeployment')
+    })
+
+    it('rejects direct calls to its modules, and unknown selectors', async () => {
+      const { engine, modules } = await deployEngine()
+      const [configAddress, freezeAddress, previewAddress, viewsAddress, runnerAddress] = modules
+      const config = await ethers.getContractAt(FQN.engineConfig, configAddress)
+      const freeze = await ethers.getContractAt(FQN.engineFreeze, freezeAddress)
+      const preview = await ethers.getContractAt(FQN.enginePreview, previewAddress)
+      const views = await ethers.getContractAt(FQN.engineViews, viewsAddress)
+      const runner = await ethers.getContractAt(FQN.engineRunner, runnerAddress)
+      await expectRevert(config.requestConfiguration(ethers.ZeroHash), config, 'NotDelegated')
+      await expectRevert(freeze.lift(ZeroAddress, ZeroAddress), freeze, 'NotDelegated')
+      await expectRevert(freeze.isGuardian(ZeroAddress, ZeroAddress), freeze, 'NotDelegated')
+      await expectRevert(
+        preview.preview(ZeroAddress, OWNERS, ZeroAddress, 0, '0x', 0),
+        preview,
+        'NotDelegated',
+      )
+      await expectRevert(views.getAttachments(ZeroAddress), views, 'NotDelegated')
+      // The runner answers the hooks' own calldata (forwarded by the guard), never directly.
+      const [signer] = await ethers.getSigners()
+      const hook = engine.interface.encodeFunctionData('checkModuleTransaction', [
+        ZeroAddress,
+        0,
+        '0x',
+        0,
+        ZeroAddress,
+      ])
+      await expectRevert(signer.sendTransaction({ to: runnerAddress, data: hook }), runner, 'NotDelegated')
+      await expectRevert(
+        signer.sendTransaction({ to: runnerAddress, data: '0xdeadbeef' }),
+        runner,
+        'NotDelegated',
+      )
+      // The guard's fallback sends unknown selectors to the freeze module, which has no fallback.
+      await expectAnyRevert(signer.sendTransaction({ to: await engine.getAddress(), data: '0xdeadbeef' }))
     })
   })
 

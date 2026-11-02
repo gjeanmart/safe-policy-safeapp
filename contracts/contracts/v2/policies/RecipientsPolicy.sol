@@ -46,7 +46,7 @@ contract RecipientsPolicy is PolicyBaseV2, IRecipientsPolicy {
 
     /// @dev What a call asks of the lists, besides the native-value target.
     enum Party {
-        NONE, //         nothing to check (decreaseAllowance, approve(x, 0), zero-value empty call)
+        NONE, //         nothing to check (decreaseAllowance, approve(x, 0), native value with empty calldata)
         RECIPIENT, //    `account` must be a recipient
         SPENDER, //      `account` must be a spender and `amount <= maxApproval`
         UNCLASSIFIED //  unknown shape: denied by strict attachments
@@ -126,7 +126,7 @@ contract RecipientsPolicy is PolicyBaseV2, IRecipientsPolicy {
         bytes32[] calldata attachmentIds
     ) internal override {
         bytes4 selector = bytes4(call.data);
-        (Party party, address account, uint256 amount) = _classify(engine, ctx.safe, call, selector);
+        (Party party, address account, uint256 amount) = _classify(engine, ctx, call, selector);
         bool nativeTarget = call.value != 0 && call.to != ctx.safe;
         if (account == ctx.safe && party != Party.UNCLASSIFIED) party = Party.NONE;
 
@@ -155,7 +155,7 @@ contract RecipientsPolicy is PolicyBaseV2, IRecipientsPolicy {
      */
     function _classify(
         address engine,
-        address safe,
+        Context calldata ctx,
         Call calldata call,
         bytes4 selector
     ) private returns (Party party, address account, uint256 amount) {
@@ -175,15 +175,16 @@ contract RecipientsPolicy is PolicyBaseV2, IRecipientsPolicy {
             if (selector == APPROVE) {
                 account = _addressAt(data, 0, selector);
                 amount = _wordAt(data, 1, selector);
-                _setExpectedAllowance(engine, safe, call.to, account, amount);
+                _setExpectedAllowance(_allowanceSlot(engine, ctx, call.to, account), amount);
                 return (amount == 0 ? Party.NONE : Party.SPENDER, account, amount);
             }
             if (selector == INCREASE_ALLOWANCE) {
                 account = _addressAt(data, 0, selector);
                 uint256 added = _wordAt(data, 1, selector);
-                uint256 current = _allowance(engine, safe, call.to, account);
+                bytes32 slot = _allowanceSlot(engine, ctx, call.to, account);
+                uint256 current = _allowance(slot, ctx.safe, call.to, account);
                 amount = added > type(uint256).max - current ? type(uint256).max : current + added;
-                _setExpectedAllowance(engine, safe, call.to, account, amount);
+                _setExpectedAllowance(slot, amount);
                 return (Party.SPENDER, account, amount);
             }
             if (selector == DECREASE_ALLOWANCE) {
@@ -196,7 +197,7 @@ contract RecipientsPolicy is PolicyBaseV2, IRecipientsPolicy {
                 // GPv2Order.receiver is word 2; address(0) means the Safe.
                 _wordAt(data, 11, selector);
                 account = _addressAt(data, 2, selector);
-                return (Party.RECIPIENT, account == address(0) ? safe : account, 0);
+                return (Party.RECIPIENT, account == address(0) ? ctx.safe : account, 0);
             }
             // signPermit(token, spender, value, ...) and signPermit2(token, spender, amount, ...).
             _wordAt(data, selector == IPolicySignLib.signPermit.selector ? 4 : 5, selector);
@@ -217,37 +218,36 @@ contract RecipientsPolicy is PolicyBaseV2, IRecipientsPolicy {
     /**
      * @dev The allowance an `increaseAllowance` builds on. Checks run before any call executes, so
      *      inside a batch an earlier `approve` / `increaseAllowance` of the same pair is not visible
-     *      on-chain yet: the larger of the on-chain value and the value expected after the earlier
-     *      sub-calls (transient) is used. A stale transient value (another Safe transaction in the
-     *      same EVM transaction) can only make the check stricter.
+     *      on-chain yet: once one of them recorded the value expected after it (transient), that
+     *      value is used, so `[approve(x, 0), increaseAllowance(x, a)]` is judged as `a`. The slot
+     *      is keyed by the Safe transaction (`ctx.txHash`): a value left by another Safe
+     *      transaction in the same EVM transaction is not read.
      */
-    function _allowance(address engine, address safe, address token, address spender) private view returns (uint256) {
-        uint256 onChain = IERC20Allowance(token).allowance(safe, spender);
-        uint256 expected = _expectedAllowance(engine, safe, token, spender);
-        return expected > onChain ? expected : onChain;
+    function _allowance(bytes32 slot, address safe, address token, address spender) private view returns (uint256) {
+        uint256 stored;
+        assembly ("memory-safe") {
+            stored := tload(slot)
+        }
+        // Stored as value + 1 so that 0 means "not set earlier in this Safe transaction".
+        if (stored != 0) return stored - 1;
+        return IERC20Allowance(token).allowance(safe, spender);
     }
 
-    function _expectedAllowance(
+    function _setExpectedAllowance(bytes32 slot, uint256 value) private {
+        // Saturated: max reads back as max - 1, which still saturates any later increase.
+        uint256 stored = value == type(uint256).max ? value : value + 1;
+        assembly ("memory-safe") {
+            tstore(slot, stored)
+        }
+    }
+
+    function _allowanceSlot(
         address engine,
-        address safe,
+        Context calldata ctx,
         address token,
         address spender
-    ) private view returns (uint256 value) {
-        bytes32 slot = _allowanceSlot(engine, safe, token, spender);
-        assembly ("memory-safe") {
-            value := tload(slot)
-        }
-    }
-
-    function _setExpectedAllowance(address engine, address safe, address token, address spender, uint256 value) private {
-        bytes32 slot = _allowanceSlot(engine, safe, token, spender);
-        assembly ("memory-safe") {
-            tstore(slot, value)
-        }
-    }
-
-    function _allowanceSlot(address engine, address safe, address token, address spender) private pure returns (bytes32) {
-        return keccak256(abi.encode("RecipientsPolicy.allowance", engine, safe, token, spender));
+    ) private pure returns (bytes32) {
+        return keccak256(abi.encode("RecipientsPolicy.allowance", engine, ctx.safe, ctx.txHash, token, spender));
     }
 
     function _hasRole(bytes32 key, address account, uint8 role) private view returns (bool) {

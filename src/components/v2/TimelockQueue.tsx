@@ -26,6 +26,7 @@ import {
   readSafeNonce,
   readSchedule,
   readTimelockQueue,
+  runPreview,
   safeTransaction,
   safeTxHash,
   scheduleStatus,
@@ -39,6 +40,7 @@ import { parseAddressInput, parseHexInput } from '../../lib/validation'
 import { type Role, logActivity, roleKind, rolesStore, v2OwnerTxStore } from '../../store'
 import { InfoTip } from '../Tooltip'
 import { AddressView, AsyncButton, Badge, Card, Field, Notice } from '../ui'
+import { useLabelContext } from './useV2'
 
 const QUEUE_REFRESH_MS = 30_000
 const NONCE_REFRESH_MS = 10_000
@@ -347,6 +349,30 @@ function ScheduleOwnerTx({
   const target = parseAddressInput(to, 'target')
   const calldata = parseHexInput(data)
   const nonce = currentNonce === undefined ? undefined : currentNonce + BigInt(nonceOffset)
+  const ctx = useLabelContext(engine)
+  const [gates, setGates] = useState<{ key: string; text: string; ok: boolean }>()
+  const previewKey = `${to}:${value}:${data}:${nonce}`
+
+  // Review L-5: preview at the nonce the transaction is scheduled at, not the current one.
+  const previewAtNonce = async () => {
+    if (!target.ok || !calldata.ok || nonce === undefined) return
+    const call = {
+      to: target.value,
+      value: parseEther(value || '0'),
+      data: calldata.value,
+      operation: Operation.CALL,
+    }
+    const r = await runPreview(publicClient, deployment, safe, OWNERS, call, ctx, nonce)
+    setGates({
+      key: previewKey,
+      ok: r.ok && r.outcome.allowed,
+      text: !r.ok
+        ? `Preview failed: ${r.reason}`
+        : r.outcome.allowed
+          ? `Allowed at nonce ${nonce}`
+          : `At nonce ${nonce}: ${r.outcome.deciding?.reasonText ?? 'denied'}`,
+    })
+  }
 
   const schedule = async (tx: SafeTransaction, signatures: Hex) => {
     if (!relayRole) throw new Error('Pick a relayer')
@@ -511,7 +537,17 @@ function ScheduleOwnerTx({
             >
               Sign &amp; schedule
             </AsyncButton>
+            <AsyncButton
+              disabled={!target.ok || !calldata.ok || nonce === undefined}
+              onClick={previewAtNonce}
+              title="Runs the engine's preview as the owners at the chosen nonce (eth_call with the Safe nonce overridden): a schedule at that nonce counts"
+            >
+              Preview gates at this nonce
+            </AsyncButton>
           </div>
+          {gates?.key === previewKey && (
+            <span className={gates.ok ? 'small' : 'small error-text'}>{gates.text}</span>
+          )}
         </div>
       )}
     </div>

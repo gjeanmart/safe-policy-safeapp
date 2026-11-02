@@ -1,4 +1,4 @@
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers'
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import {
   AbiCoder,
@@ -28,6 +28,8 @@ const ANY = ZeroAddress
 const OWNERS = getAddress('0x0000000000000000000000000000000000000001')
 const PASS = '0xe18ffdca'
 const TRANSFER = id('transfer(address,uint256)').slice(0, 10)
+/** Module-path co-signature deadline far in the future (the expiry tests use their own). */
+const DEADLINE = 2n ** 40n
 const randomHash = () => hexlify(randomBytes(32))
 const randomAddress = () => Wallet.createRandom().address
 
@@ -321,11 +323,11 @@ describe('CoSignerPolicyV2', function () {
         top.data,
         top.operation,
       )
-      const digest = await f.policy.moduleTxDigest(f.engine, f.safe, callHash)
+      const digest = await f.policy.moduleTxDigest(f.engine, f.safe, callHash, DEADLINE)
       return { ...f, attachmentId, top, callHash, digest }
     }
 
-    it('signs an EIP-712 ModuleTransaction under the policy domain, with a use counter', async function () {
+    it('signs an EIP-712 ModuleTransaction under the policy domain, with a use counter and a deadline', async function () {
       const { engine, policy, safe, callHash, digest } = await moduleSetup()
       const { chainId } = await ethers.provider.getNetwork()
       const expected = TypedDataEncoder.hash(
@@ -336,16 +338,75 @@ describe('CoSignerPolicyV2', function () {
             { name: 'safe', type: 'address' },
             { name: 'callHash', type: 'bytes32' },
             { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
           ],
         },
-        { engine: await engine.getAddress(), safe, callHash, nonce: 0n },
+        { engine: await engine.getAddress(), safe, callHash, nonce: 0n, deadline: DEADLINE },
       )
       expect(digest).to.equal(expected)
     })
 
+    it('a co-signature cannot be pushed or consumed after its deadline (review L-1 / F4)', async function () {
+      const { engine, policy, alice, safe, module, top, attachmentId, callHash } = await moduleSetup()
+      const deadline = BigInt(await time.latest()) + 3600n
+      const sig = sign(alice, await policy.moduleTxDigest(engine, safe, callHash, deadline))
+      // The deadline is signed: a push claiming another deadline does not verify.
+      await expectRevert(
+        policy.cosign(engine, safe, callHash, alice.address, deadline + 1n, sig),
+        policy,
+        'InvalidCoSignature',
+        [alice.address],
+      )
+      await policy.cosign(engine, safe, callHash, alice.address, deadline, sig)
+      expect(await policy.isCosigned(engine, safe, callHash, alice.address)).to.equal(true)
+
+      await time.increaseTo(deadline + 1n)
+      expect(await policy.isCosigned(engine, safe, callHash, alice.address)).to.equal(false)
+      await expectRevert(
+        engine.checkModuleTransaction(policy, safe, module, top, [top], [attachmentId]),
+        policy,
+        'CoSignatureExpired',
+        [alice.address, deadline],
+      )
+      // An expired co-signature cannot be (re-)pushed either.
+      await expectRevert(
+        policy.cosign(engine, safe, callHash, alice.address, deadline, sig),
+        policy,
+        'CoSignatureExpired',
+        [alice.address, deadline],
+      )
+      // A fresh one works; nothing was consumed by the failed check.
+      expect(await policy.moduleTxNonce(engine, safe, callHash)).to.equal(0n)
+      const fresh = BigInt(await time.latest()) + 3600n
+      await policy.cosign(
+        engine,
+        safe,
+        callHash,
+        alice.address,
+        fresh,
+        sign(alice, await policy.moduleTxDigest(engine, safe, callHash, fresh)),
+      )
+      await engine.checkModuleTransaction(policy, safe, module, top, [top], [attachmentId])
+    })
+
+    it('consumes a co-signature at its exact deadline second', async function () {
+      const { engine, policy, alice, safe, module, top, attachmentId, callHash } = await moduleSetup()
+      const deadline = BigInt(await time.latest()) + 100n
+      await policy.cosign(
+        engine,
+        safe,
+        callHash,
+        alice.address,
+        deadline,
+        sign(alice, await policy.moduleTxDigest(engine, safe, callHash, deadline)),
+      )
+      await time.setNextBlockTimestamp(deadline)
+      await engine.checkModuleTransaction(policy, safe, module, top, [top], [attachmentId])
+    })
+
     it('a pushed co-signature passes once and is consumed', async function () {
       const { engine, policy, alice, safe, module, top, attachmentId, callHash, digest } = await moduleSetup()
-      const tx = await policy.cosign(engine, safe, callHash, alice.address, sign(alice, digest))
+      const tx = await policy.cosign(engine, safe, callHash, alice.address, DEADLINE, sign(alice, digest))
       await expectEvent(tx, policy, 'Cosigned', [await engine.getAddress(), safe, callHash, alice.address])
       expect(await policy.isCosigned(engine, safe, callHash, alice.address)).to.equal(true)
       expect(
@@ -366,24 +427,24 @@ describe('CoSignerPolicyV2', function () {
     it('a consumed co-signature cannot be pushed again; the same call twice needs a new one', async function () {
       const { engine, policy, alice, safe, module, top, attachmentId, callHash, digest } = await moduleSetup()
       const first = sign(alice, digest)
-      await policy.cosign(engine, safe, callHash, alice.address, first)
+      await policy.cosign(engine, safe, callHash, alice.address, DEADLINE, first)
       await engine.checkModuleTransaction(policy, safe, module, top, [top], [attachmentId])
 
       await expectRevert(
-        policy.cosign(engine, safe, callHash, alice.address, first),
+        policy.cosign(engine, safe, callHash, alice.address, DEADLINE, first),
         policy,
         'InvalidCoSignature',
         [alice.address],
       )
-      const nextDigest = await policy.moduleTxDigest(engine, safe, callHash)
+      const nextDigest = await policy.moduleTxDigest(engine, safe, callHash, DEADLINE)
       expect(nextDigest).to.not.equal(digest)
-      await policy.cosign(engine, safe, callHash, alice.address, sign(alice, nextDigest))
+      await policy.cosign(engine, safe, callHash, alice.address, DEADLINE, sign(alice, nextDigest))
       await engine.checkModuleTransaction(policy, safe, module, top, [top], [attachmentId])
     })
 
     it('a failed execution rolls the consumption back', async function () {
       const { engine, policy, alice, safe, module, top, attachmentId, callHash, digest } = await moduleSetup()
-      await policy.cosign(engine, safe, callHash, alice.address, sign(alice, digest))
+      await policy.cosign(engine, safe, callHash, alice.address, DEADLINE, sign(alice, digest))
       await expectRevert(
         engine.checkModuleTransactionThenFail(policy, safe, module, top, [top], [attachmentId]),
         engine,
@@ -395,19 +456,19 @@ describe('CoSignerPolicyV2', function () {
     it('rejects a push by the wrong key, over the owner-path hash, or for a zero co-signer', async function () {
       const { engine, policy, alice, bob, safe, callHash, digest } = await moduleSetup()
       await expectRevert(
-        policy.cosign(engine, safe, callHash, alice.address, sign(bob, digest)),
+        policy.cosign(engine, safe, callHash, alice.address, DEADLINE, sign(bob, digest)),
         policy,
         'InvalidCoSignature',
         [alice.address],
       )
       await expectRevert(
-        policy.cosign(engine, safe, callHash, alice.address, sign(alice, callHash)),
+        policy.cosign(engine, safe, callHash, alice.address, DEADLINE, sign(alice, callHash)),
         policy,
         'InvalidCoSignature',
         [alice.address],
       )
       await expectRevert(
-        policy.cosign(engine, safe, callHash, ZeroAddress, '0x'),
+        policy.cosign(engine, safe, callHash, ZeroAddress, DEADLINE, '0x'),
         policy,
         'InvalidCoSignature',
         [ZeroAddress],
@@ -417,7 +478,7 @@ describe('CoSignerPolicyV2', function () {
     it('a proof is bound to its engine, Safe and call', async function () {
       const { engine, otherEngine, policy, alice, safe, module, top, attachmentId, callHash, digest, token } =
         await moduleSetup()
-      await policy.cosign(engine, safe, callHash, alice.address, sign(alice, digest))
+      await policy.cosign(engine, safe, callHash, alice.address, DEADLINE, sign(alice, digest))
       // Same co-signer configured on another engine: the proof pushed for `engine` does not count there.
       const otherId = await attach(otherEngine, policy, safe, globalScope, alice.address)
       await expectRevert(
@@ -443,14 +504,14 @@ describe('CoSignerPolicyV2', function () {
         await moduleSetup()
       const a2 = await attach(engine, policy, safe, tokenScope, alice.address)
       const b = await attach(engine, policy, safe, ownersScope, bob.address)
-      await policy.cosign(engine, safe, callHash, alice.address, sign(alice, digest))
+      await policy.cosign(engine, safe, callHash, alice.address, DEADLINE, sign(alice, digest))
       await expectRevert(
         engine.checkModuleTransaction(policy, safe, module, top, [top], [attachmentId, a2, b]),
         policy,
         'MissingCoSignature',
         [bob.address],
       )
-      await policy.cosign(engine, safe, callHash, bob.address, sign(bob, digest))
+      await policy.cosign(engine, safe, callHash, bob.address, DEADLINE, sign(bob, digest))
       await engine.checkModuleTransaction(policy, safe, module, top, [top], [attachmentId, a2, b])
       expect(await policy.isCosigned(engine, safe, callHash, alice.address)).to.equal(false)
       expect(await policy.isCosigned(engine, safe, callHash, bob.address)).to.equal(false)
@@ -466,7 +527,8 @@ describe('CoSignerPolicyV2', function () {
         safe,
         callHash,
         alice.address,
-        sign(alice, await policy.moduleTxDigest(engine, safe, callHash)),
+        DEADLINE,
+        sign(alice, await policy.moduleTxDigest(engine, safe, callHash, DEADLINE)),
       )
       expect(
         await engine.checkModuleTransaction.staticCall(policy, safe, module, batchTop, calls, [attachmentId]),
@@ -478,17 +540,17 @@ describe('CoSignerPolicyV2', function () {
       const cosigner = await contractCosigner.getAddress()
       const attachmentId = await attach(engine, policy, safe, ownersScope, cosigner)
       await expectRevert(
-        policy.cosign(engine, safe, callHash, cosigner, '0x'),
+        policy.cosign(engine, safe, callHash, cosigner, DEADLINE, '0x'),
         policy,
         'InvalidCoSignature',
         [cosigner],
       )
       await contractCosigner.approve(digest)
-      await policy.cosign(engine, safe, callHash, cosigner, '0x')
+      await policy.cosign(engine, safe, callHash, cosigner, DEADLINE, '0x')
       await engine.checkModuleTransaction(policy, safe, module, top, [top], [attachmentId])
       // The approval of the old digest is permanent, but the next use has a new digest.
       await expectRevert(
-        policy.cosign(engine, safe, callHash, cosigner, '0x'),
+        policy.cosign(engine, safe, callHash, cosigner, DEADLINE, '0x'),
         policy,
         'InvalidCoSignature',
         [cosigner],

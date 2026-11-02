@@ -9,8 +9,8 @@ import {Call, Context, PolicyLevel, ScopeData} from "../libraries/Types.sol";
  * @title ArgsPolicy
  * @notice Call-level constraints on static calldata arguments (SPEC.md §8.5), e.g. "the receiver
  *         of an ERC-4626 `deposit` is the Safe". Every constraint of every matched attachment whose
- *         selector is the call's must hold; a call no constraint applies to passes, unless an
- *         attachment is `strict`.
+ *         selector is the call's must hold; a call no constraint applies to passes, except that a
+ *         `strict` attachment denies a call none of its own constraints applies to.
  * @dev Constraints are stored per attachment under a versioned key, so a reconfiguration replaces
  *      them without deleting the old ones. A check reads at most 16 constraints per attachment.
  */
@@ -84,13 +84,12 @@ contract ArgsPolicy is PolicyBaseV2, IArgsPolicy {
     ) internal view override {
         bytes calldata data = call.data;
         bytes4 selector = bytes4(data);
-        bool applied;
-        bool strict;
 
         for (uint256 i; i < attachmentIds.length; ++i) {
             bytes32 key = _settingsKey(engine, ctx.safe, attachmentIds[i]);
             Config memory cfg = $configs[key];
-            strict = strict || cfg.strict;
+            // Per attachment: another attachment's constraint never satisfies this one's `strict`.
+            bool applied;
             ArgConstraint[] storage constraints = $constraints[_versionKey(key, cfg.version)];
             uint256 n = constraints.length;
             for (uint256 j; j < n; ++j) {
@@ -103,8 +102,8 @@ contract ArgsPolicy is PolicyBaseV2, IArgsPolicy {
                 bytes32 word = bytes32(data[offset:offset + 32]);
                 require(_holds(c, word, ctx.safe), ArgViolation(selector, argIndex));
             }
+            require(applied || !cfg.strict, NoConstraint(selector));
         }
-        require(applied || !strict, NoConstraint(selector));
     }
 
     function _holds(ArgConstraint storage c, bytes32 word, address safe) private view returns (bool) {

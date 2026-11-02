@@ -21,7 +21,8 @@ import {Secp256k1} from "../libraries/frost/Secp256k1.sol";
  *
  *      Module path: {submitAttestation} verifies the attestation over {moduleTxDigest} in place of
  *      the Safe transaction hash and credits one execution of `callHash`; the check consumes one
- *      credit. Each attestation can be submitted once ({AttestationAlreadySpent}, keyed by its
+ *      credit. The digest carries a `deadline` after which the credit cannot be consumed (several
+ *      credits of one call share the earliest deadline). Each attestation can be submitted once ({AttestationAlreadySpent}, keyed by its
  *      FROST signature): FROST signing sessions use fresh nonces, so a second attestation of the
  *      same call is a different signature, while a consumed one can never be replayed.
  *
@@ -40,15 +41,22 @@ contract SafenetPolicyV2 is PolicyBaseV2, ISafenetPolicyV2 {
     bytes32 private constant _NAME_HASH = keccak256("SafenetPolicyV2");
     bytes32 private constant _VERSION_HASH = keccak256("1");
     bytes32 private constant _MODULE_TX_TYPEHASH =
-        keccak256("ModuleTransaction(address engine,address safe,bytes32 callHash)");
+        keccak256("ModuleTransaction(address engine,address safe,bytes32 callHash,uint256 deadline)");
 
     /// @dev EIP-712 domain separator of the Consensus deployment the attestations are bound to.
     bytes32 private immutable _CONSENSUS_DOMAIN_SEPARATOR;
 
     EpochRollover.T private _epochs;
 
+    /// @dev Module-path credits of one `callHash`: `count` executions, all usable until `deadline`
+    ///      (the earliest deadline of the attestations still credited).
+    struct Credit {
+        uint192 count;
+        uint64 deadline;
+    }
+
     /// @dev Module path: executions of `callHash` credited by attestations and not yet consumed.
-    mapping(address engine => mapping(address safe => mapping(bytes32 callHash => uint256 credits))) private _credits;
+    mapping(address engine => mapping(address safe => mapping(bytes32 callHash => Credit))) private _credits;
 
     /// @dev Module path: FROST signatures already submitted (`keccak256(abi.encode(signature))`).
     mapping(bytes32 signatureHash => bool) private _spent;
@@ -83,24 +91,43 @@ contract SafenetPolicyV2 is PolicyBaseV2, ISafenetPolicyV2 {
         address engine,
         address safe,
         bytes32 callHash,
+        uint256 deadline,
         bytes calldata attestation
     ) external override {
-        FROST.Signature memory signature = _verify(attestation, _moduleTxDigest(engine, safe, callHash));
+        FROST.Signature memory signature = _verify(attestation, _moduleTxDigest(engine, safe, callHash, deadline));
+        require(deadline >= block.timestamp, AttestationExpired(deadline));
         bytes32 signatureHash = keccak256(abi.encode(signature));
         require(!_spent[signatureHash], AttestationAlreadySpent());
         _spent[signatureHash] = true;
-        ++_credits[engine][safe][callHash];
+
+        uint64 end = deadline > type(uint64).max ? type(uint64).max : uint64(deadline);
+        Credit storage credit = _credits[engine][safe][callHash];
+        if (credit.count == 0 || credit.deadline < block.timestamp) {
+            // Nothing credited, or only expired credits: they are dropped.
+            credit.count = 1;
+            credit.deadline = end;
+        } else {
+            // One deadline for every credit: the earliest one (stricter, never looser).
+            ++credit.count;
+            if (end < credit.deadline) credit.deadline = end;
+        }
         emit Attested(engine, safe, callHash);
     }
 
     /// @inheritdoc ISafenetPolicyV2
     function isAttested(address engine, address safe, bytes32 callHash) external view override returns (bool) {
-        return _credits[engine][safe][callHash] != 0;
+        Credit memory credit = _credits[engine][safe][callHash];
+        return credit.count != 0 && block.timestamp <= credit.deadline;
     }
 
     /// @inheritdoc ISafenetPolicyV2
-    function moduleTxDigest(address engine, address safe, bytes32 callHash) external view override returns (bytes32) {
-        return _moduleTxDigest(engine, safe, callHash);
+    function moduleTxDigest(
+        address engine,
+        address safe,
+        bytes32 callHash,
+        uint256 deadline
+    ) external view override returns (bytes32) {
+        return _moduleTxDigest(engine, safe, callHash, deadline);
     }
 
     /**
@@ -165,10 +192,11 @@ contract SafenetPolicyV2 is PolicyBaseV2, ISafenetPolicyV2 {
             require(policyData.length != 0, MissingAttestation());
             _verify(policyData, ctx.txHash);
         } else {
-            mapping(bytes32 => uint256) storage credits = _credits[engine][ctx.safe];
-            uint256 available = credits[ctx.txHash];
+            Credit storage credit = _credits[engine][ctx.safe][ctx.txHash];
+            uint192 available = credit.count;
             require(available != 0, MissingAttestation());
-            credits[ctx.txHash] = available - 1;
+            require(block.timestamp <= credit.deadline, AttestationExpired(credit.deadline));
+            credit.count = available - 1;
         }
     }
 
@@ -199,11 +227,16 @@ contract SafenetPolicyV2 is PolicyBaseV2, ISafenetPolicyV2 {
         return signature;
     }
 
-    function _moduleTxDigest(address engine, address safe, bytes32 callHash) private view returns (bytes32) {
+    function _moduleTxDigest(
+        address engine,
+        address safe,
+        bytes32 callHash,
+        uint256 deadline
+    ) private view returns (bytes32) {
         bytes32 domainSeparator = keccak256(
             abi.encode(_DOMAIN_TYPEHASH, _NAME_HASH, _VERSION_HASH, block.chainid, address(this))
         );
-        bytes32 structHash = keccak256(abi.encode(_MODULE_TX_TYPEHASH, engine, safe, callHash));
+        bytes32 structHash = keccak256(abi.encode(_MODULE_TX_TYPEHASH, engine, safe, callHash, deadline));
         return keccak256(abi.encodePacked(hex"1901", domainSeparator, structHash));
     }
 }

@@ -17,7 +17,9 @@ interface IPolicyFallbackHandler {
      */
     function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4);
 
-    /// @notice Legacy ERC-1271 (`bytes` data): same rule over `keccak256(data)`, returns `0x20c13b0b`.
+    /// @notice Legacy ERC-1271 (`bytes` data): same rule over `getMessageHashForSafe(safe, data)`, as
+    ///         CompatibilityFallbackHandler (so `SignMessageLib.signMessage(data)` approvals validate);
+    ///         returns `0x20c13b0b`.
     function isValidSignature(bytes calldata data, bytes calldata signature) external view returns (bytes4);
 
     /// @notice EIP-712 `SafeMessage(bytes message)` hash under `safe`'s domain separator.

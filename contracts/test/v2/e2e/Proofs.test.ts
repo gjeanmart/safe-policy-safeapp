@@ -1,8 +1,9 @@
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers'
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import { type MetaTx, multiSendTx, safeTxHash } from '../fixtures/safe'
 import { expectEvent } from '../helpers'
 import {
+  HOUR,
   OWNERS,
   TX_INDEX,
   addr,
@@ -24,6 +25,9 @@ import {
   usdc,
   type World,
 } from './world'
+
+/** Module-path proof deadline (CoSigner, Safenet) far past any time the story advances to. */
+const PROOF_DEADLINE = 2n ** 40n
 
 /**
  * Story: Co-signer and Safenet protect both paths, and one proof covers a whole batch. V1 ports
@@ -111,14 +115,37 @@ describe('E2E story: Co-signer and Safenet on both paths, one proof per batch', 
   describe('module path (proofs pushed, then consumed)', () => {
     async function pushProofs(w: World, tx: MetaTx) {
       const callHash = await moduleCallHash(w, w.agent.address, tx)
-      const cosignDigest = await w.cosignerPolicy.moduleTxDigest(w.engineAddress, w.safeAddress, callHash)
+      const cosignDigest = await w.cosignerPolicy.moduleTxDigest(
+        w.engineAddress,
+        w.safeAddress,
+        callHash,
+        PROOF_DEADLINE,
+      )
       await w.cosignerPolicy
         .connect(w.outsider)
-        .cosign(w.engineAddress, w.safeAddress, callHash, w.cosigner.address, cosign(w, cosignDigest))
-      const safenetDigest = await w.safenet.moduleTxDigest(w.engineAddress, w.safeAddress, callHash)
+        .cosign(
+          w.engineAddress,
+          w.safeAddress,
+          callHash,
+          w.cosigner.address,
+          PROOF_DEADLINE,
+          cosign(w, cosignDigest),
+        )
+      const safenetDigest = await w.safenet.moduleTxDigest(
+        w.engineAddress,
+        w.safeAddress,
+        callHash,
+        PROOF_DEADLINE,
+      )
       const pushed = await w.safenet
         .connect(w.outsider)
-        .submitAttestation(w.engineAddress, w.safeAddress, callHash, await attest(w, safenetDigest))
+        .submitAttestation(
+          w.engineAddress,
+          w.safeAddress,
+          callHash,
+          PROOF_DEADLINE,
+          await attest(w, safenetDigest),
+        )
       await expectEvent(pushed, w.safenet, 'Attested', [w.engineAddress, w.safeAddress, callHash])
       return callHash
     }
@@ -140,17 +167,71 @@ describe('E2E story: Co-signer and Safenet on both paths, one proof per batch', 
       expect(await w.token.balanceOf(w.vendorA.address)).to.equal(usdc(8))
     })
 
-    it('deny: nothing pushed (MissingCoSignature); co-signed only (MissingAttestation)', async () => {
+    it('deny: proofs pushed with a deadline cannot be consumed after it (review L-1 / F4)', async () => {
       const w = await loadFixture(deploy)
       const tx = tokenTransfer(w, w.vendorA.address, usdc(1))
-      await expectPolicyDenied(execModule(w, w.agent, tx), w.engine, w.cosignerPolicy, 'MissingCoSignature')
       const callHash = await moduleCallHash(w, w.agent.address, tx)
-      const digest = await w.cosignerPolicy.moduleTxDigest(w.engineAddress, w.safeAddress, callHash)
+      const deadline = BigInt(await time.latest()) + HOUR
+      const cosignDigest = await w.cosignerPolicy.moduleTxDigest(
+        w.engineAddress,
+        w.safeAddress,
+        callHash,
+        deadline,
+      )
       await w.cosignerPolicy.cosign(
         w.engineAddress,
         w.safeAddress,
         callHash,
         w.cosigner.address,
+        deadline,
+        cosign(w, cosignDigest),
+      )
+      const safenetDigest = await w.safenet.moduleTxDigest(w.engineAddress, w.safeAddress, callHash, deadline)
+      await w.safenet.submitAttestation(
+        w.engineAddress,
+        w.safeAddress,
+        callHash,
+        deadline,
+        await attest(w, safenetDigest),
+      )
+
+      await time.increaseTo(deadline + 1n)
+      await expectPolicyDenied(execModule(w, w.agent, tx), w.engine, w.cosignerPolicy, 'CoSignatureExpired', [
+        w.cosigner.address,
+        deadline,
+      ])
+      // A fresh co-signature: the Safenet credit has expired too.
+      const fresh = BigInt(await time.latest()) + HOUR
+      await w.cosignerPolicy.cosign(
+        w.engineAddress,
+        w.safeAddress,
+        callHash,
+        w.cosigner.address,
+        fresh,
+        cosign(w, await w.cosignerPolicy.moduleTxDigest(w.engineAddress, w.safeAddress, callHash, fresh)),
+      )
+      await expectPolicyDenied(execModule(w, w.agent, tx), w.engine, w.safenet, 'AttestationExpired', [
+        deadline,
+      ])
+    })
+
+    it('deny: nothing pushed (MissingCoSignature); co-signed only (MissingAttestation)', async () => {
+      const w = await loadFixture(deploy)
+      const tx = tokenTransfer(w, w.vendorA.address, usdc(1))
+      await expectPolicyDenied(execModule(w, w.agent, tx), w.engine, w.cosignerPolicy, 'MissingCoSignature')
+      const callHash = await moduleCallHash(w, w.agent.address, tx)
+      const digest = await w.cosignerPolicy.moduleTxDigest(
+        w.engineAddress,
+        w.safeAddress,
+        callHash,
+        PROOF_DEADLINE,
+      )
+      await w.cosignerPolicy.cosign(
+        w.engineAddress,
+        w.safeAddress,
+        callHash,
+        w.cosigner.address,
+        PROOF_DEADLINE,
         cosign(w, digest),
       )
       await expectPolicyDenied(execModule(w, w.agent, tx), w.engine, w.safenet, 'MissingAttestation')

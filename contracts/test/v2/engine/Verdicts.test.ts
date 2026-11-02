@@ -115,6 +115,28 @@ describe('V2 engine: verdict combination', () => {
     }
   })
 
+  it('keeps evaluation order across calls: an earlier policy deny wins over a later built-in deny', async () => {
+    // Policies run in one runner call per transaction; before a built-in deny of call i the
+    // guard first runs the policies of the calls before i.
+    const [, module] = await ethers.getSigners()
+    const p = await ethers.deployContract('MockPolicyV2', [Level.CALL])
+    const pA = await p.getAddress()
+    const denying = scope(module.address, CallMatch.SELECTOR, ZeroAddress, SEL.ping)
+    const f = await setup([
+      allow(scope(module.address)),
+      policy(denying, pA, Behaviour.REVERT),
+      deny(scope(module.address, CallMatch.SELECTOR, ZeroAddress, SEL.approve)),
+    ])
+    const call = (data: string) => ({ op: Op.CALL, to: f.targetAddr, value: 0n, data })
+    const batch = (calls: ReturnType<typeof call>[]) =>
+      execModule(f.safe, f.module, f.multiSendAddr, multiSendData(calls), Op.DELEGATECALL)
+    const reason = p.interface.encodeErrorResult('MockDenied', [attachmentId(denying, Kind.POLICY, pA)])
+    // Call 0's policy denies before call 1's DENY attachment is reported.
+    await expectRevert(batch([call(SEL.ping), call(SEL.approve)]), f.engine, 'PolicyDenied', [0, pA, reason])
+    // Call 0's DENY attachment comes before call 1's policy runs.
+    await expectRevert(batch([call(SEL.approve), call(SEL.ping)]), f.engine, 'Denied')
+  })
+
   it('truncates a long revert reason to 512 bytes', async () => {
     const [, module] = await ethers.getSigners()
     const big = await ethers.deployContract('EngineReentrantPolicy', [Level.CALL])

@@ -51,6 +51,9 @@ import {
 } from '../e2e/world'
 import { type V1Safe, deployV1, deployV1Policies, recipientList, v1Fallback, v1Rule } from './v1'
 
+/** Module-path co-signature deadline far past any time the test advances to. */
+const PROOF_DEADLINE = 2n ** 40n
+
 /**
  * V1 vs V2, side by side, on real Safes 1.5.0: every row of the design doc's §1 table ("what V1
  * cannot express") that is testable on-chain, plus the ERC-1271 gap (§7) and the batch and
@@ -232,12 +235,18 @@ describe('V1 vs V2 (design doc §1, on real Safes 1.5.0)', () => {
       )
       const swap = await swapOwnerCall(w, w.o1.address, w.newOwner1.address)
       const callHash = await moduleCallHash(w, w.recovery.address, swap)
-      const digest = await w.cosignerPolicy.moduleTxDigest(w.engineAddress, w.safeAddress, callHash)
+      const digest = await w.cosignerPolicy.moduleTxDigest(
+        w.engineAddress,
+        w.safeAddress,
+        callHash,
+        PROOF_DEADLINE,
+      )
       await w.cosignerPolicy.cosign(
         w.engineAddress,
         w.safeAddress,
         callHash,
         w.cosigner.address,
+        PROOF_DEADLINE,
         cosign(w, digest),
       )
       await execModule(w, w.recovery, swap)

@@ -70,14 +70,14 @@ is installed as both guard and module guard).
 - [`SPEC.md`](contracts/v2/SPEC.md): the specification; §14 lists what changed during implementation.
 - [`GAS.md`](contracts/v2/GAS.md): measured gas. [`COMPARISON.md`](contracts/v2/COMPARISON.md): V1 vs V2.
 
-| Path                                                     | What                                                                                                                              |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `SafePolicyGuardV2.sol`, `PolicyEngineV2.sol`, `engine/` | The engine: guard hooks, `preview` and views in the guard; configuration and freeze in `PolicyEngineV2`, reached by DELEGATECALL  |
-| `PolicyBaseV2.sol`, `policies/`                          | Base contract and the 8 policies: Freeze, Timelock, Recipients, Limit, Args, CoSignerV2, SafenetV2, QuorumV2                      |
-| `erc1271/`                                               | `PolicyFallbackHandler` (ERC-1271 from approved messages only) and `PolicySignLib` (typed Permit / Permit2 / CoW order approvals) |
-| `interfaces/`, `libraries/`                              | Frozen ABI: engine, policy and per-policy interfaces; scopes, types, MultiSend decoding                                           |
-| `libraries/frost/`                                       | FROST libraries for Safenet, [vendored](contracts/v2/libraries/frost/VENDORED.md) unmodified from policy-engine 8ee68a8           |
-| `test/`                                                  | Mocks and stubs for the tests (not deployed)                                                                                      |
+| Path                               | What                                                                                                                                                                                                           |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SafePolicyGuardV2.sol`, `engine/` | The engine, one address: the guard (hooks, scope lookup, built-in gates) and five modules it DELEGATECALLs (policy runner; configuration; freeze and small views; `preview`; enumeration views), SPEC §14 D-18 |
+| `PolicyBaseV2.sol`, `policies/`    | Base contract and the 8 policies: Freeze, Timelock (with its scheduling module `TimelockPolicyQueue`), Recipients, Limit, Args, CoSignerV2, SafenetV2, QuorumV2                                                |
+| `erc1271/`                         | `PolicyFallbackHandler` (ERC-1271 from approved messages only) and `PolicySignLib` (typed Permit / Permit2 / CoW order approvals)                                                                              |
+| `interfaces/`, `libraries/`        | Frozen ABI: engine, policy and per-policy interfaces; scopes, types, MultiSend decoding. `ISafePolicyGuardV2` is the full ABI of the deployed guard                                                            |
+| `libraries/frost/`                 | FROST libraries for Safenet, [vendored](contracts/v2/libraries/frost/VENDORED.md) unmodified from policy-engine 8ee68a8                                                                                        |
+| `test/`                            | Mocks and stubs for the tests (not deployed)                                                                                                                                                                   |
 
 The app's TypeScript mirror is generated from the interfaces:
 
@@ -111,11 +111,20 @@ DRY_RUN=1 npx hardhat run scripts/deploy-v2.ts   # rehearsal on the in-process n
 pnpm deploy:v2:sepolia
 ```
 
-[`scripts/deploy-v2.ts`](scripts/deploy-v2.ts) prints the deployer and its balance first (aborts below 0.02 ETH; the
-full run is ≈ 33 M gas), then deploys `PolicySignLib`, two engines (`DELAY` 5 s and 24 h; `EXPIRY` 9 d, `MAX_FREEZE`
-7 d, `FREEZE_COOLDOWN` 12 h, trusted batches MultiSendCallOnly 1.4.1 and 1.5.0), `PolicyFallbackHandler` and the 8
-policies, which both engines share. It ends with one `V2Deployment` JSON block per engine for
-`src/config/contracts.ts`. `SafenetPolicyV2` needs a real Consensus deployment: set `SAFENET_CONSENSUS_CHAIN_ID`,
+Sepolia charges ≈ 1,542 gas per byte of deployed code plus ≈ 210 k per create (Ethereum: 200 per byte), and caps a
+transaction at 2^24 gas (EIP-7825): one transaction cannot deploy more than ≈ 10.4 KB of runtime. So every V2 contract
+stays ≤ 10,000 bytes (`test/v2/Sizes.test.ts` checks the list the script deploys) and each is its own transaction.
+
+[`scripts/deploy-v2.ts`](scripts/deploy-v2.ts) prints the deployer and its balance, checks that every planned create fits
+(`210,000 + 1,542 × runtime bytes` < 16,000,000) and that the balance covers the plan (≈ 266 M gas at Sepolia's
+code pricing, 23 creates) at the current fee, and aborts otherwise. It then deploys `PolicySignLib`; per engine (`DELAY` 5 s
+and 24 h; `EXPIRY` 9 d, `MAX_FREEZE` 7 d, `FREEZE_COOLDOWN` 12 h, trusted batches MultiSendCallOnly 1.4.1 and 1.5.0) the
+five modules then `SafePolicyGuardV2`; `PolicyFallbackHandler`; and the 8 policies (`TimelockPolicyQueue` before
+`TimelockPolicy`), which both engines share. Each create is checked again before it is sent, and printed with its address,
+runtime size, Sepolia estimate, gas used and block. It ends, per engine, with the `V2Deployment` JSON block and a
+ready-to-paste `V2_ENGINES` entry for `src/config/contracts.ts` whose `fromBlock` is the engine's deployment block (the
+start of the app's Timelock queue scan). [`scripts/lib/v2-deployment.ts`](scripts/lib/v2-deployment.ts) is the plan:
+the tests deploy through it too. `SafenetPolicyV2` needs a real Consensus deployment: set `SAFENET_CONSENSUS_CHAIN_ID`,
 `SAFENET_CONSENSUS_ADDRESS`, `SAFENET_INITIAL_EPOCH`, `SAFENET_GROUP_KEY_X` and `SAFENET_GROUP_KEY_Y`, otherwise it is
 skipped (address `0x0`; a dry run uses a placeholder key instead).
 

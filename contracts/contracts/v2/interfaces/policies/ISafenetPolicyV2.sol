@@ -17,17 +17,33 @@ interface ISafenetPolicyV2 {
     error MalformedAttestation();
     error UntrustedAttestationKey();
     error AttestationAlreadySpent();
+    /// @notice A module-path attestation submitted or consumed after its `deadline`.
+    error AttestationExpired(uint256 deadline);
 
     /// @notice Pushes a module-path attestation (anyone may relay): V1's 256-byte encoding, signed
-    ///         over `transactionProposal(..., moduleTxDigest(engine, safe, callHash))`.
-    function submitAttestation(address engine, address safe, bytes32 callHash, bytes calldata attestation) external;
+    ///         over `transactionProposal(..., moduleTxDigest(engine, safe, callHash, deadline))`.
+    ///         The credit can be consumed while `block.timestamp <= deadline`; several credits of one
+    ///         call share the earliest deadline.
+    function submitAttestation(
+        address engine,
+        address safe,
+        bytes32 callHash,
+        uint256 deadline,
+        bytes calldata attestation
+    ) external;
 
+    /// @notice Whether an unexpired credit exists for `callHash`.
     function isAttested(address engine, address safe, bytes32 callHash) external view returns (bool);
 
     /**
      * @notice EIP-712 digest standing in for the Safe transaction hash on the module path: domain
      *         `("SafenetPolicyV2", "1", chainid, this)`,
-     *         `ModuleTransaction(address engine,address safe,bytes32 callHash)`.
+     *         `ModuleTransaction(address engine,address safe,bytes32 callHash,uint256 deadline)`.
      */
-    function moduleTxDigest(address engine, address safe, bytes32 callHash) external view returns (bytes32);
+    function moduleTxDigest(
+        address engine,
+        address safe,
+        bytes32 callHash,
+        uint256 deadline
+    ) external view returns (bytes32);
 }

@@ -1,4 +1,4 @@
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers'
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import {
   AbiCoder,
@@ -17,7 +17,7 @@ import {
 } from 'ethers'
 import { ethers } from 'hardhat'
 import type { FrostChallenge, ProofEngineStub, SafenetPolicyV2 } from '../../../typechain-types'
-import { expectEvent, expectRevert } from '../helpers'
+import { expectAnyRevert, expectEvent, expectRevert } from '../helpers'
 
 /**
  * WP5 SafenetPolicyV2 (SPEC.md §8.7), driven by ProofEngineStub acting as the engine. Attestations
@@ -32,6 +32,8 @@ const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n
 const CONSENSUS_CHAIN_ID = 100n
 const CONSENSUS_ADDRESS = '0x1111111111111111111111111111111111111111'
 const GENESIS_EPOCH = 7n
+/** Module-path attestation deadline far in the future (the expiry tests use their own). */
+const DEADLINE = 2n ** 40n
 const GROUP_SECRET = 0x5afe5afe5afe5afe5afe5afe5afe5afe5afe5afe5afe5afe5afe5afe5afe5afen
 const TRANSACTION_PROPOSAL_TYPEHASH = id(
   'TransactionProposal(uint64 epoch,address oracle,bytes oracleData,bytes32 safeTxHash)',
@@ -267,7 +269,7 @@ describe('SafenetPolicyV2', function () {
         top.data,
         top.operation,
       )
-      const digest = await f.policy.moduleTxDigest(f.engine, f.safe, callHash)
+      const digest = await f.policy.moduleTxDigest(f.engine, f.safe, callHash, DEADLINE)
       return { ...f, top, callHash, digest }
     }
 
@@ -281,17 +283,72 @@ describe('SafenetPolicyV2', function () {
             { name: 'engine', type: 'address' },
             { name: 'safe', type: 'address' },
             { name: 'callHash', type: 'bytes32' },
+            { name: 'deadline', type: 'uint256' },
           ],
         },
-        { engine: await engine.getAddress(), safe, callHash },
+        { engine: await engine.getAddress(), safe, callHash, deadline: DEADLINE },
       )
       expect(digest).to.equal(expected)
+    })
+
+    it('an attestation cannot be submitted or consumed after its deadline (review L-1 / F4)', async function () {
+      const { engine, frost, policy, safe, module, top, globalId, callHash } = await moduleSetup()
+      const deadline = BigInt(await time.latest()) + 3600n
+      const { encoded } = await attest(frost, await policy.moduleTxDigest(engine, safe, callHash, deadline))
+      // The deadline is signed: submitting the attestation under another deadline does not verify.
+      await expectAnyRevert(policy.submitAttestation(engine, safe, callHash, deadline + 1n, encoded))
+      await policy.submitAttestation(engine, safe, callHash, deadline, encoded)
+      expect(await policy.isAttested(engine, safe, callHash)).to.equal(true)
+
+      await time.increaseTo(deadline + 1n)
+      expect(await policy.isAttested(engine, safe, callHash)).to.equal(false)
+      await expectRevert(
+        engine.checkModuleTransaction(policy, safe, module, top, [top], [globalId]),
+        policy,
+        'AttestationExpired',
+        [deadline],
+      )
+      const late = await attest(frost, await policy.moduleTxDigest(engine, safe, callHash, deadline))
+      await expectRevert(
+        policy.submitAttestation(engine, safe, callHash, deadline, late.encoded),
+        policy,
+        'AttestationExpired',
+        [deadline],
+      )
+
+      // A fresh attestation replaces the expired credit (one execution, not two).
+      const fresh = BigInt(await time.latest()) + 3600n
+      const next = await attest(frost, await policy.moduleTxDigest(engine, safe, callHash, fresh))
+      await policy.submitAttestation(engine, safe, callHash, fresh, next.encoded)
+      await engine.checkModuleTransaction(policy, safe, module, top, [top], [globalId])
+      await expectRevert(
+        engine.checkModuleTransaction(policy, safe, module, top, [top], [globalId]),
+        policy,
+        'MissingAttestation',
+      )
+    })
+
+    it('several credits of one call share the earliest deadline', async function () {
+      const { engine, frost, policy, safe, module, top, globalId, callHash } = await moduleSetup()
+      const now = BigInt(await time.latest())
+      for (const deadline of [now + 7200n, now + 600n]) {
+        const { encoded } = await attest(frost, await policy.moduleTxDigest(engine, safe, callHash, deadline))
+        await policy.submitAttestation(engine, safe, callHash, deadline, encoded)
+      }
+      await engine.checkModuleTransaction(policy, safe, module, top, [top], [globalId])
+      await time.increaseTo(now + 601n)
+      await expectRevert(
+        engine.checkModuleTransaction(policy, safe, module, top, [top], [globalId]),
+        policy,
+        'AttestationExpired',
+        [now + 600n],
+      )
     })
 
     it('a submitted attestation passes once and is consumed', async function () {
       const { engine, frost, policy, safe, module, top, globalId, callHash, digest } = await moduleSetup()
       const { encoded, signature } = await attest(frost, digest)
-      const tx = await policy.submitAttestation(engine, safe, callHash, encoded)
+      const tx = await policy.submitAttestation(engine, safe, callHash, DEADLINE, encoded)
       await expectEvent(tx, policy, 'Attested', [await engine.getAddress(), safe, callHash])
       expect(await policy.isAttested(engine, safe, callHash)).to.equal(true)
       expect(await policy.isAttestationSpent(signature)).to.equal(true)
@@ -308,17 +365,17 @@ describe('SafenetPolicyV2', function () {
     it('a submitted attestation can never be submitted again; a fresh one credits another run', async function () {
       const { engine, frost, policy, safe, module, top, globalId, callHash, digest } = await moduleSetup()
       const { encoded } = await attest(frost, digest)
-      await policy.submitAttestation(engine, safe, callHash, encoded)
+      await policy.submitAttestation(engine, safe, callHash, DEADLINE, encoded)
       await engine.checkModuleTransaction(policy, safe, module, top, [top], [globalId])
       await expectRevert(
-        policy.submitAttestation(engine, safe, callHash, encoded),
+        policy.submitAttestation(engine, safe, callHash, DEADLINE, encoded),
         policy,
         'AttestationAlreadySpent',
       )
 
       // Two fresh attestations credit two executions of the same call.
-      await policy.submitAttestation(engine, safe, callHash, (await attest(frost, digest)).encoded)
-      await policy.submitAttestation(engine, safe, callHash, (await attest(frost, digest)).encoded)
+      await policy.submitAttestation(engine, safe, callHash, DEADLINE, (await attest(frost, digest)).encoded)
+      await policy.submitAttestation(engine, safe, callHash, DEADLINE, (await attest(frost, digest)).encoded)
       await engine.checkModuleTransaction(policy, safe, module, top, [top], [globalId])
       await engine.checkModuleTransaction(policy, safe, module, top, [top], [globalId])
       await expectRevert(
@@ -334,8 +391,8 @@ describe('SafenetPolicyV2', function () {
       await engine.configure(policy, safe, ownersScope, 1, '0x')
       const batchTop = { to: randomAddress(), value: 0n, data: '0x8d80ff0a' + '00'.repeat(64), operation: 1 }
       const callHash = await engine.moduleCallHash(safe, module, batchTop.to, 0n, batchTop.data, 1)
-      const { encoded } = await attest(frost, await policy.moduleTxDigest(engine, safe, callHash))
-      await policy.submitAttestation(engine, safe, callHash, encoded)
+      const { encoded } = await attest(frost, await policy.moduleTxDigest(engine, safe, callHash, DEADLINE))
+      await policy.submitAttestation(engine, safe, callHash, DEADLINE, encoded)
       await engine.checkModuleTransaction(
         policy,
         safe,
@@ -349,7 +406,7 @@ describe('SafenetPolicyV2', function () {
 
     it('a failed execution rolls the consumption back', async function () {
       const { engine, frost, policy, safe, module, top, globalId, callHash, digest } = await moduleSetup()
-      await policy.submitAttestation(engine, safe, callHash, (await attest(frost, digest)).encoded)
+      await policy.submitAttestation(engine, safe, callHash, DEADLINE, (await attest(frost, digest)).encoded)
       await expectRevert(
         engine.checkModuleTransactionThenFail(policy, safe, module, top, [top], [globalId]),
         engine,
@@ -361,7 +418,7 @@ describe('SafenetPolicyV2', function () {
     it('rejects attestations over the raw call hash, untrusted or malformed', async function () {
       const { engine, frost, policy, safe, callHash, digest } = await moduleSetup()
       await expectRevert(
-        policy.submitAttestation(engine, safe, callHash, (await attest(frost, callHash)).encoded),
+        policy.submitAttestation(engine, safe, callHash, DEADLINE, (await attest(frost, callHash)).encoded),
         policy,
         'InvalidMulMulAddWitness',
       )
@@ -370,13 +427,14 @@ describe('SafenetPolicyV2', function () {
           engine,
           safe,
           callHash,
+          DEADLINE,
           (await attest(frost, digest, { secret: 3n })).encoded,
         ),
         policy,
         'UntrustedAttestationKey',
       )
       await expectRevert(
-        policy.submitAttestation(engine, safe, callHash, '0x'),
+        policy.submitAttestation(engine, safe, callHash, DEADLINE, '0x'),
         policy,
         'MalformedAttestation',
       )
@@ -385,7 +443,7 @@ describe('SafenetPolicyV2', function () {
     it('a credit is bound to its engine, Safe and call', async function () {
       const { engine, otherEngine, frost, policy, safe, module, top, globalId, callHash, digest } =
         await moduleSetup()
-      await policy.submitAttestation(engine, safe, callHash, (await attest(frost, digest)).encoded)
+      await policy.submitAttestation(engine, safe, callHash, DEADLINE, (await attest(frost, digest)).encoded)
       const [otherId] = await otherEngine.configure.staticCall(policy, safe, globalScope, 1, '0x')
       await otherEngine.configure(policy, safe, globalScope, 1, '0x')
       await expectRevert(

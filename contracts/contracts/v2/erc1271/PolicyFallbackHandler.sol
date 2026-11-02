@@ -27,9 +27,13 @@ contract PolicyFallbackHandler is IPolicyFallbackHandler, IERC165 {
         return _approved(abi.encode(hash), signature) ? MAGIC_VALUE : INVALID;
     }
 
-    /// @inheritdoc IPolicyFallbackHandler
+    /**
+     * @inheritdoc IPolicyFallbackHandler
+     * @dev Same message as `CompatibilityFallbackHandler`: `data` itself, so an approval made with
+     *      Safe's `SignMessageLib.signMessage(data)` validates here too.
+     */
     function isValidSignature(bytes calldata data, bytes calldata signature) external view returns (bytes4) {
-        return _approved(abi.encode(keccak256(data)), signature) ? LEGACY_MAGIC_VALUE : INVALID;
+        return _approved(data, signature) ? LEGACY_MAGIC_VALUE : INVALID;
     }
 
     /// @inheritdoc IPolicyFallbackHandler

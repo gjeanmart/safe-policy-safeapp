@@ -115,12 +115,14 @@ abstract contract EngineStorage {
 
     /// @dev Hooks, `preview` and state-changing entry points must not run inside a check (§6.1).
     function _requireNotInCheck() internal view {
-        bool locked;
+        require(!_inCheck(), IPolicyEngineV2.Reentrancy());
+    }
+
+    function _inCheck() internal view returns (bool locked) {
         bytes32 slot = _LOCK_SLOT;
         assembly ("memory-safe") {
             locked := tload(slot)
         }
-        require(!locked, IPolicyEngineV2.Reentrancy());
     }
 
     /// @dev Cleared at the end of every hook, so nested executions in one transaction (a module
@@ -132,10 +134,14 @@ abstract contract EngineStorage {
         }
     }
 
-    function _isTrustedBatch(address target) internal view returns (bool) {
-        return
-            target != address(0) &&
-            (target == _BATCH_0 || target == _BATCH_1 || target == _BATCH_2 || target == _BATCH_3);
+    function _isTrustedBatch(address target) internal view returns (bool trusted) {
+        (address b0, address b1, address b2, address b3) = (_BATCH_0, _BATCH_1, _BATCH_2, _BATCH_3);
+        assembly ("memory-safe") {
+            trusted := and(
+                iszero(iszero(target)),
+                or(or(eq(target, b0), eq(target, b1)), or(eq(target, b2), eq(target, b3)))
+            )
+        }
     }
 
     /// @dev The last call's return data, truncated to `Scope.MAX_REASON_LENGTH` (no return bomb).
@@ -261,16 +267,20 @@ abstract contract EngineStorage {
 
     /// @dev Typed PolicySignLib approvals are matched as CALL (SPEC.md §6.3, §10).
     function _effectiveOperation(address to, Operation operation, bytes4 sel) internal view returns (Operation) {
-        if (
-            operation == Operation.DELEGATECALL &&
-            to == _SIGN_LIB &&
-            (sel == IPolicySignLib.signPermit.selector ||
-                sel == IPolicySignLib.signCowOrder.selector ||
-                sel == IPolicySignLib.signPermit2.selector)
-        ) {
-            return Operation.CALL;
+        (address signLib, bytes4 permit, bytes4 cowOrder, bytes4 permit2) = (
+            _SIGN_LIB,
+            IPolicySignLib.signPermit.selector,
+            IPolicySignLib.signCowOrder.selector,
+            IPolicySignLib.signPermit2.selector
+        );
+        bool typed;
+        assembly ("memory-safe") {
+            typed := and(
+                and(eq(operation, 1), eq(to, signLib)),
+                or(or(eq(sel, permit), eq(sel, cowOrder)), eq(sel, permit2))
+            )
         }
-        return operation;
+        return typed ? Operation.CALL : operation;
     }
 
     function _calldataSelector(bytes calldata data) internal pure returns (bool ok, bytes4 sel) {

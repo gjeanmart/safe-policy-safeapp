@@ -35,6 +35,9 @@ contract LimitPolicy is PolicyBaseV2, ILimitPolicy {
     bytes4 private constant INCREASE_ALLOWANCE = 0x39509351;
     bytes4 private constant DECREASE_ALLOWANCE = 0xa457c2d7;
 
+    /// @dev Tag of the transient slots holding the allowance expected after earlier sub-calls.
+    bytes32 private constant _ALLOWANCE_TAG = keccak256("LimitPolicy.allowance");
+
     /// @notice Calldata of a known selector does not decode (too short or a dirty address word).
     error MalformedCall(bytes4 selector);
 
@@ -282,20 +285,13 @@ contract LimitPolicy is PolicyBaseV2, ILimitPolicy {
                 address sellToken = _addressAt(data, 0, selector);
                 return Price(Shape.SPEND, sellToken, address(0), _wordAt(data, 3, selector) + _wordAt(data, 7, selector));
             }
-            address token = _addressAt(data, 0, selector);
-            address spender = _addressAt(data, 1, selector);
-            uint256 value = _wordAt(data, 2, selector);
-            if (selector == IPolicySignLib.signPermit2.selector) {
-                // A Permit2 allowance is not the ERC-20 allowance, and a signature may never be
-                // used: the full amount spends, nothing is given back.
-                _wordAt(data, 5, selector);
-                return Price(Shape.SPEND, token, address(0), value);
-            }
-            // signPermit: the allowance only changes when someone submits the permit, so it can
-            // reserve an increase but never give back.
-            _wordAt(data, 4, selector);
-            uint256 current = _allowance(engine, safe, token, spender);
-            return value > current ? Price(Shape.RESERVE, token, spender, value - current) : p;
+            // signPermit / signPermit2 (token, spender, value, ...): a signature is a new grant that
+            // anyone may submit at any time before its deadline, whatever the allowance is then,
+            // so the full value spends and nothing is ever given back. Nothing the token returns
+            // (its allowance) lowers the price.
+            _wordAt(data, selector == IPolicySignLib.signPermit.selector ? 4 : 5, selector);
+            _addressAt(data, 1, selector);
+            return Price(Shape.SPEND, _addressAt(data, 0, selector), address(0), _wordAt(data, 2, selector));
         }
         p.shape = Shape.UNPRICED;
     }
@@ -328,10 +324,16 @@ contract LimitPolicy is PolicyBaseV2, ILimitPolicy {
     }
 
     function _isSignLibCall(address engine, address to, bytes4 selector) private view returns (bool) {
-        return
-            (selector == IPolicySignLib.signPermit.selector ||
-                selector == IPolicySignLib.signPermit2.selector ||
-                selector == IPolicySignLib.signCowOrder.selector) && to == IPolicyEngineV2(engine).SIGN_LIB();
+        (bytes4 permit, bytes4 permit2, bytes4 cowOrder) = (
+            IPolicySignLib.signPermit.selector,
+            IPolicySignLib.signPermit2.selector,
+            IPolicySignLib.signCowOrder.selector
+        );
+        bool typed;
+        assembly ("memory-safe") {
+            typed := or(or(eq(selector, permit), eq(selector, permit2)), eq(selector, cowOrder))
+        }
+        return typed && to == IPolicyEngineV2(engine).SIGN_LIB();
     }
 
     /**
@@ -363,7 +365,9 @@ contract LimitPolicy is PolicyBaseV2, ILimitPolicy {
     }
 
     function _allowanceSlot(address engine, address safe, address token, address spender) private pure returns (bytes32) {
-        return keccak256(abi.encode("LimitPolicy.allowance", engine, safe, token, spender));
+        // Transient only, so the derivation is free to change: a hashed tag instead of the string
+        // itself keeps the policy under the size one Sepolia transaction can deploy.
+        return keccak256(abi.encode(_ALLOWANCE_TAG, engine, safe, token, spender));
     }
 
     function _budgetKey(bytes32 key, address token) private view returns (bytes32) {
@@ -389,9 +393,16 @@ contract LimitPolicy is PolicyBaseV2, ILimitPolicy {
 
     /// @dev Static argument word `index` (0-based, after the selector); reverts if the data is short.
     function _wordAt(bytes calldata data, uint256 index, bytes4 selector) private pure returns (uint256 word) {
-        uint256 offset = 4 + 32 * index;
+        // `index` is a small constant at every call site. In bounds (checked here), a plain load
+        // instead of a checked slice keeps the policy under what one Sepolia transaction deploys.
+        uint256 offset;
+        unchecked {
+            offset = 4 + 32 * index;
+        }
         require(data.length >= offset + 32, MalformedCall(selector));
-        word = uint256(bytes32(data[offset:offset + 32]));
+        assembly ("memory-safe") {
+            word := calldataload(add(data.offset, offset))
+        }
     }
 
     function _addressAt(bytes calldata data, uint256 index, bytes4 selector) private pure returns (address) {

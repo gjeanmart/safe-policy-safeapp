@@ -264,6 +264,25 @@ describe('V2 RecipientsPolicy', () => {
       await engine.checkBatch(policy, ctx, [tokenCall('approve', [router, 99n]), batch[1]], [A])
     })
 
+    it('judges [approve(x, 0), increaseAllowance(x, a)] as a, not on-chain + a (review F8)', async () => {
+      await token.setAllowance(safe, router, 90n)
+      const reset = tokenCall('approve', [router, 0n])
+      await engine.checkBatch(policy, ctx, [reset, tokenCall('increaseAllowance', [router, 50n])], [A])
+      await expectRevert(
+        engine.checkBatch(policy, ctx, [reset, tokenCall('increaseAllowance', [router, 101n])], [A]),
+        policy,
+        'ApprovalTooLarge',
+        [101n, 100n],
+      )
+      // Without the reset, the on-chain allowance still counts.
+      await expectRevert(
+        engine.checkBatch(policy, ctx, [tokenCall('increaseAllowance', [router, 50n])], [A]),
+        policy,
+        'ApprovalTooLarge',
+        [140n, 100n],
+      )
+    })
+
     it('saturates the resulting allowance instead of overflowing', async () => {
       await token.setAllowance(safe, router, MaxUint256)
       await expectRevert(check(tokenCall('increaseAllowance', [router, 1n])), policy, 'ApprovalTooLarge', [

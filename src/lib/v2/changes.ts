@@ -159,7 +159,7 @@ export const mergeRole = (draft: readonly RoleChange[], change: RoleChange): Rol
   change,
 ]
 
-/** DETACHes first (they free slots for the SETs under the 8-per-scope cap), order otherwise kept. */
+/** DETACHes first (they free slots for the SETs under the 4-per-scope cap), order otherwise kept. */
 export const sortForApply = (changes: readonly AttachmentChange[]): AttachmentChange[] => [
   ...changes.filter((c) => c.changeType === ChangeType.DETACH),
   ...changes.filter((c) => c.changeType === ChangeType.SET),
@@ -558,6 +558,8 @@ export function describeChange(
   change: AttachmentChange,
   deployment: V2Deployment,
   ctx: LabelContext = {},
+  /** The attachment already exists: a SET re-configures it (a Limit starts fresh budgets). */
+  attached = false,
 ): string {
   const who = actorLabel(change.scope.actor, ctx.nameOf)
   const what = callPhrase(change.scope, ctx)
@@ -579,9 +581,10 @@ export function describeChange(
     case AttachmentKind.DENY:
       return `${detach ? 'Stops denying' : 'Denies'} ${who}: ${what}`
     default:
-      return detach
-        ? `Removes ${policyLabel()} from ${who}, ${what}`
-        : `Attaches ${policyLabel()} to ${who}, ${what}`
+      if (detach) return `Removes ${policyLabel()} from ${who}, ${what}`
+      if (!attached) return `Attaches ${policyLabel()} to ${who}, ${what}`
+      // LimitPolicy versions its budgets on every configure (review F10).
+      return `Re-configures ${policyLabel()} for ${who}, ${what}${name === 'limit' ? ' (resets the budget: spent goes back to 0)' : ''}`
   }
 }
 

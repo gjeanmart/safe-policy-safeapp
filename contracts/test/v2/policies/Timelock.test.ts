@@ -14,6 +14,7 @@ import {
   solidityPacked,
 } from 'ethers'
 import { ethers, network } from 'hardhat'
+import { FQN, deployTimelockPolicy } from '../../../scripts/lib/v2-deployment'
 import type {
   FreezePolicy,
   TimelockEngineStub,
@@ -133,7 +134,7 @@ async function deploy() {
     outsider,
   ] = await ethers.getSigners()
   const stub = await ethers.deployContract('TimelockEngineStub', [F, C, BATCH])
-  const timelock = await ethers.deployContract('TimelockPolicy')
+  const timelock = await ethers.getContractAt('TimelockPolicy', await deployTimelockPolicy())
   const freeze = await ethers.deployContract('FreezePolicy')
   const owners = [o1, o2, o3]
   const safe = await ethers.deployContract('TimelockMockSafe', [
@@ -312,6 +313,16 @@ describe('TimelockPolicy (WP3)', () => {
       expect(await timelock.supportsInterface('0x55872811')).to.equal(true) // IPolicyV2
       expect(await timelock.supportsInterface('0x01ffc9a7')).to.equal(true) // IERC165
       expect(await timelock.supportsInterface('0xffffffff')).to.equal(false)
+    })
+
+    it('schedules through its queue module, which refuses direct calls', async () => {
+      const { timelock, stub, safe } = await loadFixture(deploy)
+      const queue = await ethers.getContractAt(FQN.timelockQueue, await timelock.queue())
+      await expectRevert(
+        queue.scheduleModuleTx(await stub.getAddress(), await safe.getAddress(), ZeroAddress, 0, '0x', 0),
+        queue,
+        'NotDelegated',
+      )
     })
   })
 

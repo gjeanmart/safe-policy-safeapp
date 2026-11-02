@@ -32,6 +32,7 @@ import {
   type ScheduleStatus,
   type TimelockSettings,
   type V2Deployment,
+  MODULE_PROOF_LIFETIME,
   Verdict,
   collapseGates,
   coSignerModuleTxDigest,
@@ -389,8 +390,8 @@ async function nextSteps(
         break
       case 'ScheduleExpired':
         add(
-          'Timelock: the schedule expired. It cannot be scheduled again while the expired one exists: ' +
-            'a canceller listed in the Timelock settings must cancel it, or the owners change the setup.',
+          `Timelock: the schedule expired (its window passed). Schedule it again (safe-role schedule ${planId} / ` +
+            'safe_role_schedule): the new schedule replaces the expired one. Wait the delay, then exec within the window.',
         )
         break
       case 'ClearedByFreeze':
@@ -405,9 +406,14 @@ async function nextSteps(
         )
         break
       }
-      case 'MissingCoSignature': {
+      case 'MissingCoSignature':
+      case 'CoSignatureExpired': {
         const cosigner = args[0] as Address
-        const nonce = await readCoSignerModuleTxNonce(client(), deployment, config.safe, callHash)
+        const [nonce, at] = await Promise.all([
+          readCoSignerModuleTxNonce(client(), deployment, config.safe, callHash),
+          now(),
+        ])
+        const deadline = at + MODULE_PROOF_LIFETIME
         const digest = coSignerModuleTxDigest(
           config.chainId,
           deployment.policies.coSigner,
@@ -415,24 +421,32 @@ async function nextSteps(
           config.safe,
           callHash,
           nonce,
+          deadline,
         )
         add(
-          `Co-signer: ask ${ctx.labels.nameOf?.(cosigner) ?? cosigner} (${cosigner}) to sign the EIP-712 digest ${digest} ` +
-            `(CoSignerPolicyV2 ModuleTransaction{engine, safe, callHash ${callHash}, nonce ${nonce}}); anyone relays ` +
-            'cosign(engine, safe, callHash, cosigner, signature) to the CoSignerPolicyV2. Then simulate again.',
+          `Co-signer: ${g.error?.name === 'CoSignatureExpired' ? 'the pushed co-signature expired; ' : ''}` +
+            `ask ${ctx.labels.nameOf?.(cosigner) ?? cosigner} (${cosigner}) to sign the EIP-712 digest ${digest} ` +
+            `(CoSignerPolicyV2 ModuleTransaction{engine, safe, callHash ${callHash}, nonce ${nonce}, deadline ${deadline} = ${isoTime(deadline)}}); ` +
+            `anyone relays cosign(engine, safe, callHash, cosigner, ${deadline}, signature) to the CoSignerPolicyV2 ` +
+            'before the deadline. Then simulate again.',
         )
         break
       }
-      case 'MissingAttestation': {
+      case 'MissingAttestation':
+      case 'AttestationExpired': {
+        const deadline = (await now()) + MODULE_PROOF_LIFETIME
         const digest = safenetModuleTxDigest(
           config.chainId,
           deployment.policies.safenet,
           ctx.engine,
           config.safe,
           callHash,
+          deadline,
         )
         add(
-          `Safenet: needs an attestation of digest ${digest} submitted to the SafenetPolicyV2. Then simulate again.`,
+          `Safenet: ${g.error?.name === 'AttestationExpired' ? 'the credited attestation expired; ' : ''}` +
+            `needs an attestation of digest ${digest} (deadline ${deadline} = ${isoTime(deadline)}), submitted with ` +
+            `submitAttestation(engine, safe, callHash, ${deadline}, attestation) to the SafenetPolicyV2. Then simulate again.`,
         )
         break
       }
@@ -787,12 +801,11 @@ export async function scheduleCheck(
   const existing = await readSchedule(client(), ctx.deployment, config.safe, sim.callHash)
   if (existing && isAddressEqual(existing.actor, config.role)) {
     const state = await scheduleState(config, ctx, tx, existing, at)
-    if (state.status !== 'cleared')
+    // A cleared or expired schedule is replaced by a new one (TimelockPolicy, review F1 / M-4).
+    if (state.status !== 'cleared' && state.status !== 'expired')
       return fail(
         `Already scheduled (${state.status}${state.readyAt ? `, ready at ${state.readyAt}` : ''}).`,
-        state.status === 'expired'
-          ? 'An expired schedule blocks scheduling the same call again until a canceller cancels it.'
-          : 'Run safe-role queue.',
+        'Run safe-role queue.',
       )
   }
   const blocking = sim.gates.filter((g) => g.verdict === 'deny' && !g.needs)

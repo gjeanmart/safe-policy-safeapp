@@ -25,8 +25,8 @@ import { CONTEXT_TYPE_HASH, type Operation, moduleCallHash } from './scopes'
  *   consumes (the guard reads `nonce() - 1` after the Safe incremented it), i.e. the hash the owners
  *   sign. A Timelock owner schedule, a co-signature or a Safenet attestation names that hash.
  * - module path: `moduleCallHash(safe, module, to, value, data, op)` (no nonce, no chain id).
- *   Signature proofs over it use an EIP-712 `ModuleTransaction` digest under the policy's domain
- *   (Co-signer adds a per-callHash nonce), never the raw hash.
+ *   Signature proofs over it use an EIP-712 `ModuleTransaction` digest under the policy's domain,
+ *   with a `deadline` (Co-signer adds a per-callHash nonce), never the raw hash.
  * - preview: the owner hash at the current nonce with zero gas fields; module as above.
  *
  * @example
@@ -37,7 +37,7 @@ import { CONTEXT_TYPE_HASH, type Operation, moduleCallHash } from './scopes'
  * // Module path: the module schedules its own call; the same hash is consumed at execution.
  * const callHash = moduleCallHash(safe, agent, call.to, call.value, call.data, call.operation)
  * const nonce = await readCoSignerModuleTxNonce(client, deployment, safe, callHash)
- * coSignerModuleTxDigest(chainId, deployment.policies.coSigner, engine, safe, callHash, nonce) // co-signer signs
+ * coSignerModuleTxDigest(chainId, deployment.policies.coSigner, engine, safe, callHash, nonce, deadline) // co-signer signs
  */
 
 export { moduleCallHash }
@@ -108,11 +108,15 @@ export const previewOwnerTxHash = (
   currentNonce: bigint,
 ): Hex => safeTxHash(chainId, safe, safeTransaction(c, currentNonce))
 
+/** Default lifetime of a module-path proof (co-signature, attestation) the app or agent asks for. */
+export const MODULE_PROOF_LIFETIME = 3600n
+
 /**
- * What a co-signer signs for a module transaction (as built by WP5, not the 3-field NatSpec of
- * ICoSignerPolicyV2): EIP-712 `ModuleTransaction(engine, safe, callHash, nonce)` under
+ * What a co-signer signs for a module transaction: EIP-712
+ * `ModuleTransaction(engine, safe, callHash, nonce, deadline)` under
  * `("CoSignerPolicyV2", "1", chainid, policy)`, with `nonce = moduleTxNonce(engine, safe, callHash)`
- * (the same call executed twice needs a second co-signature). Equals the policy's `moduleTxDigest`.
+ * (the same call executed twice needs a second co-signature) and `deadline` the last second the
+ * co-signature may be consumed. Equals the policy's `moduleTxDigest(engine, safe, callHash, deadline)`.
  */
 export const coSignerModuleTxDigest = (
   chainId: number,
@@ -121,6 +125,7 @@ export const coSignerModuleTxDigest = (
   safe: Address,
   callHash: Hex,
   nonce: bigint,
+  deadline: bigint,
 ): Hex =>
   hashTypedData({
     domain: { name: 'CoSignerPolicyV2', version: '1', chainId, verifyingContract: policy },
@@ -130,15 +135,16 @@ export const coSignerModuleTxDigest = (
         { name: 'safe', type: 'address' },
         { name: 'callHash', type: 'bytes32' },
         { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
       ],
     },
     primaryType: 'ModuleTransaction',
-    message: { engine, safe, callHash, nonce },
+    message: { engine, safe, callHash, nonce, deadline },
   })
 
 /**
- * What Safenet attests for a module transaction, in place of the Safe transaction hash:
- * EIP-712 `ModuleTransaction(engine, safe, callHash)` under `("SafenetPolicyV2", "1", chainid, policy)`.
+ * What Safenet attests for a module transaction, in place of the Safe transaction hash: EIP-712
+ * `ModuleTransaction(engine, safe, callHash, deadline)` under `("SafenetPolicyV2", "1", chainid, policy)`.
  */
 export const safenetModuleTxDigest = (
   chainId: number,
@@ -146,6 +152,7 @@ export const safenetModuleTxDigest = (
   engine: Address,
   safe: Address,
   callHash: Hex,
+  deadline: bigint,
 ): Hex =>
   hashTypedData({
     domain: { name: 'SafenetPolicyV2', version: '1', chainId, verifyingContract: policy },
@@ -154,10 +161,11 @@ export const safenetModuleTxDigest = (
         { name: 'engine', type: 'address' },
         { name: 'safe', type: 'address' },
         { name: 'callHash', type: 'bytes32' },
+        { name: 'deadline', type: 'uint256' },
       ],
     },
     primaryType: 'ModuleTransaction',
-    message: { engine, safe, callHash },
+    message: { engine, safe, callHash, deadline },
   })
 
 /**
@@ -283,29 +291,31 @@ export const cosignCall = (
   safe: Address,
   callHash: Hex,
   cosigner: Address,
+  deadline: bigint,
   signature: Hex,
 ): DirectCall => ({
   to: deployment.policies.coSigner,
   data: encodeFunctionData({
     abi: coSignerPolicyV2Abi,
     functionName: 'cosign',
-    args: [deployment.engine, safe, callHash, cosigner, signature],
+    args: [deployment.engine, safe, callHash, cosigner, deadline, signature],
   }),
   description: `co-sign ${callHash}`,
 })
 
-/** Module-path Safenet attestation (V1's 256-byte encoding); anyone relays. */
+/** Module-path Safenet attestation (V1's 256-byte encoding) over {@link safenetModuleTxDigest}; anyone relays. */
 export const submitAttestationCall = (
   deployment: V2Deployment,
   safe: Address,
   callHash: Hex,
+  deadline: bigint,
   attestation: Hex,
 ): DirectCall => ({
   to: deployment.policies.safenet,
   data: encodeFunctionData({
     abi: safenetPolicyV2Abi,
     functionName: 'submitAttestation',
-    args: [deployment.engine, safe, callHash, attestation],
+    args: [deployment.engine, safe, callHash, deadline, attestation],
   }),
   description: `attest ${callHash}`,
 })

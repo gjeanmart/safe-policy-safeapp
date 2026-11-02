@@ -52,6 +52,9 @@ import {
 } from '../e2e/world'
 import { deployV1, deployV1Policies, v1Fallback, v1Rule } from './v1'
 
+/** Module-path co-signature deadline far past any time the test advances to. */
+const PROOF_DEADLINE = 2n ** 40n
+
 /**
  * Gas on a real Safe 1.5.0: the whole `execTransaction` / `execTransactionFromModule` (21k base,
  * calldata, signature checks, the call itself, the guard hooks), steady state (each measured
@@ -206,12 +209,18 @@ describe('Gas on a real Safe 1.5.0: plain, V1, V2', function () {
     const agentRun = async () => {
       const tx = signCowOrderCall(org, await cowOrder(org, usdc(1)))
       const callHash = await moduleCallHash(org, org.agent.address, tx)
-      const digest = await org.cosignerPolicy.moduleTxDigest(org.engineAddress, org.safeAddress, callHash)
+      const digest = await org.cosignerPolicy.moduleTxDigest(
+        org.engineAddress,
+        org.safeAddress,
+        callHash,
+        PROOF_DEADLINE,
+      )
       await org.cosignerPolicy.cosign(
         org.engineAddress,
         org.safeAddress,
         callHash,
         org.cosigner.address,
+        PROOF_DEADLINE,
         cosign(org, digest),
       )
       return execModule(org, org.agent, tx)
@@ -219,7 +228,12 @@ describe('Gas on a real Safe 1.5.0: plain, V1, V2', function () {
     await record('module', 'V2 Agent CoW order: Allow + Limit + Co-signer + Freeze', agentRun, 'signCowOrder')
     const tx = signCowOrderCall(org, await cowOrder(org, usdc(1)))
     const callHash = await moduleCallHash(org, org.agent.address, tx)
-    const digest = await org.cosignerPolicy.moduleTxDigest(org.engineAddress, org.safeAddress, callHash)
+    const digest = await org.cosignerPolicy.moduleTxDigest(
+      org.engineAddress,
+      org.safeAddress,
+      callHash,
+      PROOF_DEADLINE,
+    )
     rows.push({
       group: 'module',
       label: '  CoSignerPolicyV2.cosign (separate tx)',
@@ -229,6 +243,7 @@ describe('Gas on a real Safe 1.5.0: plain, V1, V2', function () {
           org.safeAddress,
           callHash,
           org.cosigner.address,
+          PROOF_DEADLINE,
           cosign(org, digest),
         ),
       ),

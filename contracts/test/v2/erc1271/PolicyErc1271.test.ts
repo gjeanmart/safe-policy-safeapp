@@ -153,16 +153,34 @@ describe('V2 ERC-1271: PolicyFallbackHandler', () => {
     expect(await isValid(digest)).to.equal(MAGIC)
   })
 
-  it('applies the same rule to the legacy bytes overload, over keccak256(data)', async () => {
-    const { engine, libAddress, lib, sign, safeAsHandler } = await loadFixture(deploy)
+  it('applies the same rule to the legacy bytes overload, over data itself (as CompatibilityFallbackHandler)', async () => {
+    const { owner, engine, safe, safeAsHandler } = await loadFixture(deploy)
     const data = toUtf8Bytes('legacy message')
     const legacy = safeAsHandler['isValidSignature(bytes,bytes)']
     expect(await legacy(data, '0x')).to.equal(INVALID)
 
-    await engine.allowExact(libAddress, lib.interface.getFunction('signMessage').selector, OP_DELEGATECALL)
-    await sign('signMessage', [keccak256(data)])
+    // Safe's own SignMessageLib.signMessage(data), as a dapp using the Compat handler would approve it (review F6).
+    const sml = await ethers.deployContract(
+      'contracts/vendor/safe-smart-account/libraries/SignMessageLib.sol:SignMessageLib',
+    )
+    const smlData = sml.interface.encodeFunctionData('signMessage', [data])
+    await engine.allowExact(await sml.getAddress(), smlData.slice(0, 10), OP_DELEGATECALL)
+    await safe.connect(owner).exec(await sml.getAddress(), 0, smlData, DELEGATECALL)
     expect(await legacy(data, '0x')).to.equal(LEGACY_MAGIC)
     expect(await legacy(data, '0x01')).to.equal(INVALID)
+    // The pre-fix encoding (keccak256(data) as a bytes32 message) is not what was approved.
+    expect(await safeAsHandler['isValidSignature(bytes32,bytes)'](keccak256(data), '0x')).to.equal(INVALID)
+  })
+
+  it('the bytes32 overload equals the legacy overload over abi.encode(hash), as CompatibilityFallbackHandler', async () => {
+    const { engine, libAddress, lib, sign, safeAsHandler, isValid } = await loadFixture(deploy)
+    const digest = id('both overloads')
+    await engine.allowExact(libAddress, lib.interface.getFunction('signMessage').selector, OP_DELEGATECALL)
+    await sign('signMessage', [digest])
+    expect(await isValid(digest)).to.equal(MAGIC)
+    expect(
+      await safeAsHandler['isValidSignature(bytes,bytes)'](coder.encode(['bytes32'], [digest]), '0x'),
+    ).to.equal(LEGACY_MAGIC)
   })
 
   it('never accepts an owner off-chain signature, even one CompatibilityFallbackHandler would accept', async () => {
@@ -443,6 +461,68 @@ describe('V2 ERC-1271: PolicySignLib', () => {
         'DomainSeparatorUnavailable',
         [handlerAddress],
       )
+    })
+
+    it('DomainMismatch: a contract returning another token’s domain cannot make the Safe sign its permit (review H-1)', async () => {
+      const { lib, token, spender, sign, safe, safeAddress, safeMsgHash, chainId, isValid } =
+        await loadFixture(deploy)
+      const tokenAddress = await token.getAddress()
+      // Claims USDC's domain separator, name, version, and ERC-5267 domain with USDC as verifyingContract.
+      const alias = await ethers.deployContract('DomainAliasStub', [
+        tokenAddress,
+        await token.DOMAIN_SEPARATOR(),
+        'USD Coin',
+        '2',
+      ])
+      const aliasAddress = await alias.getAddress()
+      const end = await deadline()
+      await expectRevert(
+        sign('signPermit', [aliasAddress, spender.address, 1_000n, end, 0n]),
+        lib,
+        'DomainMismatch',
+        [aliasAddress],
+      )
+      // Nothing was approved: the USDC permit digest the alias would have produced is not valid.
+      const usdcDigest = TypedDataEncoder.hash(
+        { name: 'USD Coin', version: '2', chainId, verifyingContract: tokenAddress },
+        Permit,
+        { owner: safeAddress, spender: spender.address, value: 1_000n, nonce: 0n, deadline: end },
+      )
+      expect(await safe.signedMessages(safeMsgHash(safeAddress, usdcDigest))).to.equal(0n)
+      expect(await isValid(usdcDigest)).to.equal(INVALID)
+    })
+
+    it('DomainMismatch: a domain separator that is not rebuildable from the token’s own name / version', async () => {
+      const { lib, spender, sign, permit2 } = await loadFixture(deploy)
+      // Permit2Stub has DOMAIN_SEPARATOR() but neither eip712Domain() nor name(): nothing proves the binding.
+      const p2 = await permit2.getAddress()
+      await expectRevert(
+        sign('signPermit', [p2, spender.address, 1n, await deadline(), 0n]),
+        lib,
+        'DomainMismatch',
+        [p2],
+      )
+    })
+
+    it('binds the domain through ERC-5267 eip712Domain(), with or without a version', async () => {
+      const { spender, sign, safe, safeAddress, safeMsgHash, chainId } = await loadFixture(deploy)
+      for (const withVersion of [true, false]) {
+        const t = await ethers.deployContract('Erc5267TokenStub', [withVersion])
+        const end = await deadline()
+        await sign('signPermit', [await t.getAddress(), spender.address, 7n, end, 3n])
+        const domain = withVersion
+          ? { name: 'Permit Token', version: '1', chainId, verifyingContract: await t.getAddress() }
+          : { name: 'Permit Token', chainId, verifyingContract: await t.getAddress() }
+        expect(TypedDataEncoder.hashDomain(domain)).to.equal(await t.DOMAIN_SEPARATOR())
+        const digest = TypedDataEncoder.hash(domain, Permit, {
+          owner: safeAddress,
+          spender: spender.address,
+          value: 7n,
+          nonce: 3n,
+          deadline: end,
+        })
+        expect(await safe.signedMessages(safeMsgHash(safeAddress, digest))).to.equal(1n)
+      }
     })
 
     it('SignatureExpired: permit deadline, CoW validTo, Permit2 sigDeadline', async () => {

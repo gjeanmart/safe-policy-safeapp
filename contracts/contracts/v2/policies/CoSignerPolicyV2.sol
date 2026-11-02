@@ -20,6 +20,8 @@ import {Call, Context, PolicyLevel, ScopeData} from "../libraries/Types.sol";
  *      use counter that the check increments: a consumed co-signature can never be pushed again
  *      (deterministic ECDSA signers would otherwise re-produce the same bytes, and an ERC-1271
  *      approval of a digest is usually permanent), and the same call executed twice needs two.
+ *      The digest also carries a `deadline`: a pushed co-signature cannot be consumed after it, so
+ *      an approval given months ago does not authorise the call today.
  *
  *      Signatures: a co-signer without code signs the digest directly (65 bytes `r, s, v`, `v` 27
  *      or 28, low `s`); a co-signer with code is checked with ERC-1271 `isValidSignature(bytes32,
@@ -31,16 +33,23 @@ contract CoSignerPolicyV2 is PolicyBaseV2, ICoSignerPolicyV2 {
     bytes32 private constant _NAME_HASH = keccak256("CoSignerPolicyV2");
     bytes32 private constant _VERSION_HASH = keccak256("1");
     bytes32 private constant _MODULE_TX_TYPEHASH =
-        keccak256("ModuleTransaction(address engine,address safe,bytes32 callHash,uint256 nonce)");
+        keccak256("ModuleTransaction(address engine,address safe,bytes32 callHash,uint256 nonce,uint256 deadline)");
 
     bytes4 private constant _ERC1271_MAGIC = 0x1626ba7e;
     uint256 private constant _HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
+
+    /// @dev A pushed module-path co-signature: `use` is the use counter + 1 it was signed for (0 =
+    ///      nothing pushed), `deadline` the last second it may be consumed.
+    struct Push {
+        uint192 use;
+        uint64 deadline;
+    }
 
     /// @dev Settings key (`_settingsKey`) => co-signer.
     mapping(bytes32 key => address cosigner) private _cosigners;
 
     /// @dev Pushed module-path co-signatures, valid for the current use counter only.
-    mapping(address engine => mapping(address safe => mapping(bytes32 callHash => mapping(address cosigner => uint256 nonce))))
+    mapping(address engine => mapping(address safe => mapping(bytes32 callHash => mapping(address cosigner => Push))))
         private _pushed;
 
     /// @dev Module-path use counter: number of times the check consumed co-signatures for a call.
@@ -57,13 +66,19 @@ contract CoSignerPolicyV2 is PolicyBaseV2, ICoSignerPolicyV2 {
         address safe,
         bytes32 callHash,
         address cosigner,
+        uint256 deadline,
         bytes calldata signature
     ) external override {
         uint256 nonce = _uses[engine][safe][callHash];
-        bytes32 digest = _moduleTxDigest(engine, safe, callHash, nonce);
+        bytes32 digest = _moduleTxDigest(engine, safe, callHash, nonce, deadline);
         require(cosigner != address(0) && _isValidSignature(cosigner, digest, signature), InvalidCoSignature(cosigner));
-        // Stored as `nonce + 1` so that 0 means "nothing pushed" and an old push never matches.
-        _pushed[engine][safe][callHash][cosigner] = nonce + 1;
+        require(deadline >= block.timestamp, CoSignatureExpired(cosigner, deadline));
+        // `use` is `nonce + 1` so that 0 means "nothing pushed" and an old push never matches. A
+        // deadline past 2^64 is stored as 2^64 - 1 (never reached).
+        _pushed[engine][safe][callHash][cosigner] = Push(
+            uint192(nonce + 1),
+            deadline > type(uint64).max ? type(uint64).max : uint64(deadline)
+        );
         emit Cosigned(engine, safe, callHash, cosigner);
     }
 
@@ -74,7 +89,8 @@ contract CoSignerPolicyV2 is PolicyBaseV2, ICoSignerPolicyV2 {
         bytes32 callHash,
         address cosigner
     ) external view override returns (bool) {
-        return _pushed[engine][safe][callHash][cosigner] == _uses[engine][safe][callHash] + 1;
+        Push memory p = _pushed[engine][safe][callHash][cosigner];
+        return p.use == _uses[engine][safe][callHash] + 1 && block.timestamp <= p.deadline;
     }
 
     /**
@@ -82,8 +98,13 @@ contract CoSignerPolicyV2 is PolicyBaseV2, ICoSignerPolicyV2 {
      * @dev The digest of the next use of `callHash`: it includes the current use counter
      *      ({moduleTxNonce}), so it changes every time a module execution consumes co-signatures.
      */
-    function moduleTxDigest(address engine, address safe, bytes32 callHash) external view override returns (bytes32) {
-        return _moduleTxDigest(engine, safe, callHash, _uses[engine][safe][callHash]);
+    function moduleTxDigest(
+        address engine,
+        address safe,
+        bytes32 callHash,
+        uint256 deadline
+    ) external view override returns (bytes32) {
+        return _moduleTxDigest(engine, safe, callHash, _uses[engine][safe][callHash], deadline);
     }
 
     /// @notice How many times the check consumed co-signatures for `(engine, safe, callHash)`.
@@ -166,10 +187,13 @@ contract CoSignerPolicyV2 is PolicyBaseV2, ICoSignerPolicyV2 {
 
     function _consumeModulePath(address engine, address safe, bytes32 callHash, address[] memory cosigners) private {
         uint256 nonce = _uses[engine][safe][callHash];
+        mapping(address => Push) storage pushed = _pushed[engine][safe][callHash];
         for (uint256 i; i < cosigners.length; ++i) {
-            mapping(address => uint256) storage pushed = _pushed[engine][safe][callHash];
-            require(pushed[cosigners[i]] == nonce + 1, MissingCoSignature(cosigners[i]));
-            delete pushed[cosigners[i]];
+            address cosigner = cosigners[i];
+            Push memory p = pushed[cosigner];
+            require(p.use == nonce + 1, MissingCoSignature(cosigner));
+            require(block.timestamp <= p.deadline, CoSignatureExpired(cosigner, p.deadline));
+            delete pushed[cosigner];
         }
         _uses[engine][safe][callHash] = nonce + 1;
     }
@@ -199,12 +223,13 @@ contract CoSignerPolicyV2 is PolicyBaseV2, ICoSignerPolicyV2 {
         address engine,
         address safe,
         bytes32 callHash,
-        uint256 nonce
+        uint256 nonce,
+        uint256 deadline
     ) private view returns (bytes32) {
         bytes32 domainSeparator = keccak256(
             abi.encode(_DOMAIN_TYPEHASH, _NAME_HASH, _VERSION_HASH, block.chainid, address(this))
         );
-        bytes32 structHash = keccak256(abi.encode(_MODULE_TX_TYPEHASH, engine, safe, callHash, nonce));
+        bytes32 structHash = keccak256(abi.encode(_MODULE_TX_TYPEHASH, engine, safe, callHash, nonce, deadline));
         return keccak256(abi.encodePacked(hex"1901", domainSeparator, structHash));
     }
 

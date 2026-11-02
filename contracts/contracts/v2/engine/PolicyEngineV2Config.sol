@@ -1,63 +1,34 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 pragma solidity =0.8.30;
 
-import {ISafe} from "../vendor/policy-engine/interfaces/ISafe.sol";
-import {Operation} from "../vendor/policy-engine/interfaces/Operation.sol";
-import {IPolicyEngineV2} from "./interfaces/IPolicyEngineV2.sol";
-import {IPolicyV2} from "./interfaces/IPolicyV2.sol";
-import {MultiSendDecoder} from "./libraries/MultiSendDecoder.sol";
-import {Scope} from "./libraries/Scope.sol";
+import {ISafe} from "../../vendor/policy-engine/interfaces/ISafe.sol";
+import {IPolicyEngineV2} from "../interfaces/IPolicyEngineV2.sol";
+import {IPolicyV2} from "../interfaces/IPolicyV2.sol";
+import {Scope} from "../libraries/Scope.sol";
 import {
     Attachment,
     AttachmentChange,
     AttachmentKind,
-    AttachmentView,
-    Call,
-    CallMatch,
     ChangeType,
-    FreezeRole,
-    FreezeState,
-    MatchView,
     PolicyLevel,
     RoleChange,
     ScopeData
-} from "./libraries/Types.sol";
-import {EngineStorage} from "./engine/EngineStorage.sol";
+} from "../libraries/Types.sol";
+import {EngineModuleBase} from "./EngineModuleBase.sol";
 
 /**
- * @title Policy Engine V2: configuration and freeze logic
- * @notice The state-changing half of the engine: the delayed configuration path (SPEC.md §5) and
- *         the bounded freeze (§7.1). It is not an engine of its own: {SafePolicyGuardV2} deploys it
- *         in its constructor and reaches it by DELEGATECALL, so it runs on the guard's storage, at
- *         the guard's address (Safes, guardians and policies only ever see the guard). Split out
- *         because the engine does not fit the 24 KiB code size limit as one contract.
+ * @title Policy Engine V2: configuration and freeze
+ * @notice The state-changing side of the engine: the delayed configuration path (SPEC.md §5) and
+ *         the bounded freeze (§7.1). Reached by {SafePolicyGuardV2} through DELEGATECALL.
  * @dev Every entry point is `onlyDelegated` and refuses to run inside a check; `msg.sender` is the
  *      caller of the guard (the Safe, a guardian, a lifter).
  */
-contract PolicyEngineV2 is EngineStorage {
-    address private immutable _SELF = address(this);
-
+contract PolicyEngineV2Config is EngineModuleBase {
     /// @dev Safe's `GuardManager.GUARD_STORAGE_SLOT` (`keccak256("guard_manager.guard.address")`).
     bytes32 private constant _GUARD_STORAGE_SLOT = 0x4a204f620c8c5ccdca3fd54d003badd85ba500436a431f0cbda4f558c93c34c8;
     /// @dev Safe's `ModuleManager.MODULE_GUARD_STORAGE_SLOT`.
     bytes32 private constant _MODULE_GUARD_STORAGE_SLOT =
         0xb104e0b93118902c651344349b610029d694cfdec91c589c91ebafbcd0289947;
-
-    /// @notice Called directly instead of through the guard.
-    error NotDelegated();
-
-    /// @dev A direct call would act on this contract's own, unused storage: reject it.
-    modifier onlyDelegated() {
-        require(address(this) != _SELF, NotDelegated());
-        _requireNotInCheck();
-        _;
-    }
-
-    /// @dev Views are reached by the guard's static self-call; directly they would read empty storage.
-    modifier onlyDelegatedView() {
-        require(address(this) != _SELF, NotDelegated());
-        _;
-    }
 
     constructor(
         uint256 delay,
@@ -66,7 +37,7 @@ contract PolicyEngineV2 is EngineStorage {
         uint256 freezeCooldown,
         address[] memory trustedBatches,
         address signLib
-    ) EngineStorage(delay, expiry, maxFreeze, freezeCooldown, trustedBatches, signLib) {}
+    ) EngineModuleBase(delay, expiry, maxFreeze, freezeCooldown, trustedBatches, signLib) {}
 
     // =============================================================================================
     // Configuration (msg.sender is the Safe)
@@ -329,207 +300,5 @@ contract PolicyEngineV2 is EngineStorage {
         assembly ("memory-safe") {
             guard := and(mload(add(returnData, 0x60)), 0xffffffffffffffffffffffffffffffffffffffff)
         }
-    }
-
-    // =============================================================================================
-    // Freeze (SPEC.md §7.1)
-    // =============================================================================================
-
-    /// @notice See {IPolicyEngineV2}.
-    function freeze(address[] calldata safes) external onlyDelegated {
-        for (uint256 i = 0; i < safes.length; i++) {
-            address safe = safes[i];
-            require(_hasRole[safe][FreezeRole.GUARDIAN][msg.sender], IPolicyEngineV2.NotGuardian(safe));
-            FreezeState storage state = _freezes[safe][Scope.ANY];
-            if (block.timestamp < state.frozenUntil) {
-                emit IPolicyEngineV2.FreezeSkipped(safe, msg.sender, state.frozenUntil);
-            } else if (block.timestamp < state.cooldownUntil) {
-                emit IPolicyEngineV2.FreezeSkipped(safe, msg.sender, state.cooldownUntil);
-            } else {
-                _startFreeze(safe, Scope.ANY, state);
-            }
-        }
-    }
-
-    /// @notice See {IPolicyEngineV2}.
-    function freezeActor(address safe, address actor) external onlyDelegated {
-        require(_hasRole[safe][FreezeRole.GUARDIAN][msg.sender], IPolicyEngineV2.NotGuardian(safe));
-        require(actor != Scope.ANY && actor != Scope.OWNERS, IPolicyEngineV2.InvalidActor(actor));
-        FreezeState storage state = _freezes[safe][actor];
-        require(block.timestamp >= state.frozenUntil, IPolicyEngineV2.AlreadyFrozen(safe, actor, state.frozenUntil));
-        require(
-            block.timestamp >= state.cooldownUntil,
-            IPolicyEngineV2.FreezeCooldown(safe, actor, state.cooldownUntil)
-        );
-        _startFreeze(safe, actor, state);
-    }
-
-    /// @notice See {IPolicyEngineV2}.
-    function lift(address safe, address actor) external onlyDelegated {
-        require(
-            _hasRole[safe][FreezeRole.GUARDIAN][msg.sender] || _hasRole[safe][FreezeRole.LIFTER][msg.sender],
-            IPolicyEngineV2.NotGuardianOrLifter(safe)
-        );
-        FreezeState storage state = _freezes[safe][actor];
-        require(block.timestamp < state.frozenUntil, IPolicyEngineV2.NotFrozen(safe, actor));
-        uint64 cooldownUntil = uint64(block.timestamp + _FREEZE_COOLDOWN);
-        state.frozenUntil = uint64(block.timestamp);
-        state.cooldownUntil = cooldownUntil;
-        emit IPolicyEngineV2.Unfrozen(safe, actor, msg.sender, cooldownUntil);
-    }
-
-    function _startFreeze(address safe, address actor, FreezeState storage state) private {
-        uint64 until = uint64(block.timestamp + _MAX_FREEZE);
-        uint64 epoch = state.epoch + 1;
-        state.frozenAt = uint64(block.timestamp);
-        state.frozenUntil = until;
-        state.cooldownUntil = uint64(block.timestamp + _MAX_FREEZE + _FREEZE_COOLDOWN);
-        state.epoch = epoch;
-        emit IPolicyEngineV2.Frozen(safe, actor, msg.sender, until, epoch);
-    }
-
-    // =============================================================================================
-    // Enumeration views (off the hot path)
-    // =============================================================================================
-
-    /// @notice See {IPolicyEngineV2}; reached through the guard by a static self-call.
-    function getScopes(
-        address safe
-    ) external view onlyDelegatedView returns (bytes32[] memory keys, ScopeData[] memory scopes) {
-        keys = _scopeKeys[safe];
-        scopes = new ScopeData[](keys.length);
-        for (uint256 i = 0; i < keys.length; i++) {
-            scopes[i] = _scopeData(safe, keys[i]);
-        }
-    }
-
-    /// @notice See {IPolicyEngineV2}; reached through the guard by a static self-call.
-    function getAttachments(address safe) external view onlyDelegatedView returns (AttachmentView[] memory views) {
-        bytes32[] storage keys = _scopeKeys[safe];
-        uint256 total;
-        for (uint256 i = 0; i < keys.length; i++) {
-            total += _attachments[safe][keys[i]].length;
-        }
-        views = new AttachmentView[](total);
-        uint256 n;
-        for (uint256 i = 0; i < keys.length; i++) {
-            AttachmentView[] memory part = getScopeAttachments(safe, keys[i]);
-            for (uint256 j = 0; j < part.length; j++) {
-                views[n++] = part[j];
-            }
-        }
-    }
-
-    /// @notice See {IPolicyEngineV2}; reached through the guard by a static self-call.
-    function getScopeAttachments(
-        address safe,
-        bytes32 key
-    ) public view onlyDelegatedView returns (AttachmentView[] memory views) {
-        Attachment[] storage list = _attachments[safe][key];
-        ScopeData memory scope = _scopeData(safe, key);
-        views = new AttachmentView[](list.length);
-        for (uint256 i = 0; i < list.length; i++) {
-            views[i] = _view(key, scope, list[i]);
-        }
-    }
-
-    /// @notice See {IPolicyEngineV2}; reached through the guard by a static self-call.
-    function getAttachment(
-        address safe,
-        bytes32 id
-    ) external view onlyDelegatedView returns (bool exists, AttachmentView memory attachment) {
-        AttachmentRef storage ref = _refs[safe][id];
-        if (ref.position == 0) {
-            return (false, attachment);
-        }
-        bytes32 key = ref.scopeKey;
-        return (true, _view(key, _scopeData(safe, key), _attachments[safe][key][ref.position - 1]));
-    }
-
-
-    /// @notice See {IPolicyEngineV2}; reached through the guard by a static self-call.
-    function getMatchingAttachments(
-        address safe,
-        address actor,
-        address to,
-        uint256 value,
-        bytes calldata data,
-        Operation operation,
-        address policy
-    ) external view onlyDelegatedView returns (MatchView[] memory views) {
-        (bool selOk, bytes4 sel) = _calldataSelector(data);
-        Call[] memory calls;
-        if (
-            operation == Operation.DELEGATECALL &&
-            selOk &&
-            sel == MultiSendDecoder.MULTI_SEND_SELECTOR &&
-            _isTrustedBatch(to)
-        ) {
-            bool ok;
-            (ok, , calls) = MultiSendDecoder.decode(safe, data);
-            if (!ok || value != 0) {
-                return views;
-            }
-        } else {
-            calls = new Call[](1);
-            calls[0] = Call(to, value, data, operation);
-        }
-
-        uint256[][] memory perCall = new uint256[][](calls.length);
-        bytes32[8][] memory keys = new bytes32[8][](calls.length);
-        bytes4[] memory selectors = new bytes4[](calls.length);
-        uint256 total;
-        for (uint256 i = 0; i < calls.length; i++) {
-            bool ok;
-            (ok, selectors[i]) = Scope.selectorOf(calls[i].data);
-            if (!ok) {
-                continue;
-            }
-            Operation effOp = _effectiveOperation(calls[i].to, calls[i].operation, selectors[i]);
-            (perCall[i], keys[i]) = _match(safe, actor, calls[i].to, selectors[i], effOp);
-            for (uint256 k = 0; k < perCall[i].length; k++) {
-                if (policy == address(0) || address(uint160(perCall[i][k])) == policy) {
-                    total++;
-                }
-            }
-        }
-
-        views = new MatchView[](total);
-        uint256 n;
-        for (uint256 i = 0; i < calls.length; i++) {
-            for (uint256 k = 0; k < perCall[i].length; k++) {
-                uint256 word = perCall[i][k];
-                if (policy != address(0) && address(uint160(word)) != policy) {
-                    continue;
-                }
-                uint8 lvl = uint8(word >> _MATCH_LEVEL_SHIFT);
-                views[n++] = MatchView(
-                    uint16(i),
-                    lvl,
-                    _view(
-                        keys[i][lvl],
-                        _scopeAt(lvl, actor, calls[i].to, selectors[i]),
-                        Attachment(
-                            address(uint160(word)),
-                            AttachmentKind(uint8(word >> 160)),
-                            uint8(word >> 168),
-                            PolicyLevel(uint8(word >> 176))
-                        )
-                    )
-                );
-            }
-        }
-    }
-
-    /// @dev The scope a call `(actor, to, sel)` is looked up at for level `lvl`.
-    function _scopeAt(uint8 lvl, address actor, address to, bytes4 sel) private pure returns (ScopeData memory) {
-        CallMatch callMatch = CallMatch(lvl % Scope.ACTOR_LEVEL_OFFSET);
-        return
-            ScopeData(
-                lvl < Scope.ACTOR_LEVEL_OFFSET ? Scope.ANY : actor,
-                Scope.namesTo(callMatch) ? to : address(0),
-                Scope.namesSelector(callMatch) ? sel : bytes4(0),
-                callMatch
-            );
     }
 }

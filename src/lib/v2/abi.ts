@@ -1654,6 +1654,14 @@ export const argsPolicyAbi = [
 /** CoSignerPolicyV2 module-path proofs, views and settings. (ICoSignerPolicyV2) */
 export const coSignerPolicyV2Abi = [
   {
+    inputs: [
+      { internalType: 'address', name: 'cosigner', type: 'address' },
+      { internalType: 'uint256', name: 'deadline', type: 'uint256' },
+    ],
+    name: 'CoSignatureExpired',
+    type: 'error',
+  },
+  {
     inputs: [{ internalType: 'address', name: 'cosigner', type: 'address' }],
     name: 'InvalidCoSignature',
     type: 'error',
@@ -1682,6 +1690,7 @@ export const coSignerPolicyV2Abi = [
       { internalType: 'address', name: 'safe', type: 'address' },
       { internalType: 'bytes32', name: 'callHash', type: 'bytes32' },
       { internalType: 'address', name: 'cosigner', type: 'address' },
+      { internalType: 'uint256', name: 'deadline', type: 'uint256' },
       { internalType: 'bytes', name: 'signature', type: 'bytes' },
     ],
     name: 'cosign',
@@ -1738,6 +1747,7 @@ export const coSignerPolicyV2Abi = [
       { internalType: 'address', name: 'engine', type: 'address' },
       { internalType: 'address', name: 'safe', type: 'address' },
       { internalType: 'bytes32', name: 'callHash', type: 'bytes32' },
+      { internalType: 'uint256', name: 'deadline', type: 'uint256' },
     ],
     name: 'moduleTxDigest',
     outputs: [{ internalType: 'bytes32', name: '', type: 'bytes32' }],
@@ -1749,6 +1759,11 @@ export const coSignerPolicyV2Abi = [
 /** SafenetPolicyV2 module-path proofs and views. (ISafenetPolicyV2) */
 export const safenetPolicyV2Abi = [
   { inputs: [], name: 'AttestationAlreadySpent', type: 'error' },
+  {
+    inputs: [{ internalType: 'uint256', name: 'deadline', type: 'uint256' }],
+    name: 'AttestationExpired',
+    type: 'error',
+  },
   { inputs: [], name: 'InvalidSettings', type: 'error' },
   { inputs: [], name: 'MalformedAttestation', type: 'error' },
   { inputs: [], name: 'MissingAttestation', type: 'error' },
@@ -1779,6 +1794,7 @@ export const safenetPolicyV2Abi = [
       { internalType: 'address', name: 'engine', type: 'address' },
       { internalType: 'address', name: 'safe', type: 'address' },
       { internalType: 'bytes32', name: 'callHash', type: 'bytes32' },
+      { internalType: 'uint256', name: 'deadline', type: 'uint256' },
     ],
     name: 'moduleTxDigest',
     outputs: [{ internalType: 'bytes32', name: '', type: 'bytes32' }],
@@ -1790,6 +1806,7 @@ export const safenetPolicyV2Abi = [
       { internalType: 'address', name: 'engine', type: 'address' },
       { internalType: 'address', name: 'safe', type: 'address' },
       { internalType: 'bytes32', name: 'callHash', type: 'bytes32' },
+      { internalType: 'uint256', name: 'deadline', type: 'uint256' },
       { internalType: 'bytes', name: 'attestation', type: 'bytes' },
     ],
     name: 'submitAttestation',
@@ -2180,6 +2197,14 @@ export const policyV2ErrorsAbi = [
     type: 'error',
   },
   {
+    inputs: [
+      { internalType: 'address', name: 'cosigner', type: 'address' },
+      { internalType: 'uint256', name: 'deadline', type: 'uint256' },
+    ],
+    name: 'CoSignatureExpired',
+    type: 'error',
+  },
+  {
     inputs: [{ internalType: 'address', name: 'cosigner', type: 'address' }],
     name: 'InvalidCoSignature',
     type: 'error',
@@ -2191,6 +2216,11 @@ export const policyV2ErrorsAbi = [
     type: 'error',
   },
   { inputs: [], name: 'AttestationAlreadySpent', type: 'error' },
+  {
+    inputs: [{ internalType: 'uint256', name: 'deadline', type: 'uint256' }],
+    name: 'AttestationExpired',
+    type: 'error',
+  },
   { inputs: [], name: 'MalformedAttestation', type: 'error' },
   { inputs: [], name: 'MissingAttestation', type: 'error' },
   { inputs: [], name: 'UntrustedAttestationKey', type: 'error' },

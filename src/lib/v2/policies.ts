@@ -182,6 +182,10 @@ export const PRICED_TOKEN_SELECTORS: readonly Hex[] = [
   SELECTORS.increaseAllowance,
   SELECTORS.decreaseAllowance,
 ]
+/**
+ * Every typed sign-lib entry spends its full amount (a permit too: never `value - allowance`, and
+ * PolicySignLib binds the permit domain to `token`), so an Allow on one is priceable (review L-4).
+ */
 export const PRICED_SIGN_LIB_SELECTORS: readonly Hex[] = [
   SELECTORS.signPermit,
   SELECTORS.signPermit2,

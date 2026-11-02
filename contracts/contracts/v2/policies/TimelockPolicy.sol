@@ -6,8 +6,9 @@ import {Operation} from "../../vendor/policy-engine/interfaces/Operation.sol";
 import {IPolicyEngineV2} from "../interfaces/IPolicyEngineV2.sol";
 import {ITimelockPolicy} from "../interfaces/policies/ITimelockPolicy.sol";
 import {Scope} from "../libraries/Scope.sol";
-import {AttachmentKind, Call, Context, MatchView, PolicyLevel, ScopeData} from "../libraries/Types.sol";
+import {Call, Context, PolicyLevel, ScopeData} from "../libraries/Types.sol";
 import {PolicyBaseV2} from "../PolicyBaseV2.sol";
+import {TimelockPolicyStorage} from "./TimelockPolicyStorage.sol";
 
 /**
  * @title Timelock policy (transaction level)
@@ -19,25 +20,16 @@ import {PolicyBaseV2} from "../PolicyBaseV2.sol";
  *      the Safe threshold; reset when an owners' schedule executes), modelled on Optimism's
  *      TimelockGuard. Listed cancellers (e.g. another Safe) cancel any queue a schedule's
  *      attachments named them on. A freeze voids the schedules of attachments with
- *      `clearOnFreeze` through the engine's freeze epoch.
+ *      `clearOnFreeze` through the engine's freeze epoch. Scheduling runs in
+ *      {TimelockPolicyQueue}, reached by DELEGATECALL on this storage (SPEC.md §14, D-14).
  */
-contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
-    uint256 private constant _MAX_CANCELLERS = 8;
+contract TimelockPolicy is PolicyBaseV2, TimelockPolicyStorage, ITimelockPolicy {
+    /// @dev {TimelockPolicyQueue}: `scheduleOwnerTx`, `scheduleModuleTx`.
+    address private immutable _QUEUE;
 
-    bytes32 private constant _DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 private constant _NAME_HASH = keccak256("TimelockPolicy");
-    bytes32 private constant _VERSION_HASH = keccak256("1");
-    bytes32 private constant _CANCEL_TYPEHASH =
-        keccak256("Cancel(address engine,address safe,bytes32 txHash,uint256 cancelCount)");
-
-    mapping(bytes32 settingsKey => Settings) private _settings;
-
-    mapping(address engine => mapping(address safe => mapping(bytes32 txHash => Schedule))) private _schedules;
-
-    mapping(address engine => mapping(address safe => mapping(bytes32 txHash => address[]))) private _cancellers;
-
-    mapping(address engine => mapping(address safe => uint256)) private _cancelCount;
+    constructor(address queue_) {
+        _QUEUE = queue_;
+    }
 
     // =============================================================================================
     // IPolicyV2
@@ -66,7 +58,7 @@ contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
         for (uint256 i = 0; i < settings.cancellers.length; i++) {
             require(settings.cancellers[i] != address(0), InvalidSettings());
         }
-        _settings[_settingsKey(engine, safe, attachmentId)] = settings;
+        _settings[_keyOf(engine, safe, attachmentId)] = settings;
         return settings.delay;
     }
 
@@ -86,7 +78,7 @@ contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
         uint256 window;
         bool clearOnFreeze;
         for (uint256 i = 0; i < attachmentIds.length; i++) {
-            Settings storage settings = _settings[_settingsKey(engine, ctx.safe, attachmentIds[i])];
+            Settings storage settings = _settings[_keyOf(engine, ctx.safe, attachmentIds[i])];
             if (settings.delay > delay) delay = settings.delay;
             if (settings.window != 0 && (window == 0 || settings.window < window)) window = settings.window;
             clearOnFreeze = clearOnFreeze || settings.clearOnFreeze;
@@ -108,123 +100,6 @@ contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
     }
 
     // =============================================================================================
-    // Scheduling
-    // =============================================================================================
-
-    /// @inheritdoc ITimelockPolicy
-    function scheduleOwnerTx(
-        address engine,
-        address safe,
-        SafeTransaction calldata safeTx,
-        bytes calldata signatures
-    ) external returns (bytes32 txHash) {
-        txHash = ISafe(safe).getTransactionHash(
-            safeTx.to,
-            safeTx.value,
-            safeTx.data,
-            safeTx.operation,
-            safeTx.safeTxGas,
-            safeTx.baseGas,
-            safeTx.gasPrice,
-            safeTx.gasToken,
-            safeTx.refundReceiver,
-            safeTx.nonce
-        );
-        uint256 current = ISafe(safe).nonce();
-        require(safeTx.nonce >= current, StaleNonce(safeTx.nonce, current));
-        ISafe(safe).checkNSignatures(address(0), txHash, signatures, ISafe(safe).getThreshold());
-        _schedule(
-            engine,
-            safe,
-            Scope.OWNERS,
-            txHash,
-            Call(safeTx.to, safeTx.value, safeTx.data, safeTx.operation),
-            safeTx.nonce
-        );
-    }
-
-    /// @inheritdoc ITimelockPolicy
-    function scheduleModuleTx(
-        address engine,
-        address safe,
-        address to,
-        uint256 value,
-        bytes calldata data,
-        Operation operation
-    ) external returns (bytes32 txHash) {
-        txHash = Scope.moduleCallHash(safe, msg.sender, to, value, data, operation);
-        _schedule(engine, safe, msg.sender, txHash, Call(to, value, data, operation), 0);
-    }
-
-    /**
-     * @dev Snapshots the freeze state and the union of the cancellers of the attachments the
-     *      transaction matches now; `readyAt` is informational (the check recomputes the delay).
-     *      An existing schedule that a freeze voided (its check would fail `ClearedByFreeze`) is
-     *      replaced rather than rejected: schedules must be re-made after a freeze, and a module
-     *      cannot cancel its own.
-     */
-    function _schedule(
-        address engine,
-        address safe,
-        address actor,
-        bytes32 txHash,
-        Call memory call,
-        uint256 nonce
-    ) private {
-        (bool safeFrozen, bool actorFrozen, uint64 epoch) = IPolicyEngineV2(engine).freezeStatus(safe, actor);
-        MatchView[] memory matches = IPolicyEngineV2(engine).getMatchingAttachments(
-            safe,
-            actor,
-            call.to,
-            call.value,
-            call.data,
-            call.operation,
-            address(this)
-        );
-
-        uint256 delay;
-        bool clearOnFreeze;
-        uint256 listedCount;
-        for (uint256 i = 0; i < matches.length; i++) {
-            // The engine filters by policy already; re-checked because `engine` is caller-chosen.
-            if (!_isOurs(matches[i])) continue;
-            Settings storage settings = _settings[_settingsKey(engine, safe, matches[i].attachment.attachmentId)];
-            if (settings.delay > delay) delay = settings.delay;
-            clearOnFreeze = clearOnFreeze || settings.clearOnFreeze;
-            listedCount += settings.cancellers.length;
-        }
-
-        Schedule storage s = _schedules[engine][safe][txHash];
-        if (s.scheduledAt != 0) {
-            require(clearOnFreeze && (s.frozenAtSchedule || s.epoch != epoch), AlreadyScheduled(txHash));
-        }
-
-        // The union is deduplicated in memory, then written once (replacing a voided schedule's).
-        address[] memory cancellers = new address[](listedCount);
-        uint256 count;
-        for (uint256 i = 0; i < matches.length; i++) {
-            if (!_isOurs(matches[i])) continue;
-            address[] storage listed = _settings[_settingsKey(engine, safe, matches[i].attachment.attachmentId)]
-                .cancellers;
-            for (uint256 j = 0; j < listed.length; j++) {
-                count = _addUnique(cancellers, count, listed[j]);
-            }
-        }
-        assembly ("memory-safe") {
-            mstore(cancellers, count)
-        }
-        _cancellers[engine][safe][txHash] = cancellers;
-
-        uint64 readyAt = uint64(block.timestamp + delay);
-        s.actor = actor;
-        s.scheduledAt = uint64(block.timestamp);
-        s.readyAt = readyAt;
-        s.epoch = epoch;
-        s.frozenAtSchedule = safeFrozen || actorFrozen;
-        emit Scheduled(engine, safe, txHash, actor, call.to, call.value, call.data, call.operation, nonce, readyAt);
-    }
-
-    // =============================================================================================
     // Cancelling
     // =============================================================================================
 
@@ -235,9 +110,9 @@ contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
         require(s.actor == Scope.OWNERS, NotOwnersQueue(txHash));
         ISafe(safe).checkNSignatures(
             address(0),
-            cancelDigest(engine, safe, txHash),
+            _cancelDigest(engine, safe, txHash),
             signatures,
-            requiredCancelSignatures(engine, safe)
+            _requiredCancelSignatures(engine, safe)
         );
         _delete(engine, safe, txHash);
         uint256 count = ++_cancelCount[engine][safe];
@@ -255,6 +130,46 @@ contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
         require(listed, NotCanceller(msg.sender));
         _delete(engine, safe, txHash);
         emit Cancelled(engine, safe, txHash, msg.sender, 0);
+    }
+
+    // =============================================================================================
+    // Scheduling: run by {TimelockPolicyQueue} on this contract's storage
+    // =============================================================================================
+
+    /// @inheritdoc ITimelockPolicy
+    function scheduleOwnerTx(address, address, SafeTransaction calldata, bytes calldata) external returns (bytes32) {
+        _delegateToQueue();
+    }
+
+    /// @inheritdoc ITimelockPolicy
+    function scheduleModuleTx(
+        address,
+        address,
+        address,
+        uint256,
+        bytes calldata,
+        Operation
+    ) external returns (bytes32) {
+        _delegateToQueue();
+    }
+
+    /// @notice The scheduling module this policy DELEGATECALLs.
+    function queue() external view returns (address) {
+        return _QUEUE;
+    }
+
+    /// @dev Forwards the current call to {TimelockPolicyQueue} and returns or reverts with its result.
+    function _delegateToQueue() private {
+        address target = _QUEUE;
+        assembly ("memory-safe") {
+            calldatacopy(0, 0, calldatasize())
+            let ok := delegatecall(gas(), target, 0, calldatasize(), 0, 0)
+            returndatacopy(0, 0, returndatasize())
+            if iszero(ok) {
+                revert(0, returndatasize())
+            }
+            return(0, returndatasize())
+        }
     }
 
     // =============================================================================================
@@ -277,53 +192,22 @@ contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
     }
 
     /// @inheritdoc ITimelockPolicy
-    function requiredCancelSignatures(address engine, address safe) public view returns (uint256) {
-        uint256 next = _cancelCount[engine][safe] + 1;
-        uint256 threshold = ISafe(safe).getThreshold();
-        return next < threshold ? next : threshold;
+    function requiredCancelSignatures(address engine, address safe) external view returns (uint256) {
+        return _requiredCancelSignatures(engine, safe);
     }
 
     /// @inheritdoc ITimelockPolicy
-    function cancelDigest(address engine, address safe, bytes32 txHash) public view returns (bytes32) {
-        bytes32 domainSeparator = keccak256(
-            abi.encode(_DOMAIN_TYPEHASH, _NAME_HASH, _VERSION_HASH, block.chainid, address(this))
-        );
-        bytes32 structHash = keccak256(
-            abi.encode(_CANCEL_TYPEHASH, engine, safe, txHash, _cancelCount[engine][safe])
-        );
-        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    function cancelDigest(address engine, address safe, bytes32 txHash) external view returns (bytes32) {
+        return _cancelDigest(engine, safe, txHash);
     }
 
     /// @inheritdoc ITimelockPolicy
     function getSettings(address engine, address safe, bytes32 attachmentId) external view returns (Settings memory) {
-        return _settings[_settingsKey(engine, safe, attachmentId)];
+        return _settings[_keyOf(engine, safe, attachmentId)];
     }
 
     /// @inheritdoc ITimelockPolicy
     function encodeSettings(Settings calldata settings) external pure returns (bytes memory) {
         return abi.encode(settings);
-    }
-
-    // =============================================================================================
-    // Internals
-    // =============================================================================================
-
-    function _delete(address engine, address safe, bytes32 txHash) private {
-        delete _schedules[engine][safe][txHash];
-        delete _cancellers[engine][safe][txHash];
-    }
-
-    function _isOurs(MatchView memory m) private view returns (bool) {
-        return m.attachment.kind == AttachmentKind.POLICY && m.attachment.policy == address(this);
-    }
-
-    /// @dev Appends `account` to the first `count` entries of `list` unless present; returns the new
-    ///      count. Bounded: at most 8 cancellers per attachment, attachments bounded by the engine caps.
-    function _addUnique(address[] memory list, uint256 count, address account) private pure returns (uint256) {
-        for (uint256 i = 0; i < count; i++) {
-            if (list[i] == account) return count;
-        }
-        list[count] = account;
-        return count + 1;
     }
 }

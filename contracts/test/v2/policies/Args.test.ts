@@ -156,8 +156,19 @@ describe('V2 ArgsPolicy', () => {
       const total = vault.encodeFunctionData('totalAssets')
       await expectRevert(check(call(total), [A, B]), policy, 'NoConstraint', [total])
       await expectRevert(check(call('0x'), [A, B]), policy, 'NoConstraint', ['0x00000000'])
-      // A constraint of another attachment applying is enough.
+      // Strict is per attachment: A's constraint applying does not satisfy B (review L-2).
+      await expectRevert(check(deposit(1n, safe), [A, B]), policy, 'NoConstraint', [DEPOSIT])
+    })
+
+    it('a strict attachment passes a call one of its own constraints applies to', async () => {
+      await configure(A, [c(REDEEM, 1, Op.EQ_SAFE)])
+      await configure(B, [c(DEPOSIT, 1, Op.EQ_SAFE)], true)
+      // Strict B, its own constraint applies: passes even though A has none for deposit.
       await check(deposit(1n, safe), [A, B])
+      // Strict B has no constraint for redeem; A's constraint applying is not enough.
+      const redeem = call(vault.encodeFunctionData('redeem', [1n, safe, safe]))
+      await expectRevert(check(redeem, [A, B]), policy, 'NoConstraint', [REDEEM])
+      await check(redeem, [A])
     })
   })
 

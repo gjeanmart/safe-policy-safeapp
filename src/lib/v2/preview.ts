@@ -7,6 +7,7 @@ import {
   encodeFunctionData,
   getAddress,
   isAddressEqual,
+  numberToHex,
   parseAbi,
   size,
 } from 'viem'
@@ -75,6 +76,9 @@ export type PreviewOutcome = {
 
 export type PreviewCall = Pick<OwnerCall, 'to' | 'value' | 'data' | 'operation'>
 
+/** `SafeStorage.nonce` (slot 5 in Safe 1.3.0 – 1.5.0), overridden to preview at another nonce. */
+const SAFE_NONCE_SLOT = numberToHex(5, { size: 32 })
+
 /** Calldata of `engine.preview(...)`; send it with `eth_call` (it always reverts). */
 export const encodePreview = (safe: Address, actor: Address, c: PreviewCall): Hex =>
   encodeFunctionData({
@@ -110,9 +114,27 @@ export async function runPreview(
   actor: Address,
   c: PreviewCall,
   ctx: LabelContext = {},
+  /**
+   * Owner path: preview the transaction at this Safe nonce instead of the current one (the engine
+   * hashes the owner transaction at `safe.nonce()`). Use the nonce it is scheduled or will execute
+   * at, e.g. current + 1 from the Timelock queue, so the Timelock gate finds that schedule.
+   */
+  ownerNonce?: bigint,
 ): Promise<PreviewResult> {
   try {
-    await client.call({ to: deployment.engine, data: encodePreview(safe, actor, c) })
+    await client.call({
+      to: deployment.engine,
+      data: encodePreview(safe, actor, c),
+      stateOverride:
+        ownerNonce === undefined
+          ? undefined
+          : [
+              {
+                address: safe,
+                stateDiff: [{ slot: SAFE_NONCE_SLOT, value: numberToHex(ownerNonce, { size: 32 }) }],
+              },
+            ],
+    })
     return { ok: false, reason: 'preview returned without reverting (not a V2 engine?)' }
   } catch (error) {
     const data = revertDataOf(error)
@@ -143,7 +165,10 @@ export function decodePreviewRevert(
     const { text, error, needs } =
       size(r.reason) === 0
         ? {
-            text: verdict === Verdict.DENY ? 'Denied: the policy returned a wrong value' : '',
+            text:
+              verdict === Verdict.DENY
+                ? 'Denied: the policy reverted without a reason (out of gas, no code, a bare revert or a wrong return value)'
+                : '',
             error: undefined,
             needs: undefined,
           }
@@ -179,6 +204,7 @@ export const extraPolicyErrorsAbi = parseAbi([
   'error OnlyDelegateCall()',
   'error DomainSeparatorUnavailable(address token)',
   'error SignatureExpired(uint256 deadline)',
+  'error DomainMismatch(address token)',
   'error InvalidMulMulAddWitness()',
   'error UnsupportedMulMulAddInput()',
   'error InvalidScalar()',
@@ -262,8 +288,12 @@ export function describeReason(
       return text(`Needs a co-signature from ${who(0)}`, 'cosignature')
     case 'InvalidCoSignature':
       return text(`Invalid co-signature from ${who(0)}`)
+    case 'CoSignatureExpired':
+      return text(`The co-signature from ${who(0)} expired at ${time(a(1))}: needs a new one`, 'cosignature')
     case 'MissingAttestation':
       return text('Needs a Safenet attestation', 'attestation')
+    case 'AttestationExpired':
+      return text(`The Safenet attestation expired at ${time(a(0))}: needs a new one`, 'attestation')
     case 'MalformedAttestation':
     case 'UntrustedAttestationKey':
     case 'AttestationAlreadySpent':
@@ -309,6 +339,10 @@ export function describeReason(
       return text(`Signature deadline passed (${time(a(0))})`)
     case 'DomainSeparatorUnavailable':
       return text(`Token ${who(0)} has no DOMAIN_SEPARATOR: cannot sign a permit for it`)
+    case 'DomainMismatch':
+      return text(
+        `Token ${who(0)}'s DOMAIN_SEPARATOR is not its own EIP-712 domain: cannot sign a permit for it`,
+      )
     case 'InvalidMulMulAddWitness':
     case 'UnsupportedMulMulAddInput':
     case 'InvalidScalar':

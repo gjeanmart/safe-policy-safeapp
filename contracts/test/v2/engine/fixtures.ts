@@ -12,12 +12,13 @@ import {
   zeroPadValue,
 } from 'ethers'
 import { ethers } from 'hardhat'
+import { deployEngineV2, engineAt } from '../../../scripts/lib/v2-deployment'
 import type {
   EngineMultiSend,
   EngineTarget,
+  ISafePolicyGuardV2,
   MockPolicyV2,
   MockSafeV2,
-  SafePolicyGuardV2,
 } from '../../../typechain-types'
 import { expectRevert as baseExpectRevert } from '../helpers'
 
@@ -161,15 +162,17 @@ export async function deployEngine(
 ) {
   const multiSend = (await ethers.deployContract('EngineMultiSend')) as unknown as EngineMultiSend
   const signLib = opts.signLib ?? ethers.Wallet.createRandom().address
-  const engine = (await ethers.deployContract('SafePolicyGuardV2', [
-    opts.delay ?? TIMING.delay,
-    opts.expiry ?? TIMING.expiry,
-    opts.maxFreeze ?? TIMING.maxFreeze,
-    opts.cooldown ?? TIMING.cooldown,
-    opts.batches ?? [await multiSend.getAddress()],
+  // The guard and its modules, exactly as scripts/deploy-v2.ts deploys them.
+  const { engine: address, modules } = await deployEngineV2({
+    delay: opts.delay ?? TIMING.delay,
+    expiry: opts.expiry ?? TIMING.expiry,
+    maxFreeze: opts.maxFreeze ?? TIMING.maxFreeze,
+    freezeCooldown: opts.cooldown ?? TIMING.cooldown,
+    trustedBatches: opts.batches ?? [await multiSend.getAddress()],
     signLib,
-  ])) as unknown as SafePolicyGuardV2
-  return { engine, multiSend, signLib }
+  })
+  const engine = await engineAt(address)
+  return { engine, multiSend, signLib, modules }
 }
 
 /** A MockSafeV2 with the impersonated signer that acts as the Safe itself (for direct config calls). */
@@ -279,7 +282,7 @@ export async function expectRevert(
 
 /** Calls `preview` and returns the decoded gates (it always reverts with `Preview`). */
 export async function previewGates(
-  engine: SafePolicyGuardV2,
+  engine: ISafePolicyGuardV2,
   safe: string,
   actor: string,
   to: string,

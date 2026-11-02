@@ -80,11 +80,12 @@ export const ADDRESS_BOOK: Record<string, string> = Object.fromEntries([
  * Policy Engine V2 (contracts/contracts/v2). Not deployed yet: every address is a zero placeholder
  * and the app shows "V2 not deployed on this chain" until they are filled in.
  *
- * To fill in: run `pnpm deploy:v2:sepolia` in `contracts/` and paste each printed JSON block
- * (`// V2Deployment, engine DELAY 5 seconds` / `24 hours`) as the argument of `parseV2Deployment`
- * below, as is (it validates and checksums every address). Optionally set `fromBlock` to the
- * deployment block so the Timelock queue scan starts there. Safenet stays 0x0 when the deploy had
- * no SAFENET_* variables: the app then hides it.
+ * To fill in: run `pnpm deploy:v2:sepolia` in `contracts/` and replace each entry below with the
+ * printed `V2_ENGINES` line of the same engine (`5 seconds` / `24 hours`): its `fromBlock` is the
+ * engine's deployment block, where the Timelock queue scan starts, and `parseV2Deployment`
+ * validates and checksums every address. The engine is one address even though it is deployed as
+ * a guard plus modules (contracts/contracts/v2/SPEC.md §14, D-14). Safenet stays 0x0 when the
+ * deploy had no SAFENET_* variables: the app then hides it.
  */
 const V2_ZERO = '0x0000000000000000000000000000000000000000'
 
