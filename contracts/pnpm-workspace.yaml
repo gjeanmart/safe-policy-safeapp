@@ -1,0 +1,9 @@
+# Own pnpm root: the app's install (CI, Cloudflare) does not pull in the Solidity toolchain.
+
+# Supply-chain hygiene, as in the app: only resolve versions published at least 1 day ago.
+minimumReleaseAge: 1440
+engineStrict: true
+
+# Dependency install scripts stay blocked. keccak / secp256k1 (via Hardhat) ask for one to build
+# native bindings, but both fall back to pure JS, which is fine for compiling and testing.
+onlyBuiltDependencies: []
