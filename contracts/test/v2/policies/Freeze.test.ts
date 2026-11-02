@@ -4,7 +4,7 @@ import { expect } from 'chai'
 import { AbiCoder, ZeroAddress, concat, getAddress, getBytes, hexlify, keccak256 } from 'ethers'
 import { ethers } from 'hardhat'
 import type { FreezePolicy, TimelockEngineStub, TimelockMockSafe } from '../../../typechain-types'
-import { expectRevert } from '../helpers'
+import { expectRevert, revertData } from '../helpers'
 
 /**
  * FreezePolicy (SPEC.md §7.1, §8.1): a stateless reader of the engine's freeze state, attached by
@@ -57,15 +57,6 @@ async function sign(hash: string, signers: HardhatEthersSigner[]): Promise<strin
     }),
   )
   return hexlify(concat(sigs))
-}
-
-function revertData(e: unknown): string | undefined {
-  const err = e as { data?: unknown; info?: { error?: { data?: unknown } }; error?: { data?: unknown } }
-  for (const d of [err?.data, err?.info?.error?.data, err?.error?.data]) {
-    if (typeof d === 'string' && d.startsWith('0x')) return d
-    if (d && typeof (d as { data?: unknown }).data === 'string') return (d as { data: string }).data
-  }
-  return undefined
 }
 
 /** Asserts `outerError` from the stub naming `policy`, with a reason decoding to `errorName(args)`. */

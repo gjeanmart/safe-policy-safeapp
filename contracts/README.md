@@ -61,15 +61,63 @@ Things to know:
   fails closed when nested.
 - **Detaching leaves inner state.** As with any policy, revoke the inner configuration explicitly before detaching.
 
-## Policy Engine V2 (in progress)
+## Policy Engine V2
 
 [`contracts/v2`](contracts/v2) holds the V2 prototype: scopes per actor, every match runs, built-in Allow/Deny,
-pass-or-deny policies. The interfaces and [`SPEC.md`](contracts/v2/SPEC.md) are frozen first; the app's TypeScript
-mirror is generated from them:
+pass-or-deny policies, a bounded freeze, delayed configuration, on-chain-only ERC-1271. It targets Safe 1.5.0 (the engine
+is installed as both guard and module guard).
+
+- [`SPEC.md`](contracts/v2/SPEC.md): the specification; §14 lists what changed during implementation.
+- [`GAS.md`](contracts/v2/GAS.md): measured gas. [`COMPARISON.md`](contracts/v2/COMPARISON.md): V1 vs V2.
+
+| Path                                                     | What                                                                                                                              |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `SafePolicyGuardV2.sol`, `PolicyEngineV2.sol`, `engine/` | The engine: guard hooks, `preview` and views in the guard; configuration and freeze in `PolicyEngineV2`, reached by DELEGATECALL  |
+| `PolicyBaseV2.sol`, `policies/`                          | Base contract and the 8 policies: Freeze, Timelock, Recipients, Limit, Args, CoSignerV2, SafenetV2, QuorumV2                      |
+| `erc1271/`                                               | `PolicyFallbackHandler` (ERC-1271 from approved messages only) and `PolicySignLib` (typed Permit / Permit2 / CoW order approvals) |
+| `interfaces/`, `libraries/`                              | Frozen ABI: engine, policy and per-policy interfaces; scopes, types, MultiSend decoding                                           |
+| `libraries/frost/`                                       | FROST libraries for Safenet, [vendored](contracts/v2/libraries/frost/VENDORED.md) unmodified from policy-engine 8ee68a8           |
+| `test/`                                                  | Mocks and stubs for the tests (not deployed)                                                                                      |
+
+The app's TypeScript mirror is generated from the interfaces:
 
 ```bash
 pnpm export:v2-abi     # compile, then write ../src/lib/v2/abi.ts (run `pnpm format` at the root afterwards)
 ```
+
+### Tests
+
+The V2 tests live in [`test/v2`](test/v2) (engine, policies, ERC-1271, and end-to-end through a real Safe 1.5.0).
+They use plain chai plus [`test/v2/helpers.ts`](test/v2/helpers.ts) (`expectRevert`, `expectEvent`, …), never
+hardhat-chai-matchers, so they run under both configs:
+
+```bash
+pnpm test                                         # V1 + V2, with hardhat-toolbox (what CI runs)
+npx hardhat test test/v2/policies/Limit.test.ts   # one file
+# V2 only, without hardhat-toolbox (the V1 tests need chai-matchers):
+npx hardhat --config hardhat.sandbox.config.ts test test/v2/*.test.ts test/v2/*/*.test.ts
+```
+
+`hardhat.sandbox.config.ts` is `hardhat.config.ts` without hardhat-toolbox. It exists for the Claude Code sandbox, which
+cannot read a file of hardhat-chai-matchers that toolbox loads (`properPrivateKey.js`). It is local only: git-excluded
+via `.git/info/exclude`, not committed. `test/v2/engine/ZzErrorCoverage.test.ts` checks that the engine
+tests assert every engine error; it runs last and skips itself when the engine tests run one file at a time.
+
+### Deploy (Sepolia)
+
+```bash
+npx hardhat vars set SEPOLIA_DEPLOYER_KEY   # stored outside the repo, read only by hardhat.config.ts
+DRY_RUN=1 npx hardhat run scripts/deploy-v2.ts   # rehearsal on the in-process network, no key needed
+pnpm deploy:v2:sepolia
+```
+
+[`scripts/deploy-v2.ts`](scripts/deploy-v2.ts) prints the deployer and its balance first (aborts below 0.02 ETH; the
+full run is ≈ 33 M gas), then deploys `PolicySignLib`, two engines (`DELAY` 5 s and 24 h; `EXPIRY` 9 d, `MAX_FREEZE`
+7 d, `FREEZE_COOLDOWN` 12 h, trusted batches MultiSendCallOnly 1.4.1 and 1.5.0), `PolicyFallbackHandler` and the 8
+policies, which both engines share. It ends with one `V2Deployment` JSON block per engine for
+`src/config/contracts.ts`. `SafenetPolicyV2` needs a real Consensus deployment: set `SAFENET_CONSENSUS_CHAIN_ID`,
+`SAFENET_CONSENSUS_ADDRESS`, `SAFENET_INITIAL_EPOCH`, `SAFENET_GROUP_KEY_X` and `SAFENET_GROUP_KEY_Y`, otherwise it is
+skipped (address `0x0`; a dry run uses a placeholder key instead).
 
 ## Develop
 

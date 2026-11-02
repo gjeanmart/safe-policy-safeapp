@@ -8,7 +8,8 @@ import type { BaseContract, ContractTransactionResponse, Interface, LogDescripti
 
 type Awaitable<T> = Promise<T> | (() => Promise<T>)
 
-function revertData(e: unknown): string | undefined {
+/** The raw revert data of a failed call or transaction, wherever ethers/hardhat put it. */
+export function revertData(e: unknown): string | undefined {
   const err = e as { data?: unknown; info?: { error?: { data?: unknown } }; error?: { data?: unknown } }
   for (const d of [err?.data, err?.info?.error?.data, err?.error?.data]) {
     if (typeof d === 'string' && d.startsWith('0x')) return d

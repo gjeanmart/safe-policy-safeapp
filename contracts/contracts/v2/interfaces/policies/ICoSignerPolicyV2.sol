@@ -28,16 +28,20 @@ interface ICoSignerPolicyV2 {
 
     /**
      * @notice Pushes a module-path co-signature (anyone may relay). `signature` is over
-     *         `moduleTxDigest(engine, safe, callHash)` (ECDSA, or ERC-1271 for a contract co-signer).
+     *         `moduleTxDigest(engine, safe, callHash)`, i.e. bound to the current use counter
+     *         (ECDSA, or ERC-1271 for a contract co-signer).
      */
     function cosign(address engine, address safe, bytes32 callHash, address cosigner, bytes calldata signature) external;
 
     function isCosigned(address engine, address safe, bytes32 callHash, address cosigner) external view returns (bool);
 
     /**
-     * @notice EIP-712 digest a co-signer signs for a module transaction: domain
+     * @notice EIP-712 digest a co-signer signs for the next module execution of `callHash`: domain
      *         `("CoSignerPolicyV2", "1", chainid, this)`,
-     *         `ModuleTransaction(address engine,address safe,bytes32 callHash)`.
+     *         `ModuleTransaction(address engine,address safe,bytes32 callHash,uint256 nonce)`, where
+     *         `nonce` is the policy's use counter for `(engine, safe, callHash)` (`moduleTxNonce`, not
+     *         the Safe nonce). The check increments it, so a consumed co-signature can never be pushed
+     *         again and the same call executed twice needs a fresh co-signature. SPEC.md §7, §8.6.
      */
     function moduleTxDigest(address engine, address safe, bytes32 callHash) external view returns (bytes32);
 

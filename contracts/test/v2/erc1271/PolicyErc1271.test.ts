@@ -497,20 +497,3 @@ describe('V2 ERC-1271: PolicySignLib', () => {
     })
   })
 })
-
-describe('V2 ERC-1271: Tim’s permit attack (real Safe 1.5.0, WP7)', () => {
-  it.skip(
-    'passes on V1: a Safe 1.5.0 with CompatibilityFallbackHandler and the V1 SafePolicyGuard (an ERC20TransferPolicy ' +
-      'cap on USDC) lets the owners sign an EIP-2612 Permit(owner = Safe, spender = attacker, value = full balance) ' +
-      'off-chain as a SafeMessage; USDC.permit(..., signature) validates through isValidSignature -> checkSignatures ' +
-      'with no guard call, and attacker.transferFrom drains the balance at t = 0 despite the cap',
-  )
-  it.skip(
-    'is denied on V2: the same Safe with PolicyFallbackHandler and SafePolicyGuardV2 (Limit + Recipients at ' +
-      '(OWNERS, *)): the same off-chain owner signature makes isValidSignature return 0xffffffff and USDC.permit ' +
-      'reverts; the only way to sign is a Safe tx DELEGATECALLing PolicySignLib.signPermit, which the engine matches ' +
-      'as a CALL and denies (PolicyDenied from RecipientsPolicy: spender not listed / LimitPolicy: over budget), so ' +
-      'signedMessages stays 0 and the balance is unchanged; setFallbackHandler back to CompatibilityFallbackHandler ' +
-      'is a call to the Safe, delayed by the owners’ Timelock',
-  )
-})

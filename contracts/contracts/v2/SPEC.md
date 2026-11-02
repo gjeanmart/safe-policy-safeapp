@@ -2,10 +2,12 @@
 
 Status: authoritative for WP1–WP10. Research prototype, unaudited, Sepolia only. Sources: `PLAN.md` rev 2 (D1–D5,
 D4', F1–F13, §3a), `analysis-fable.md`, the V2 design doc. Where this file and the plan differ, this file wins and the
-difference is listed in §13.
+difference is listed in §13. Deviations accepted after implementation are fixed inline and listed in §14.
 
-The words MUST / MUST NOT / MAY are normative. "Engine" means the single contract `SafePolicyGuardV2` (engine +
-guard, one address); policies see it as `msg.sender`.
+The words MUST / MUST NOT / MAY are normative. "Engine" means `SafePolicyGuardV2` (engine + guard, one address);
+policies see it as `msg.sender`. Its code is split in two (§14, D-6): `SafePolicyGuardV2` holds the hooks, `preview` and
+the views, and DELEGATECALLs `PolicyEngineV2` (deployed by its constructor) for configuration and freeze, so everything
+runs on the guard's storage at the guard's address. Nobody calls `PolicyEngineV2` directly.
 
 Files frozen by WP0 (change them only together with this spec, the TS mirror and the tests):
 
@@ -166,7 +168,8 @@ DETACH:
 ```
 
 `RoleChange { role, account, enabled }`: idempotent; emits `RoleSet` only when membership changes; at most
-`MAX_ROLE_MEMBERS = 8` per role (`TooManyRoleMembers(role)`); `account != 0`.
+`MAX_ROLE_MEMBERS = 8` per role (`TooManyRoleMembers(role)`); `account != 0`, else `InvalidActor(address(0))` (the frozen
+interface has no dedicated error; §14, D-7).
 
 ### 5.3 Delay floor (F1)
 
@@ -181,8 +184,11 @@ Timelocks on other actors (Recovery R, Agent) are not bounded by `DELAY`.
 
 - `expiry > 0`, `maxFreeze > 0`, `expiry ≥ maxFreeze + freezeCooldown + delay` (F3) else `InvalidTiming`.
 - `signLib != 0`, `1 ≤ trustedBatches.length ≤ 4`, no zero, no duplicates, else `InvalidDeployment`. All immutable.
-- Deploy (WP7): `DELAY` 5 s (play) and 24 h (freeze story); `MAX_FREEZE` 7 d; `FREEZE_COOLDOWN` 12 h; `EXPIRY` ≥ 8.5 d
-  - DELAY (use 9 d for both); trusted batches = MultiSendCallOnly 1.4.1 + MultiSend 1.4.1 (and 1.5.0 if deployed).
+- Deploy (`scripts/deploy-v2.ts`): `DELAY` 5 s (play) and 24 h (freeze story); `MAX_FREEZE` 7 d; `FREEZE_COOLDOWN`
+  12 h; `EXPIRY` 9 d for both (F3 needs ≥ 8.5 d for the 24 h engine, so V1's 7 d does not fit); trusted batches = the
+  canonical MultiSendCallOnly 1.4.1 and 1.5.0, no full `MultiSend` (§14, D-11). `PolicySignLib` is deployed first (its
+  address is a constructor argument). A Safe installs the engine as **both** guard and module guard (`setGuard` and
+  `setModuleGuard`).
 
 ## 6. Evaluation
 
@@ -199,7 +205,7 @@ checkTransaction(to, value, data, op, safeTxGas, baseGas, gasPrice, gasToken, re
   policyContexts = decodeContext(signatures)                             // §6.6
   evaluate(ctx, to, value, data, op, signatures, policyContexts, PREVIEW=false)
 
-checkAfterExecution(hash, success):              require(success)  ExecutionFailed
+checkAfterExecution(hash, success):              require(success)  ExecutionFailed        // unreachable, below
 
 checkModuleTransaction(to, value, data, op, module) returns (bytes32 moduleTxHash):
   safe = msg.sender; actor = module
@@ -210,6 +216,14 @@ checkModuleTransaction(to, value, data, op, module) returns (bytes32 moduleTxHas
 
 checkAfterModuleExecution(hash, success):        require(success)  ModuleExecutionFailed
 ```
+
+Post-hooks on Safe 1.5.0 (§14, D-10):
+
+- **Owner path**: `ExecutionFailed` is unreachable. The engine requires `safeTxGas == 0` and `gasPrice == 0`, and with
+  both zero the Safe reverts a failed inner call itself (`GS013`) before the post-hook. Kept as defence.
+- **Module path**: a failing inner call no longer makes `execTransactionFromModule` return `false`: the post-hook
+  reverts `ModuleExecutionFailed`, so the module's whole call reverts. Module authors that branch on the returned
+  `success` get a revert instead (and a pushed proof is not consumed, §7).
 
 `supportsInterface`: `IPolicyEngineV2` (`0xdc1727e9`), `ITransactionGuard` (`0xe6d7a83a`), `IModuleGuard`
 (`0x58401ed8`), `IERC165` (`0x01ffc9a7`).
@@ -334,7 +348,9 @@ nonce = current nonce)`, `nonce = current`, `executor = address(0)`, no signatur
   `callIndex = TX_INDEX`. A malformed batch yields a single RULE gate. A configuration-path call yields no gate (or the
   RULE gate of its denial).
 - **The transaction is allowed iff no gate has verdict DENY.**
-- Implementations SHOULD keep a gas reserve so an out-of-gas policy is reported rather than aborting the preview.
+- Implementations SHOULD keep a gas reserve so an out-of-gas policy is reported rather than aborting the preview. The
+  engine forwards `gasleft() − 300 000` to each policy in `preview` (`gasleft() / 2` below 600 000); real checks forward
+  all remaining gas (§9, §14, D-8).
 
 ## 7. Identity and proofs (F7, D5)
 
@@ -348,9 +364,11 @@ nonce = current nonce)`, `nonce = current`, `executor = address(0)`, no signatur
   calls to the policy, stored under `(engine, safe, callHash)` and **consumed** (deleted) by the check. No nonce: the
   same call twice needs a second proof after the first executed. A failed module execution reverts, so the proof is not
   consumed.
-- `callHash` has no chain id and no engine: policies that verify **signatures** over a module transaction sign the
-  EIP-712 digest `ModuleTransaction(address engine,address safe,bytes32 callHash)` under their own domain
-  `(name, "1", chainid, policy address)`; never the raw `callHash`.
+- `callHash` has no chain id and no engine: policies that verify **signatures** over a module transaction sign an
+  EIP-712 `ModuleTransaction` digest under their own domain `(name, "1", chainid, policy address)`; never the raw
+  `callHash`. SafenetPolicyV2: `ModuleTransaction(address engine,address safe,bytes32 callHash)`. CoSignerPolicyV2 adds
+  its own use counter: `ModuleTransaction(address engine,address safe,bytes32 callHash,uint256 nonce)` with `nonce =
+moduleTxNonce(engine, safe, callHash)` (§8.6, §14, D-1).
 - Owner path: proofs ride in the policy context (§6.6), or (Timelock) are pushed with owner signatures over the Safe
   transaction hash. An owner schedule dies when the Safe nonce moves past it.
 
@@ -419,7 +437,10 @@ ISafe(safe).getTransactionHash(...)`; `nonce ≥ ISafe(safe).nonce()` else `Stal
   a direct call, never a Safe transaction, which would wait for its own timelock). Actor = OWNERS.
 - **Schedule (module path)** `scheduleModuleTx(engine, safe, to, value, data, op)`: `msg.sender` is the actor;
   `txHash = moduleCallHash(safe, msg.sender, to, value, data, op)`.
-- Both: `AlreadyScheduled` if present. Store `Schedule {actor, scheduledAt = now, readyAt, epoch, frozenAtSchedule}`
+- Both: `AlreadyScheduled` if present, except (§14, D-3) when the existing schedule was voided by a freeze: some
+  matched attachment has `clearOnFreeze` and the old schedule would fail `ClearedByFreeze` (`s.frozenAtSchedule ||
+s.epoch != epoch now`); it is then replaced. Without this, a voided module-path schedule (no nonce) would block the
+  same call forever. Store `Schedule {actor, scheduledAt = now, readyAt, epoch, frozenAtSchedule}`
   with `(safeFrozen || actorFrozen, epoch) = engine.freezeStatus(safe, actor)`. Resolve the attachments the transaction
   matches with `engine.getMatchingAttachments(safe, actor, to, value, data, op, address(this))`; store the union of
   their `cancellers` (snapshot) and `readyAt = now + max delay` (informational). Emit `Scheduled(engine, safe, txHash,
@@ -450,7 +471,8 @@ Per call, the "party" checked against **every** matched attachment (the Safe its
 | `value > 0` (any selector, incl. empty calldata)     | `call.to` ∈ recipients                                                 |
 | `transfer(to, amount)` `0xa9059cbb`                  | `to` ∈ recipients                                                      |
 | `transferFrom(from, to, amount)` `0x23b872dd`        | `to` ∈ recipients                                                      |
-| `approve(spender, amount)` `0x095ea7b3`              | `spender` ∈ spenders; `amount ≤ maxApproval` unless `amount == 0`      |
+| `approve(spender, 0)` `0x095ea7b3`                   | passes for **any** spender (revocation; §14, D-5)                      |
+| `approve(spender, amount)`, `amount > 0`             | `spender` ∈ spenders; `amount ≤ maxApproval`                           |
 | `increaseAllowance(spender, added)` `0x39509351`     | `spender` ∈ spenders; `allowance(safe, spender) + added ≤ maxApproval` |
 | `decreaseAllowance(spender, sub)` `0xa457c2d7`       | passes                                                                 |
 | `SIGN_LIB.signPermit` / `signPermit2` (DELEGATECALL) | `spender` ∈ spenders; amount ≤ `maxApproval`                           |
@@ -458,7 +480,9 @@ Per call, the "party" checked against **every** matched attachment (the Safe its
 | anything else                                        | pass, or `UnclassifiedCall(selector)` if any attachment is `strict`    |
 
 Lists ≤ 64 entries each. Native-value check works next to `Allow (Owners, *)` because every matching scope runs (Akshay's
-case). Malformed calldata for a known selector → deny.
+case). Malformed calldata for a known selector → deny with the contract-level error `MalformedCall(selector)` (also in
+LimitPolicy; not in the frozen interfaces, so the app's error ABI declares it). Inside a batch, `increaseAllowance` is
+checked against the allowance expected after the earlier sub-calls (transient storage), not only the on-chain one.
 
 ### 8.4 LimitPolicy ("Transfer budget")
 
@@ -466,21 +490,29 @@ case). Malformed calldata for a known selector → deny.
   configure time (V1 `SpendingLimitPolicy`); `period 0` = one-time. ≤ 16 tokens, no duplicates, `amount > 0`.
 - Pricing of a call (sum of spends per token; `address(0)` = native):
 
-| Shape                                                    | Spend                                                                                                                                                                                         |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `value > 0`                                              | `value` of native (in addition to the data's own spend)                                                                                                                                       |
-| empty calldata                                           | nothing else                                                                                                                                                                                  |
-| `transfer(to, amount)` on token T                        | `amount` of T                                                                                                                                                                                 |
-| `transferFrom(from, to, amount)`                         | `amount` of T if `from == safe`, else 0                                                                                                                                                       |
-| `approve(spender, amount)` / `signPermit`, `signPermit2` | reservation: `delta = amount − allowance(safe, spender)` (STATICCALL); `delta > 0` spends it; `delta < 0` gives back `min(−delta, reserved[spender] in the current window)`, never below zero |
-| `increaseAllowance(spender, added)`                      | `added` (reservation)                                                                                                                                                                         |
-| `decreaseAllowance(spender, sub)`                        | give-back as above, `min(sub, reserved)`                                                                                                                                                      |
-| `signCowOrder(order)`                                    | `sellAmount + feeAmount` of `sellToken`                                                                                                                                                       |
-| anything else                                            | **unpriced**                                                                                                                                                                                  |
+| Shape                                      | Spend                                                                                                                                                                              |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `value > 0`                                | `value` of native (in addition to the data's own spend)                                                                                                                            |
+| empty calldata                             | nothing else                                                                                                                                                                       |
+| `transfer(to, amount)` on token T          | `amount` of T                                                                                                                                                                      |
+| `transferFrom(from, to, amount)`           | `amount` of T if `from == safe`, else 0                                                                                                                                            |
+| `approve(spender, amount)`                 | reservation: `delta = amount − allowance(safe, spender)` (STATICCALL); `delta > 0` spends it; `delta < 0` gives back `min(−delta, reserved[spender] in the current window, spent)` |
+| `signPermit` (DELEGATECALL to `SIGN_LIB`)  | reservation of `delta` when `delta > 0`; never gives back (the allowance only moves if someone submits the permit)                                                                 |
+| `signPermit2` (DELEGATECALL to `SIGN_LIB`) | plain spend of the full `amount` (a Permit2 allowance is not the ERC-20 allowance): no reservation, no give-back                                                                   |
+| `increaseAllowance(spender, added)`        | `added` (reservation)                                                                                                                                                              |
+| `decreaseAllowance(spender, sub)`          | give-back `min(sub, allowance, reserved, spent)`                                                                                                                                   |
+| `signCowOrder(order)`                      | `sellAmount + feeAmount` of `sellToken`                                                                                                                                            |
+| anything else                              | **unpriced**                                                                                                                                                                       |
 
 - Per attachment: a priced spend of a token it lists is debited (`LimitExceeded(id, token, requested, available)`); a
   spend of a token it does not list, or an unpriced call, denies with `Unpriced(id, token, selector)` unless
   `passUnpriced`. Batches sum naturally (each sub-call debits in order). `remaining(engine, safe, id, token)` for the app.
+- Give-back is capped by what the window actually spent. Inside a batch an allowance is read as the smaller of the
+  on-chain value and the value expected after the earlier sub-calls (transient storage), so `[approve(x, 0),
+approve(x, a)]` cannot give back without spending (§14, D-4).
+- ERC-20 shapes are priced only as CALLs; the typed sign-lib entries only as DELEGATECALLs to the engine's `SIGN_LIB()`.
+- Reconfiguring an attachment resets its budget (re-attach = reset, §4): owners can refill a limit through a delayed
+  configuration change.
 - A limit only holds with deny-by-default ALLOWs on calls it can price; lint "Limit next to unpriceable ALLOW".
 
 ### 8.5 ArgsPolicy
@@ -496,14 +528,19 @@ attachment is `strict`. ≤ 16 constraints, ≤ 32 values.
   the matched attachments a valid signature over `ctx.txHash` (ECDSA 65 bytes low-s, or ERC-1271 for a contract), as
   V1. `MissingCoSignature` / `InvalidCoSignature` / `MalformedPolicyData`.
 - Module path: `cosign(engine, safe, callHash, cosigner, signature)` (anyone relays) over `moduleTxDigest(engine, safe,
-callHash)`; the check requires and consumes one per co-signer.
+callHash)`; the check requires and consumes one per co-signer. The digest is the 4-field `ModuleTransaction(engine,
+safe, callHash, nonce)` (§7), `nonce = moduleTxNonce(engine, safe, callHash)`, a use counter the check increments: a
+  consumed co-signature can never be pushed again (deterministic ECDSA would reproduce the same bytes; ERC-1271
+  approvals are usually permanent), and the same call executed twice needs two (§14, D-1).
 - One run per transaction: one co-signature covers the whole batch (fixes V1's per-sub-call spend).
 
 ### 8.7 SafenetPolicyV2 (port of V1, both paths)
 
 Owner path: `policyData` = V1's 256-byte attestation over the Safe transaction hash (`ctx.txHash`), epoch forest as V1.
 Module path: `submitAttestation(engine, safe, callHash, attestation)` over `moduleTxDigest(engine, safe, callHash)` in
-place of the safeTxHash; consumed by the check. One attestation per transaction (batches no longer fail closed).
+place of the safeTxHash; consumed by the check. One attestation per transaction (batches no longer fail closed). Each
+FROST signature can be submitted once (`AttestationAlreadySpent`, keyed by the signature hash) and credits one
+execution of `callHash`: the same call twice needs two signatures (§14, D-2).
 Constructor and `updateEpoch` as V1; WP5 vendors the FROST libraries from 8ee68a8 under `contracts/v2/` (not under
 `vendor/policy-engine`).
 
@@ -528,15 +565,19 @@ threshold from the front.
 | Revert reason kept           | 512 B | (truncated)                      |
 | Policy settings              | §8    | `InvalidSettings`                |
 
-Worst case: 16 calls × 64 matched attachments. Storage reads on the hot path: one slot (the packed level counters), one
-array length per populated level, one slot per attachment. Policies are called with all remaining gas (out of gas =
-deny); no per-policy gas stipend. Measured gas is WP7's table (F12 expects ~30–40 k end to end for an ops payment).
+Worst case: 16 calls × 64 matched attachments (≈ 11.5 M gas measured by WP2). Storage reads on the hot path: one slot
+(the packed level counters), one array length per populated level, one slot per attachment. Policies are called with
+all remaining gas (out of gas = deny); no per-policy gas stipend (`preview` keeps a 300 k reserve, §6.7). Measured
+gas: [`GAS.md`](GAS.md) (F12 expects ~30–40 k end to end for an ops payment).
 
 ## 10. ERC-1271 (§3a)
 
 - `PolicyFallbackHandler.isValidSignature(hash, sig)` returns the magic value iff `sig` is empty and
   `signedMessages[getMessageHashForSafe(safe, abi.encode(hash))] != 0`; never checks owner signatures (no off-chain
-  1271). Legacy `isValidSignature(bytes, bytes)` same over `keccak256(data)`.
+  1271). Legacy `isValidSignature(bytes, bytes)`: the same check with `hash = keccak256(data)`, i.e. the message
+  `abi.encode(keccak256(data))`. Safe's `CompatibilityFallbackHandler` hashes `getMessageHashForSafe(safe, data)`
+  instead, so a message approved with `SignMessageLib.signMessage(bytes)` does not
+  validate through the legacy overload here (§14, D-9). Approvals are permanent (no revoke).
 - `PolicySignLib` (DELEGATECALL, `SIGN_LIB`): writes `signedMessages[msgHash] = 1` in the Safe's storage (slot 7 in
   Safe 1.5.0 `SafeStorage`, as `SignMessageLib`) and emits `SignMsg(msgHash)`, `msgHash = getMessageHashForSafe(safe,
 abi.encode(digest))`:
@@ -565,7 +606,7 @@ deadline)` digest under `token.DOMAIN_SEPARATOR()`.
 | `GuardTargetDenied()`                                                           | Engine target outside §6.4, or a config call that is not a top-level zero-value CALL |
 | `ModuleConfigurationDenied()`                                                   | Config selector on the module path                                                   |
 | `NonZeroGasPrice()` / `NonZeroSafeTxGas()`                                      | Owner path refunds / `safeTxGas`                                                     |
-| `ExecutionFailed()` / `ModuleExecutionFailed()`                                 | Post-hooks with `success == false`                                                   |
+| `ExecutionFailed()` / `ModuleExecutionFailed()`                                 | Post-hooks with `success == false` (owner path: unreachable on 1.5.0, §6.1)          |
 | `Reentrancy()`                                                                  | Hook, preview or state-changing engine call during a check                           |
 | `Preview(gates)`                                                                | Always, from `preview`                                                               |
 | `GuardAlreadyEnabled()`                                                         | `configureImmediately` once installed                                                |
@@ -581,7 +622,7 @@ deadline)` digest under `token.DOMAIN_SEPARATOR()`.
 | `InvalidTiming()` / `InvalidDeployment()`                                       | Constructor                                                                          |
 | `NotGuardian(safe)` / `NotGuardianOrLifter(safe)`                               | Freeze / lift authorization                                                          |
 | `AlreadyFrozen` / `FreezeCooldown` / `NotFrozen`                                | `freezeActor` / `lift` state                                                         |
-| `InvalidActor(actor)`                                                           | `freezeActor` with ANY/OWNERS; `preview` with ANY                                    |
+| `InvalidActor(actor)`                                                           | `freezeActor` with ANY/OWNERS; `preview` with ANY; a `RoleChange` with account 0     |
 
 Policy errors are declared in their interfaces (§8) and surface as `PolicyDenied.reason`; `policyV2ErrorsAbi` in
 `abi.ts` decodes all of them.
@@ -635,3 +676,22 @@ to.selector)`; level 3 `(ANY, to.selector)` does not count (it would grant every
 14. **EXPIRY ≥ F + C + DELAY** kept from the plan, although `F + C − DELAY` is the tight bound.
 15. Plan F8 says ERC-1271 is out of scope; §3a puts it in scope. Followed §3a (§10 here).
 16. `afterExecution` dropped (F9); a future hook would be a new `PolicyLevel` value (append-only enum), the "reserved bit".
+
+## 14. Deviations after implementation
+
+Accepted when the work packages were merged. Each is already applied in the sections above; this table is the index.
+
+| #    | What                                                                                                                                                                                                      | Why                                                                                                                                                                          | Who |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
+| D-1  | CoSigner module digest is 4-field `ModuleTransaction(engine, safe, callHash, nonce)` with a per-`callHash` use counter (`moduleTxNonce`) (§7, §8.6)                                                       | `callHash` has no nonce: a consumed co-signature (deterministic ECDSA, permanent ERC-1271 approval) could be pushed again for the next identical call                        | WP5 |
+| D-2  | Safenet module path: one submission per FROST signature (`AttestationAlreadySpent`), one credit each (§8.7)                                                                                               | Same replay problem as D-1: without a spent set one attestation would credit any number of executions                                                                        | WP5 |
+| D-3  | Timelock `AlreadyScheduled` relaxed: a schedule voided by a freeze (`clearOnFreeze`, would fail `ClearedByFreeze`) can be replaced (§8.2)                                                                 | Otherwise a voided module-path schedule blocks the same call forever                                                                                                         | WP3 |
+| D-4  | Limit: give-back capped at `min(sub, allowance, reserved, spent)`; `signPermit` reserves but never gives back; `signPermit2` is a plain spend; batch-aware expected allowance in transient storage (§8.4) | A permit or Permit2 signature may never be used, so giving back on it would refill the budget for free; without the transient allowance a batch could give back and re-spend | WP4 |
+| D-5  | Recipients: `approve(x, 0)` passes for any spender (§8.3)                                                                                                                                                 | Revoking an approval must never be blocked by a recipients list                                                                                                              | WP4 |
+| D-6  | Engine code split: `SafePolicyGuardV2` (hooks, preview, views) + `PolicyEngineV2` (configuration, freeze) reached by DELEGATECALL, one address and one storage (header)                                   | One contract does not fit 24 KiB (guard alone is ≈ 22.9 KiB)                                                                                                                 | WP2 |
+| D-7  | `RoleChange` with `account == 0` reverts `InvalidActor(address(0))` (§5.2)                                                                                                                                | The frozen interface has no dedicated error                                                                                                                                  | WP2 |
+| D-8  | `preview` keeps a 300 000 gas reserve per policy call (§6.7)                                                                                                                                              | An out-of-gas policy is reported as a gate instead of aborting the whole preview                                                                                             | WP2 |
+| D-9  | Legacy `isValidSignature(bytes, bytes)` hashes `abi.encode(keccak256(data))`, unlike Safe's `CompatibilityFallbackHandler` (§10)                                                                          | Follows this spec; one approval format for both overloads. Incompatible with `SignMessageLib.signMessage(bytes)`: open for review                                            | WP6 |
+| D-10 | Post-hooks: owner-path `ExecutionFailed` unreachable on 1.5.0; module-path failure reverts `ModuleExecutionFailed` instead of returning `false` (§6.1)                                                    | A post-hook can only revert; failing closed means a failed module call consumes no proof and no budget                                                                       | WP1 |
+| D-11 | Deploy: `EXPIRY` 9 d; trusted batches = MultiSendCallOnly 1.4.1 and 1.5.0 only, no full `MultiSend` (§5.4)                                                                                                | F3 needs ≥ 8.5 d; the app batches with MultiSendCallOnly, which refuses DELEGATECALL sub-calls itself                                                                        | WP7 |
+| D-12 | `MalformedCall(bytes4)` in RecipientsPolicy and LimitPolicy, outside the frozen interfaces (§8.3)                                                                                                         | Malformed calldata for a known selector needs a named deny reason                                                                                                            | WP4 |

@@ -20,7 +20,7 @@ import type {
   TimelockMockSafe,
   TimelockPolicy,
 } from '../../../typechain-types'
-import { eventsOf, expectEvent, expectRevert } from '../helpers'
+import { eventsOf, expectEvent, expectRevert, revertData } from '../helpers'
 
 /**
  * TimelockPolicy (SPEC.md §7, §8.2) against TimelockEngineStub, which calls the policy as the V2
@@ -79,15 +79,6 @@ async function sign(hash: string, signers: HardhatEthersSigner[]): Promise<strin
     }),
   )
   return hexlify(concat(sigs))
-}
-
-function revertData(e: unknown): string | undefined {
-  const err = e as { data?: unknown; info?: { error?: { data?: unknown } }; error?: { data?: unknown } }
-  for (const d of [err?.data, err?.info?.error?.data, err?.error?.data]) {
-    if (typeof d === 'string' && d.startsWith('0x')) return d
-    if (d && typeof (d as { data?: unknown }).data === 'string') return (d as { data: string }).data
-  }
-  return undefined
 }
 
 /**
