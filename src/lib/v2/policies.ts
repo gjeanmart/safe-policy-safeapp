@@ -1,4 +1,12 @@
-import { type Address, type Hex, getAddress, isAddressEqual, toFunctionSelector } from 'viem'
+import {
+  type Address,
+  type Hex,
+  getAddress,
+  isAddress,
+  isAddressEqual,
+  toFunctionSelector,
+  zeroAddress,
+} from 'viem'
 import {
   argsPolicyAbi,
   coSignerPolicyV2Abi,
@@ -77,9 +85,51 @@ export const POLICY_INFO = {
   },
 } as const satisfies Record<PolicyName, { label: string; contract: string; level: PolicyLevel; abi: unknown }>
 
-/** Which known policy `address` is, if any. */
+const isZeroAddress = (address: Address): boolean => isAddressEqual(address, zeroAddress)
+
+/**
+ * Which known policy `address` is, if any. A policy left at `0x0` in the deployment (Safenet on
+ * Sepolia without a Consensus deployment) is not deployed: the zero address never names it.
+ */
 export const policyNameOf = (deployment: V2Deployment, address: Address): PolicyName | undefined =>
-  POLICY_NAMES.find((name) => isAddressEqual(deployment.policies[name], address))
+  isZeroAddress(address)
+    ? undefined
+    : POLICY_NAMES.find((name) => isAddressEqual(deployment.policies[name], address))
+
+/** Whether the engine of this deployment exists (placeholders are all zero until WP7 deploys). */
+export const isDeployed = (deployment: V2Deployment): boolean => !isZeroAddress(deployment.engine)
+
+/** Policies with a non-zero address, in registry order. */
+export const deployedPolicies = (deployment: V2Deployment): PolicyName[] =>
+  POLICY_NAMES.filter((name) => !isZeroAddress(deployment.policies[name]))
+
+/**
+ * Validates the JSON block `contracts/scripts/deploy-v2.ts` prints (one per engine) and returns it
+ * checksummed. Throws with the offending field on anything else, so a bad paste fails loudly.
+ *
+ * @example
+ * parseV2Deployment({ engine: '0x…', signLib: '0x…', fallbackHandler: '0x…', trustedBatches: ['0x…'],
+ *   policies: { freeze: '0x…', …, safenet: '0x0000000000000000000000000000000000000000', … } })
+ */
+export function parseV2Deployment(json: unknown): V2Deployment {
+  const fail = (field: string): never => {
+    throw new Error(`V2 deployment: ${field} is not an address`)
+  }
+  const address = (value: unknown, field: string): Address =>
+    typeof value === 'string' && isAddress(value, { strict: false }) ? getAddress(value) : fail(field)
+  const o = (json ?? {}) as Record<string, unknown>
+  const batches = Array.isArray(o.trustedBatches) ? o.trustedBatches : fail('trustedBatches')
+  const policies = (o.policies ?? {}) as Record<string, unknown>
+  return {
+    engine: address(o.engine, 'engine'),
+    signLib: address(o.signLib, 'signLib'),
+    fallbackHandler: address(o.fallbackHandler, 'fallbackHandler'),
+    trustedBatches: batches.map((b, i) => address(b, `trustedBatches[${i}]`)),
+    policies: Object.fromEntries(
+      POLICY_NAMES.map((name) => [name, address(policies[name], `policies.${name}`)]),
+    ) as Record<PolicyName, Address>,
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Selectors the policies and lint rules care about
@@ -156,10 +206,11 @@ export const deploymentNames = (deployment: V2Deployment): ((address: Address) =
       getAddress(batch),
       `MultiSend #${i + 1}`,
     ]),
-    ...POLICY_NAMES.map((name): [string, string] => [
+    ...deployedPolicies(deployment).map((name): [string, string] => [
       getAddress(deployment.policies[name]),
       POLICY_INFO[name].contract,
     ]),
   ])
+  names.delete(zeroAddress)
   return (address) => names.get(getAddress(address))
 }

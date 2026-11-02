@@ -234,7 +234,7 @@ export function describeReason(
     case 'MalformedBatch':
       return text('The batch does not decode, is empty, or sends value')
     case 'BatchTooLarge':
-      return text('More than 16 calls in the batch')
+      return text('More than 8 calls in the batch')
     case 'NestedBatch':
       return text('A batch inside a batch')
     case 'GuardTargetDenied':

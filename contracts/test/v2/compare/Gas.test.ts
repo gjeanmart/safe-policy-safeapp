@@ -2,7 +2,6 @@ import { time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import type { ContractTransactionResponse, Interface } from 'ethers'
 import { ethers } from 'hardhat'
-import type { E2ePassPolicy } from '../../../typechain-types'
 import {
   type MetaTx,
   completeTx,
@@ -42,6 +41,7 @@ import {
   scheduleModule,
   scheduleOwners,
   scope,
+  type ScopeData,
   signCowOrderCall,
   swapOwnerCall,
   timelockSettings,
@@ -269,28 +269,46 @@ describe('Gas on a real Safe 1.5.0: plain, V1, V2', function () {
   })
 
   /**
-   * Worst case at the caps: a batch of `calls` transfers by a module, each matching `perScope`
-   * attachments at each of the 8 levels (1 ALLOW + `perScope − 1` distinct pass-only policies per
-   * scope, all distinct across scopes). Pass-only policies: this is the engine's cost.
+   * Worst case: a module batch of `calls` calls, each matching `perScope` attachments at each of
+   * the 8 levels (1 ALLOW + `perScope − 1` pass-only policies per scope, all distinct). Pass-only
+   * policies keep no state, so this is the engine's own cost; real policies add theirs.
+   * - identical calls (`USDC.transfer`): every call matches the same 8 scopes, so a
+   *   transaction-level policy runs once for the whole batch.
+   * - distinct calls (`distinct`): call j goes to its own target with its own selector, so only
+   *   the `(ANY, *)` and `(Ops, *)` scopes are shared and every call brings 6 scopes of its own:
+   *   the most policy runs (and the least transaction-level deduplication) the caps allow.
    */
-  async function worst(calls: number, perScope: number, level: 0 | 1, gasLimit = 16_000_000) {
+  async function worst(calls: number, perScope: number, level: 0 | 1, distinct = false) {
     const w = await deployWorld()
-    const policies: E2ePassPolicy[] = []
-    for (let i = 0; i < 8 * (perScope - 1); i++) {
-      policies.push((await ethers.deployContract('E2ePassPolicy', [level])) as unknown as E2ePassPolicy)
+    const targets = Array.from({ length: calls }, (_, j) =>
+      distinct
+        ? { to: ethers.Wallet.createRandom().address, selector: `0x${(0x10000000 + j).toString(16)}` }
+        : { to: w.tokenAddress, selector: SEL.transfer },
+    )
+    const scopes: ScopeData[] = []
+    const seen = new Set<string>()
+    for (const t of targets) {
+      for (let l = 0; l < 8; l++) {
+        const cm = l % 4
+        const s = scope(
+          l < 4 ? ANY : w.ops.address,
+          cm === CallMatch.TO || cm === CallMatch.TO_SELECTOR ? t.to : undefined,
+          cm === CallMatch.SELECTOR || cm === CallMatch.TO_SELECTOR ? t.selector : undefined,
+        )
+        const key = JSON.stringify(s)
+        if (!seen.has(key)) {
+          seen.add(key)
+          scopes.push(s)
+        }
+      }
     }
     const changes: Change[] = []
-    for (let l = 0; l < 8; l++) {
-      const actor = l < 4 ? ANY : w.ops.address
-      const cm = l % 4
-      const s = scope(
-        actor,
-        cm === CallMatch.TO || cm === CallMatch.TO_SELECTOR ? w.tokenAddress : undefined,
-        cm === CallMatch.SELECTOR || cm === CallMatch.TO_SELECTOR ? SEL.transfer : undefined,
-      )
+    for (const s of scopes) {
       changes.push(allow(s))
-      for (let k = 0; k < perScope - 1; k++)
-        changes.push(attach(s, addr(policies[l * (perScope - 1) + k]), '0x'))
+      for (let k = 0; k < perScope - 1; k++) {
+        const policy = await ethers.deployContract('E2ePassPolicy', [level])
+        changes.push(attach(s, addr(policy), '0x'))
+      }
     }
     const configure = (chunk: Change[]) =>
       execAsOwners(
@@ -299,56 +317,48 @@ describe('Gas on a real Safe 1.5.0: plain, V1, V2', function () {
         w.quorum2,
       )
     for (let i = 0; i < changes.length; i += 16) await configure(changes.slice(i, i + 16))
-    await execAsOwners(
-      w.safe,
-      call(
-        w.safeAddress,
-        (w.safe.interface as Interface).encodeFunctionData('enableModule', [w.ops.address]),
-      ),
-      w.quorum2,
-    )
-    await execAsOwners(
-      w.safe,
-      call(
-        w.safeAddress,
-        (w.safe.interface as Interface).encodeFunctionData('setModuleGuard', [w.engineAddress]),
-      ),
-      w.quorum2,
-    )
+    for (const [fn, arg] of [
+      ['enableModule', w.ops.address],
+      ['setModuleGuard', w.engineAddress],
+    ])
+      await execAsOwners(
+        w.safe,
+        call(w.safeAddress, (w.safe.interface as Interface).encodeFunctionData(fn, [arg])),
+        w.quorum2,
+      )
     const batch = multiSendTx(
       await w.infra.multiSendCallOnly.getAddress(),
-      Array.from({ length: calls }, () => tokenTransfer(w, w.vendorA.address, 1n)),
+      targets.map((t) =>
+        distinct ? call(t.to, t.selector + '00'.repeat(64)) : tokenTransfer(w, w.vendorA.address, 1n),
+      ),
     )
-    const label = `${calls} calls × ${8 * perScope} matches (${level === 0 ? 'call' : 'transaction'}-level policies)`
-    try {
-      await record('worst', label, () =>
-        w.safe.connect(w.ops).execTransactionFromModule(batch.to, 0, batch.data!, 1, { gasLimit }),
-      )
-    } catch (e) {
-      // EIP-7825 caps a transaction at 2^24 gas (hardhat enforces it): such a batch cannot execute.
-      rows.push({
-        group: 'worst',
-        label,
-        gas: 0n,
-        note: `out of gas at ${gasLimit} (${(e as Error).message.slice(0, 40)})`,
-      })
-    }
+    const label =
+      `${calls} ${distinct ? 'distinct' : 'identical'} call${calls > 1 ? 's' : ''} × ${8 * perScope} matches, ` +
+      `${level === 0 ? 'call' : 'transaction'}-level`
+    return record('worst', label, () =>
+      w.safe.connect(w.ops).execTransactionFromModule(batch.to, 0, batch.data!, 1, { gasLimit: 16_000_000 }),
+    )
   }
 
-  it('worst case: one call at 16 / 32 / 64 matches (the per-call cost is superlinear)', async () => {
-    for (const per of [2, 4, 8]) await worst(1, per, 0)
-    for (const per of [2, 4, 8]) await worst(1, per, 1)
+  it('worst case: one call at 8 / 16 / 32 matches (linear in the policy runs)', async () => {
+    for (const level of [0, 1] as const) {
+      const [g8, g16, g32] = [await worst(1, 1, level), await worst(1, 2, level), await worst(1, 4, level)]
+      // 8 → 16 matches adds 8 policy runs, 16 → 32 adds 16: the cost per run must not grow.
+      const perRun16 = Number(g16 - g8) / 8
+      const perRun32 = Number(g32 - g16) / 16
+      expect(perRun32).to.be.lessThan(perRun16 * 1.15)
+    }
   })
 
-  it('worst case at the current caps (16 calls × 64 matches) and at tighter caps', async () => {
-    await worst(16, 8, 0)
-    await worst(16, 8, 1)
-    await worst(4, 8, 0)
-    await worst(8, 8, 0)
-    await worst(16, 4, 0)
-    await worst(8, 4, 0)
-    await worst(16, 2, 0)
-    await worst(8, 2, 0)
-    expect(rows.filter((r) => r.group === 'worst').length).to.be.greaterThanOrEqual(8)
+  it('worst case at the caps (8 calls × 32 matches) stays well below the 2^24 gas cap', async () => {
+    const atCaps = [
+      await worst(8, 4, 0),
+      await worst(8, 4, 1),
+      await worst(8, 4, 0, true),
+      await worst(8, 4, 1, true),
+    ]
+    // EIP-7825: 2^24 = 16,777,216 per transaction. The engine's worst case must leave room for the
+    // policies' own work (each run here is a pass-only policy).
+    for (const gas of atCaps) expect(Number(gas)).to.be.lessThan(4_000_000)
   })
 })

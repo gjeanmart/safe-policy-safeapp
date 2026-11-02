@@ -2,6 +2,8 @@ import type { Address, Hash, Hex } from 'viem'
 import { DEFAULT_GUARD } from '../config/contracts'
 import type { Configuration } from '../lib/configurations'
 import type { ConfirmedPolicy } from '../lib/policyEvents'
+import type { ChangeSet } from '../lib/v2/changes'
+import type { SafeTransaction } from '../lib/v2/identity'
 import { persisted } from './persisted'
 
 /** AES-GCM ciphertext and its IV, base64-encoded (see lib/vault). */
@@ -43,6 +45,10 @@ export type Settings = {
   guardModulePath?: boolean
   /** Install the guard as transaction guard (`setGuard`): policies apply to the multisig too. */
   guardOwnerPath: boolean
+  /** Engine to set up when no guard is installed yet (an installed guard always decides). */
+  engineVersion?: 'v1' | 'v2'
+  /** V2 engine to install, by its `V2_ENGINES` label. */
+  v2Engine?: string
 }
 
 export const settingsStore = persisted<Settings>('settings', { guard: DEFAULT_GUARD, guardOwnerPath: false })
@@ -104,3 +110,33 @@ export type PolicyHistory = { events: ConfirmedPolicy[]; scannedTo: string }
 export const policyHistoryStore = persisted<Record<string, PolicyHistory>>('policy-history', {})
 
 export const historyKey = (guard: Address, safe: Address) => `${guard.toLowerCase()}:${safe.toLowerCase()}`
+
+/** V2 draft: attachment and role changes being assembled in the scope builder (one per engine and Safe). */
+export const v2DraftStore = persisted<Record<string, ChangeSet>>('v2-draft', {})
+
+/**
+ * A V2 configuration request made from this browser: the engine only stores the root, so the
+ * change set is kept to apply it once DELAY has passed.
+ */
+export type V2PendingConfiguration = {
+  root: Hex
+  safe: Address
+  engine: Address
+  set: ChangeSet
+  createdAt: number
+}
+
+export const v2PendingStore = persisted<V2PendingConfiguration[]>('v2-pending', [])
+
+/**
+ * Owner transactions scheduled from this browser with locally collected signatures, by Safe
+ * transaction hash, so they can be executed (relayed) once the Timelock has passed.
+ */
+export type V2OwnerTx = {
+  safe: Address
+  engine: Address
+  tx: SafeTransaction
+  signatures: Hex
+}
+
+export const v2OwnerTxStore = persisted<Record<string, V2OwnerTx>>('v2-owner-txs', {})

@@ -18,9 +18,20 @@ import {
 import { describeError } from '../../src/lib/errors'
 import { type ModuleTx, resolvePolicy, simulateModuleTx } from '../../src/lib/moduleTx'
 import { activePolicies, scanPolicyEvents } from '../../src/lib/policyEvents'
-import { activeGuard, fetchSafeState, isModuleEnabled } from '../../src/lib/safe'
+import { type SafeState, activeGuard, fetchSafeState, isModuleEnabled } from '../../src/lib/safe'
 import { type Config, label, nameAddress } from './config'
 import { CliError } from './output'
+import { planHash } from './plans'
+import {
+  type V2Simulation,
+  detectV2,
+  deploymentFor,
+  labelContext,
+  v2Policies,
+  v2Simulate,
+  v2Status,
+} from './v2'
+import { renderPolicies } from './v2render'
 
 /** Points the app's shared client at the configured RPC and checks it serves the right chain. */
 export async function connect(config: Config): Promise<void> {
@@ -47,6 +58,8 @@ const policyName = (address: Address): string => {
 
 export async function status(config: Config) {
   const state = await fetchSafeState(config.safe)
+  const v2 = await detectV2(state)
+  if (v2) return statusV2(config, state, v2)
   const guard = activeGuard(state)
   const [roleGas, delay, roleAllowed] = await Promise.all([
     publicClient.getBalance({ address: config.role }),
@@ -98,6 +111,8 @@ export async function status(config: Config) {
 /** The active policies, decoded, with live allowlist permissions and what they mean for the role. */
 export async function policies(config: Config, fromBlock?: bigint) {
   const state = await fetchSafeState(config.safe)
+  const v2 = await detectV2(state)
+  if (v2) return policiesV2(config, v2.engine)
   const guard = activeGuard(state)
   if (!guard) return { summary: 'No SafePolicyGuard installed: there are no policies.', policies: [] }
   const head = await publicClient.getBlockNumber()
@@ -202,12 +217,25 @@ export async function balances(config: Config) {
   }
 }
 
+export type Simulation = {
+  ok: boolean
+  reason?: string
+  block: bigint
+  /** V1: the policy the guard consults. V2: the deciding gate. */
+  policy: string | null
+  guard: Address | null
+  /** Set on a Policy Engine V2 Safe: every gate, the deciding one, and what to do next. */
+  v2?: V2Simulation
+}
+
 /** Simulates as the role and names the policy the guard consults (exact match or fallback). */
-export async function simulate(config: Config, tx: ModuleTx) {
-  const [result, block, state] = await Promise.all([
+export async function simulate(config: Config, tx: ModuleTx): Promise<Simulation> {
+  const state = await fetchSafeState(config.safe)
+  const v2 = await detectV2(state)
+  if (v2) return simulateV2(config, v2.engine, tx)
+  const [result, block] = await Promise.all([
     simulateModuleTx(config.safe, config.role, tx),
     publicClient.getBlockNumber(),
-    fetchSafeState(config.safe),
   ])
   const guard = activeGuard(state)
   let policy: string | null = null
@@ -226,3 +254,92 @@ export async function simulate(config: Config, tx: ModuleTx) {
 }
 
 export const txLink = (hash: string) => `${EXPLORER}/tx/${hash}`
+
+// ---------------------------------------------------------------------------------------------
+// Policy Engine V2 (v2.ts holds the reads; V1 above is unchanged)
+// ---------------------------------------------------------------------------------------------
+
+const v2Ctx = (config: Config, engine: Address, modulePath = true, ownerPath = true) => {
+  const deployment = deploymentFor(engine)
+  return { engine, deployment, modulePath, ownerPath, labels: labelContext(config, deployment) }
+}
+
+async function statusV2(
+  config: Config,
+  state: SafeState,
+  found: { engine: Address; modulePath: boolean; ownerPath: boolean },
+) {
+  let details: Awaited<ReturnType<typeof v2Status>> | undefined
+  let deploymentProblem: string | undefined
+  const roleGas = await publicClient.getBalance({ address: config.role })
+  try {
+    details = await v2Status(config, v2Ctx(config, found.engine, found.modulePath, found.ownerPath))
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error
+    deploymentProblem = `${error.message} ${error.hint ?? ''}`.trim()
+  }
+  const enabled = isModuleEnabled(state, config.role)
+  const freeze = details?.freeze
+  const problems = [
+    !enabled && 'The role is NOT an enabled module: every action will fail with GS104.',
+    !found.modulePath &&
+      'Policy Engine V2 is not the module guard: module calls are NOT scoped by policies (setModuleGuard).',
+    freeze?.safe.state === 'frozen' &&
+      `The Safe is ${freeze.safe.text}: calls under a Freeze policy are denied.`,
+    freeze?.role.state === 'frozen' &&
+      `This role is ${freeze.role.text} (kill switch): its calls under a Freeze policy are denied.`,
+    roleGas === 0n && 'The role has no Sepolia ETH for gas.',
+    deploymentProblem,
+  ].filter((p): p is string => typeof p === 'string')
+  return {
+    summary: problems.length
+      ? `Attention: ${problems.join(' ')}`
+      : `Role is an enabled module of Safe ${state.version}, scoped by Policy Engine V2. Safe: ${freeze?.safe.text}; role: ${freeze?.role.text}.`,
+    chainId: config.chainId,
+    safe: {
+      address: state.address,
+      version: state.version,
+      owners: state.owners,
+      threshold: state.threshold,
+      modules: state.modules.map((m) => label(nameAddress(config, m))),
+    },
+    guards: {
+      modulePath: state.moduleGuard === zeroAddress ? null : state.moduleGuard,
+      multisigPath: state.guard === zeroAddress ? null : state.guard,
+      policyGuard: found.engine,
+    },
+    engine: details?.engine ?? { version: 'v2', address: found.engine },
+    freeze: freeze ?? null,
+    role: { address: config.role, enabledModule: enabled, gasEth: formatEther(roleGas) },
+    problems,
+  }
+}
+
+async function policiesV2(config: Config, engine: Address) {
+  const view = await v2Policies(config, v2Ctx(config, engine))
+  const budgets = view.budgets.map((b) => `${b.available} of ${b.amount} left at ${b.scope}`)
+  return {
+    summary:
+      `Policy Engine V2: ${view.grants.length} grant(s) for this role, ${view.protectionsOnMe.length} protection(s) on it, ` +
+      `${view.protectionsOnEveryone.length} on everyone${budgets.length ? `; budgets: ${budgets.join(', ')}` : ''}. Anything not granted is denied.`,
+    guard: engine,
+    engine: 'v2',
+    ...view,
+    text: renderPolicies(engine, view),
+  }
+}
+
+async function simulateV2(config: Config, engine: Address, tx: ModuleTx): Promise<Simulation> {
+  const planId = planHash(config.chainId, config.safe, config.role, tx).slice(2, 12)
+  const [sim, block] = await Promise.all([
+    v2Simulate(config, v2Ctx(config, engine), tx, planId),
+    publicClient.getBlockNumber(),
+  ])
+  const gate = sim.deciding && `${sim.deciding.gate} at ${sim.deciding.scope}`
+  const reason = sim.allowed
+    ? undefined
+    : !sim.execution.ok && (!sim.deciding || sim.deciding.verdict !== 'deny')
+      ? sim.execution.reason
+      : `${gate ?? 'denied'}${sim.deciding?.reason ? ` → ${sim.deciding.reason}` : ''}`
+  return { ok: sim.allowed, reason, block, policy: gate ?? null, guard: engine, v2: sim }
+}

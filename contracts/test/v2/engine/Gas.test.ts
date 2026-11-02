@@ -78,7 +78,7 @@ describe('V2 engine: gas', () => {
 
   it('1 ALLOW', async () => {
     const g = await measure('1 ALLOW (actor, *)', (m) => [allow(scope(OWNERS)), allow(scope(m))])
-    expect(Number(g.module - baseline.module)).to.be.lessThan(25_000)
+    expect(Number(g.module - baseline.module)).to.be.lessThan(20_000)
   })
 
   it('ALLOW + 2 policies (one call-level, one transaction-level)', async () => {
@@ -90,25 +90,19 @@ describe('V2 engine: gas', () => {
       policy(scope(ANY), cp),
       policy(scope(ANY), tp),
     ])
-    expect(Number(g.module - baseline.module)).to.be.lessThan(80_000)
+    expect(Number(g.module - baseline.module)).to.be.lessThan(65_000)
   })
 
-  it('worst case at caps: 16-call batch, 8 levels × 8 attachments (1 ALLOW + 7 policies) per call', async () => {
+  it('worst case at caps: 8-call batch, 8 levels × 4 attachments (1 ALLOW + 3 policies) per call', async () => {
     const policies = [
       ...(await Promise.all(
-        [0, 1, 2, 3].map(async () =>
-          (await ethers.deployContract('MockPolicyV2', [Level.CALL])).getAddress(),
-        ),
+        [0, 1].map(async () => (await ethers.deployContract('MockPolicyV2', [Level.CALL])).getAddress()),
       )),
-      ...(await Promise.all(
-        [0, 1, 2].map(async () =>
-          (await ethers.deployContract('MockPolicyV2', [Level.TRANSACTION])).getAddress(),
-        ),
-      )),
+      await (await ethers.deployContract('MockPolicyV2', [Level.TRANSACTION])).getAddress(),
     ]
-    // Every call of the batch hits all 8 levels; every scope is full (1 ALLOW + 4 call-level + 3
-    // transaction-level policies). Per call: 64 matches, 4 call-level runs of 8 ids each; then 3
-    // transaction-level runs of 8 deduplicated ids each.
+    // Every call of the batch hits all 8 levels; every scope is full (1 ALLOW + 2 call-level + 1
+    // transaction-level policy). Per call: 32 matches, 2 call-level runs of 8 ids each; then 1
+    // transaction-level run of 8 deduplicated ids.
     const scopesFor = (actor: string, t: string): ScopeData[] => [
       scope(actor, CallMatch.ANY),
       scope(actor, CallMatch.TO, t),
@@ -117,12 +111,12 @@ describe('V2 engine: gas', () => {
     ]
     const fill = (s: ScopeData): Change[] => [allow(s), ...policies.map((p) => policy(s, p))]
     const g = await measure(
-      'worst case at caps: 16 calls × 64 matches',
+      'worst case at caps: 8 calls × 32 matches',
       () => [],
-      16,
+      8,
       ({ targetAddr, module }) =>
         [ANY, OWNERS, module].flatMap((actor) => scopesFor(actor, targetAddr)).flatMap(fill),
     )
-    expect(Number(g.module - baseline.module)).to.be.lessThan(15_000_000)
+    expect(Number(g.module - baseline.module)).to.be.lessThan(1_500_000)
   })
 })

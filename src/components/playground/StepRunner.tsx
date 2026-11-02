@@ -9,6 +9,7 @@ import { type Executor, nestedModuleCall, resolveExecutor } from '../../lib/role
 import { type RunMode, type Step, runSteps } from '../../lib/runner'
 import { type Role, logActivity, roleKind } from '../../store'
 import { AddressView, AsyncButton, CopyButton, Notice } from '../ui'
+import { GatePreview } from '../v2/GatePreview'
 
 type Resolution = { label: string; policy: string; fallback: boolean }
 
@@ -92,7 +93,8 @@ export function StepRunner({
   beforeSend?: () => Promise<void>
   onDone?: (ok: boolean) => void
 }) {
-  const { safe, guard, guardInstalled, reloadState } = useSandbox()
+  const { safe, guard, guardInstalled, reloadState, engineVersion, v2, v2Installed } = useSandbox()
+  const v2Engine = engineVersion === 'v2' && v2Installed ? v2 : undefined
   const key = stepsKey(steps)
   const [resolutions, setResolutions] = useState<Keyed<Resolution[]>>()
   const [error, setError] = useState<Keyed<string>>()
@@ -144,13 +146,15 @@ export function StepRunner({
   return (
     <div className="stack">
       <div className="row wrap step-actions">
-        <AsyncButton
-          disabled={disabled || !guardInstalled}
-          onClick={check}
-          title="Which policy would the guard consult?"
-        >
-          Resolve policy
-        </AsyncButton>
+        {!v2Engine && (
+          <AsyncButton
+            disabled={disabled || !guardInstalled}
+            onClick={check}
+            title="Which policy would the guard consult?"
+          >
+            Resolve policy
+          </AsyncButton>
+        )}
         <AsyncButton
           disabled={disabled}
           onClick={() => run('simulate')}
@@ -188,6 +192,7 @@ export function StepRunner({
           </>
         )}
       </div>
+      {v2Engine && !disabled && <GatePreview key={key} role={role} steps={steps} engine={v2Engine} />}
       {manual && showCalls && <NestedCalls role={role} steps={steps} reason={manual.reason} />}
       {error?.key === key && <Notice tone="bad">{error.value}</Notice>}
       {resolutions?.key === key && (

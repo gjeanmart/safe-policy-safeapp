@@ -124,6 +124,34 @@ safe-role simulate <id>
 safe-role exec <id>                                            # y/N in the signer terminal
 ```
 
+## Policy Engine V2
+
+The CLI detects the engine from the Safe's guard (`supportsInterface` for ITransactionGuard,
+IModuleGuard and IPolicyEngineV2). V1 Safes behave as before. On a V2 Safe:
+
+| Command               | What changes                                                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `status`              | engine section, and the freeze state of the Safe and of this role: active, frozen until, cooling down until                                      |
+| `policies`            | the role's view: grants (Allow that applies to it), protections on it, protections on everyone, each budget with what is left and when it resets |
+| `simulate <id>`       | the engine's `preview`: every gate (Allow / pass / Deny), the deciding gate, `needs` and `next`, plus a dry run of the real call                 |
+| `schedule <id>` (new) | the role schedules a timelocked call with `TimelockPolicy.scheduleModuleTx` (signed by the signer, y/N in ask mode)                              |
+| `queue` (new)         | the role's schedules: waiting (countdown), ready, expired, cleared by a freeze, with the plan id to exec                                         |
+
+`simulate`, `policies` and `queue` print a text view on a V2 Safe; add `--json` for JSON. MCP
+tools always return JSON. A timelocked action: `plan` → `simulate` (needs: schedule) → `schedule`
+→ `queue` until ready → `simulate` → `exec`.
+
+V2 addresses come from `src/config/contracts.ts` (any exported value shaped like `V2Deployment`).
+Until they are there, pass the JSON block printed by `pnpm deploy:v2:sepolia`:
+
+```sh
+export SAFE_ROLE_V2_DEPLOYMENT=./v2-deployment.json    # or the JSON itself; or --v2-deployment <file>
+safe-role signer                                        # the signer needs it too (simulate, schedule)
+```
+
+Policies are shared by both engines, so the CLI also works on an engine that is not listed, as long
+as one deployment is known.
+
 ## Security notes
 
 - **The on-chain policies are the boundary.** Keep the role's policies narrow. To revoke the

@@ -11,6 +11,7 @@ import {
 } from 'viem'
 import { policyErrorsAbi } from '../abi'
 import { ADDRESS_BOOK } from '../config/contracts'
+import { describeReason } from './v2/preview'
 
 /** Safe `GSxxx` revert codes that are relevant for module execution. */
 const SAFE_ERROR_CODES: Record<string, string> = {
@@ -48,7 +49,8 @@ export function describeRevertData(data: Hex): string {
     }
     return args?.length ? `${errorName}(${args.map(String).join(', ')})` : errorName
   } catch {
-    return `unknown revert ${data.slice(0, 74)}`
+    // Not a V1 error: a Policy Engine V2 engine rule or policy deny (PolicyDenied unwrapped).
+    return describeReason(data, { nameOf: (address) => ADDRESS_BOOK[address.toLowerCase()] }).text
   }
 }
 

@@ -5,16 +5,7 @@ import {Operation} from "../../vendor/policy-engine/interfaces/Operation.sol";
 import {IPolicyEngineV2} from "../interfaces/IPolicyEngineV2.sol";
 import {IPolicySignLib} from "../interfaces/IPolicySignLib.sol";
 import {Scope} from "../libraries/Scope.sol";
-import {
-    Attachment,
-    AttachmentKind,
-    AttachmentView,
-    CallMatch,
-    FreezeRole,
-    FreezeState,
-    PolicyLevel,
-    ScopeData
-} from "../libraries/Types.sol";
+import {Attachment, AttachmentView, CallMatch, FreezeRole, FreezeState, ScopeData} from "../libraries/Types.sol";
 
 /**
  * @title Engine storage
@@ -184,60 +175,87 @@ abstract contract EngineStorage {
             });
     }
 
-    /// @dev One attachment a call matched (after the op-mask filter).
-    struct Match {
-        uint8 level;
-        AttachmentKind kind;
-        uint8 opMask;
-        PolicyLevel policyLevel;
-        address policy;
-        bytes32 scopeKey;
-    }
-
-    /// @dev The attachments of the 8 lookup scopes of `(actor, to, sel)` covering `effOp`, in
-    ///      level order then storage order. Levels with a zero per-Safe counter are skipped.
+    /**
+     * @dev The attachments of the 8 lookup scopes of `(actor, to, sel)` covering `effOp`, in level
+     *      order then storage order; levels with a zero per-Safe counter are skipped. Each match is
+     *      its attachment's storage word (`policy | kind << 160 | opMask << 168 | policyLevel << 176`)
+     *      with its level at bit `_MATCH_LEVEL_SHIFT`; `keys[level]` is the scope key of each
+     *      populated level (`Scope.keyAt`). Assembly: one pass over raw slots, no per-match structs.
+     */
     function _match(
         address safe,
         address actor,
         address to,
         bytes4 sel,
         Operation effOp
-    ) internal view returns (Match[] memory matches) {
+    ) internal view returns (uint256[] memory matches, bytes32[8] memory keys) {
         uint256 levelCounts = _levelCounts[safe];
         if (levelCounts == 0) {
-            return matches;
-        }
-        bytes32[8] memory keys;
-        uint256[8] memory lengths;
-        uint256 total;
-        for (uint8 lvl = 0; lvl < Scope.LEVEL_COUNT; lvl++) {
-            if (Scope.countAt(levelCounts, lvl) == 0) {
-                continue;
-            }
-            bytes32 key = Scope.keyAt(lvl, actor, to, sel);
-            uint256 length = _attachments[safe][key].length;
-            keys[lvl] = key;
-            lengths[lvl] = length;
-            total += length;
-        }
-        matches = new Match[](total);
-        uint8 bit = Scope.opBit(effOp);
-        uint256 n;
-        for (uint8 lvl = 0; lvl < Scope.LEVEL_COUNT; lvl++) {
-            uint256 length = lengths[lvl];
-            if (length == 0) {
-                continue;
-            }
-            Attachment[] storage list = _attachments[safe][keys[lvl]];
-            for (uint256 j = 0; j < length; j++) {
-                Attachment memory a = list[j];
-                if (a.opMask & bit != 0) {
-                    matches[n++] = Match(lvl, a.kind, a.opMask, a.policyLevel, a.policy, keys[lvl]);
-                }
-            }
+            return (matches, keys);
         }
         assembly ("memory-safe") {
+            let addressMask := 0xffffffffffffffffffffffffffffffffffffffff
+            actor := and(actor, addressMask)
+            to := and(to, addressMask)
+            sel := and(sel, shl(224, 0xffffffff))
+            mstore(0, and(safe, addressMask))
+            mstore(0x20, _attachments.slot)
+            let perSafe := keccak256(0, 0x40)
+            let bit := shl(add(168, effOp), 1)
+            matches := mload(0x40)
+            let n := 0
+            for {
+                let lvl := 0
+            } lt(lvl, 8) {
+                lvl := add(lvl, 1)
+            } {
+                if and(shr(shl(5, lvl), levelCounts), 0xffffffff) {
+                    // Scope.keyAt: keccak256(abi.encode(actor | ANY, to | 0, sel | 0, callMatch)),
+                    // hashed past the matches written so far.
+                    let callMatch := and(lvl, 3)
+                    let m := add(matches, shl(5, add(n, 1)))
+                    mstore(m, mul(actor, gt(lvl, 3)))
+                    mstore(add(m, 0x20), mul(to, and(callMatch, 1)))
+                    mstore(add(m, 0x40), mul(sel, shr(1, callMatch)))
+                    mstore(add(m, 0x60), callMatch)
+                    let key := keccak256(m, 0x80)
+                    mstore(add(keys, shl(5, lvl)), key)
+                    mstore(0, key)
+                    mstore(0x20, perSafe)
+                    let slot := keccak256(0, 0x40)
+                    let length := sload(slot)
+                    mstore(0, slot)
+                    let data := keccak256(0, 0x20)
+                    let tag := shl(_MATCH_LEVEL_SHIFT, lvl)
+                    for {
+                        let j := 0
+                    } lt(j, length) {
+                        j := add(j, 1)
+                    } {
+                        let word := sload(add(data, j))
+                        if and(word, bit) {
+                            n := add(n, 1)
+                            mstore(add(matches, shl(5, n)), or(word, tag))
+                        }
+                    }
+                }
+            }
             mstore(matches, n)
+            mstore(0x40, add(matches, shl(5, add(n, 1))))
+        }
+    }
+
+    /// @dev Bit position of the scope level in a match word of {_match}.
+    uint256 internal constant _MATCH_LEVEL_SHIFT = 184;
+
+    /// @dev `Scope.attachmentId` hashing in scratch memory (no `abi.encode` allocation).
+    function _attachmentId(bytes32 scopeKey, uint256 kind, address policy) internal pure returns (bytes32 id) {
+        assembly ("memory-safe") {
+            let m := mload(0x40)
+            mstore(m, scopeKey)
+            mstore(add(m, 0x20), kind)
+            mstore(add(m, 0x40), policy)
+            id := keccak256(m, 0x60)
         }
     }
 

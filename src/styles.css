@@ -918,3 +918,125 @@ select:focus-visible {
 .nested-call .calldata {
   max-width: 100%;
 }
+
+/* ---------- Policy Engine V2 ---------- */
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.chip-row {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chip-allow {
+  background: #e3f9ec;
+  color: var(--accent-ink);
+}
+
+.chip-limit {
+  background: var(--info-bg);
+  color: #2a4f9e;
+}
+
+.chip-protect {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.chip-deny {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.chip-neutral {
+  background: #eeeeee;
+  color: var(--muted);
+}
+
+.chip-added,
+.chip-changed,
+.chip-preview {
+  border: 1px dashed currentColor;
+}
+
+.chip-preview {
+  opacity: 0.7;
+}
+
+.chip-removed {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
+
+.chip-x {
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.everyone-band {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.actor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.actor-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+
+.actor-section {
+  margin-top: 6px;
+}
+
+.gate-deciding .chip {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+.queue-entry {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.draft-list {
+  padding-left: 20px;
+}
+
+.contents {
+  display: contents;
+}
+
+.why-table td {
+  vertical-align: top;
+}

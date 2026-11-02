@@ -10,7 +10,7 @@ import type { SignerBackend, SignerResponse } from './signer'
 
 /**
  * The signer's localhost endpoint: MCP over Streamable HTTP (plain JSON responses, no SSE), plus
- * two methods for the CLI, `signer/describe` and `signer/exec`. It listens on 127.0.0.1 only and
+ * three methods for the CLI, `signer/describe`, `signer/exec` and `signer/schedule`. It listens on 127.0.0.1 only and
  * every request needs the bearer token from `~/.safe-role/mcp-token`; Host and Origin are checked
  * so a web page cannot reach it through the browser (DNS rebinding, cross-origin POSTs).
  */
@@ -90,6 +90,9 @@ async function handleSignerRpc(message: JsonRpc, signer: SignerBackend): Promise
   if (message.method === 'signer/describe') return { jsonrpc: '2.0', id, result: await signer.describe() }
   if (message.method === 'signer/exec') {
     return { jsonrpc: '2.0', id, result: await signer.exec(message.params?.plan as Plan) }
+  }
+  if (message.method === 'signer/schedule') {
+    return { jsonrpc: '2.0', id, result: await signer.schedule(message.params?.plan as Plan) }
   }
   return handleRpc(message, signer)
 }
@@ -176,6 +179,11 @@ export const httpSigner: SignerBackend = {
     ),
   exec: async (plan) => {
     const r = await postRpc({ jsonrpc: '2.0', id: 1, method: 'signer/exec', params: { plan } })
+    if (!r || !('result' in r)) throw new CliError('Unexpected answer from the signer.')
+    return r.result as SignerResponse
+  },
+  schedule: async (plan) => {
+    const r = await postRpc({ jsonrpc: '2.0', id: 1, method: 'signer/schedule', params: { plan } })
     if (!r || !('result' in r)) throw new CliError('Unexpected answer from the signer.')
     return r.result as SignerResponse
   },

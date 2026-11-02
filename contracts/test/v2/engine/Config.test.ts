@@ -250,18 +250,18 @@ describe('V2 engine: configuration', () => {
       await f.engine.connect(f.asSafe).configureImmediately([policy(scope(f.t), f.cpA, 0, 0, over * 10n)], [])
     })
 
-    it('TooManyAttachments: 8 per scope', async () => {
+    it('TooManyAttachments: 4 per scope', async () => {
       const f = await fresh()
       const s = scope(ANY)
       const policies = await Promise.all(
-        Array.from({ length: 8 }, async () =>
+        Array.from({ length: 3 }, async () =>
           (await ethers.deployContract('MockPolicyV2', [Level.CALL])).getAddress(),
         ),
       )
-      const changes = [allow(s), deny(s), ...policies.slice(0, 6).map((p) => policy(s, p))]
+      const changes = [allow(s), deny(s), ...policies.slice(0, 2).map((p) => policy(s, p))]
       await f.engine.connect(f.asSafe).configureImmediately(changes, [])
       await expectRevert(
-        f.engine.connect(f.asSafe).configureImmediately([policy(s, policies[6])], []),
+        f.engine.connect(f.asSafe).configureImmediately([policy(s, policies[2])], []),
         f.engine,
         'TooManyAttachments',
         [scopeKey(s)],
@@ -270,7 +270,7 @@ describe('V2 engine: configuration', () => {
       await f.engine.connect(f.asSafe).configureImmediately([policy(s, policies[0], Behaviour.REVERT, 3)], [])
       const [, view] = await f.engine.getAttachment(f.address, attachmentId(s, Kind.POLICY, policies[0]))
       expect(view.opMask).to.equal(3n)
-      expect((await f.engine.getScopeAttachments(f.address, scopeKey(s))).length).to.equal(8)
+      expect((await f.engine.getScopeAttachments(f.address, scopeKey(s))).length).to.equal(4)
     })
 
     it('detach: NotAttached, swap-and-pop, scope list, no policy call', async () => {

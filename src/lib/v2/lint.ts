@@ -43,6 +43,7 @@ export type LintRule =
   | 'timelock-order'
   | 'delay-below-timelock'
   | 'limit-unpriceable-allow'
+  | 'limit-owners-unpriced'
   | 'allow-without-freeze'
   | 'freeze-misses-actor'
   | 'freeze-on-recovery'
@@ -167,10 +168,11 @@ export function lint(input: LintInput): LintFinding[] {
   // --- Global placement ---
   for (const p of policies.filter((p) => isAny(p.scope.actor))) {
     if (p.policyName === 'freeze') {
+      // WP7a: a Freeze at (Everyone, *) denies Recovery's swapOwner too, so "freeze, then recover" fails.
       add(
         'global-freeze',
-        'warn',
-        'Freeze for everyone also blocks recovery during a freeze: attach it per actor (Owners, Ops, Agent…) and leave Recovery out',
+        'block',
+        "Freeze for everyone also blocks Recovery's swapOwner during a freeze (freeze, then recover no longer works): attach it per actor (Owners, Ops, Agent…) and leave Recovery out",
         [p.attachmentId],
       )
       continue
@@ -241,6 +243,18 @@ export function lint(input: LintInput): LintFinding[] {
   // --- Limit next to unpriceable Allows ---
   for (const limit of policies.filter((p) => p.policyName === 'limit')) {
     const passUnpriced = limit.settings?.policy === 'limit' && limit.settings.settings.passUnpriced
+    const onOwners =
+      (isOwners(limit.scope.actor) || isAny(limit.scope.actor)) && limit.scope.callMatch === CallMatch.ANY
+    if (onOwners && !passUnpriced) {
+      // WP7a: the owners' calls are mostly unpriceable (setGuard, enableModule, swaps…).
+      add(
+        'limit-owners-unpriced',
+        'block',
+        `The budget at (${who(limit.scope.actor)}, *) denies every owner call it cannot price (Safe settings, module changes, swaps, configuration of other contracts): tick "unpriced calls pass" or keep the budget off the owners`,
+        [limit.attachmentId],
+      )
+      continue
+    }
     const unpriced = allows.filter(
       (a) => overlaps(a.scope, limit.scope) && !isPriceable(a.scope, deployment.signLib),
     )
@@ -248,7 +262,8 @@ export function lint(input: LintInput): LintFinding[] {
     const list = unpriced.map((a) => `(${who(a.scope.actor)}, ${what(a)})`).join(', ')
     add(
       'limit-unpriceable-allow',
-      passUnpriced ? 'block' : 'warn',
+      // Owners can do anything else after their timelock anyway: a budget that lets their unpriced calls pass is the intended set-up.
+      passUnpriced && !onOwners ? 'block' : 'warn',
       passUnpriced
         ? `The budget at (${who(limit.scope.actor)}, ${what(limit)}) lets unpriced calls pass, and ${list} grants calls it cannot price: they bypass the budget`
         : `The budget at (${who(limit.scope.actor)}, ${what(limit)}) cannot price the calls ${list} grants: they will always be denied`,

@@ -240,7 +240,7 @@ export type ChangeProblem = {
 
 /**
  * Problems that would make `applyConfiguration` (or `configureImmediately`) revert, checked
- * locally: scope normalization, op mask, built-in shape, DELEGATECALL grant level, 8 attachments
+ * locally: scope normalization, op mask, built-in shape, DELEGATECALL grant level, 4 attachments
  * per scope, DETACH of something not attached, `DELAY ≥` timelock delay at ANY / OWNERS, settings,
  * role caps. Unknown policy contracts are only checked for shape (the engine checks ERC-165).
  */
@@ -434,15 +434,28 @@ export const safeCalls = {
 }
 
 /**
- * Installs V2 on a Safe that has no V2 guard yet: configure first (impossible once installed),
- * then the fallback handler (so ERC-1271 only accepts on-chain approvals), then both guards.
+ * Installs V2 on a Safe that has no V2 guard yet, in the only order that also works one
+ * transaction at a time (WP7a, `Install.test.ts`): configure first (`GuardAlreadyEnabled` once
+ * either guard is set), then the fallback handler (ERC-1271 only accepts on-chain approvals), the
+ * module guard, and the transaction guard last (after `setGuard` every further owner transaction
+ * is checked, so `setModuleGuard` would need the owners' Allow and wait their Timelock). As one
+ * MultiSend batch the guard checks the batch once, before any of it runs.
  */
 export const installCalls = (safe: Address, deployment: V2Deployment, set: ChangeSet): OwnerCall[] => [
   engineCalls.configureImmediately(deployment.engine, set),
   safeCalls.setFallbackHandler(safe, deployment.fallbackHandler),
-  safeCalls.setGuard(safe, deployment.engine),
   safeCalls.setModuleGuard(safe, deployment.engine),
+  safeCalls.setGuard(safe, deployment.engine),
 ]
+
+/**
+ * V2 needs Safe ≥ 1.5.0: older Safes have no module guard, so every module would run unchecked.
+ * Parses `VERSION()` (`1.5.0`, `1.5.0+L2`).
+ */
+export function supportsV2(version: string): boolean {
+  const [major = 0, minor = 0] = version.split(/[.+-]/).map((part) => Number.parseInt(part, 10) || 0)
+  return major > 1 || (major === 1 && minor >= 5)
+}
 
 // ---------------------------------------------------------------------------------------------
 // MultiSend batching
@@ -490,7 +503,7 @@ export const isConfigurationCall = (engine: Address, c: Pick<OwnerCall, 'to' | '
 
 /**
  * Turns a list of calls into the fewest owner transactions: configuration-path calls alone, the
- * rest batched in order through `multiSend` (≤ 16 calls per batch, the engine's cap), a single call
+ * rest batched in order through `multiSend` (≤ 8 calls per batch, the engine's cap), a single call
  * left as is.
  */
 export function planOwnerTransactions(

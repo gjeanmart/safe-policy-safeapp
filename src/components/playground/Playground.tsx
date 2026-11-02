@@ -149,7 +149,7 @@ function SimpleAction({ action, role }: { action: Exclude<ActionKey, 'cow'>; rol
 }
 
 export function Playground() {
-  const { state } = useSandbox()
+  const { state, v2Installed } = useSandbox()
   const roles = rolesStore.use()
   const [roleAddress, setRoleAddress] = useState<string>(roles[0]?.address ?? '')
   const [action, setAction] = useState<ActionKey>('erc20')
@@ -195,6 +195,16 @@ export function Playground() {
               <Notice tone="warn">
                 {role.label} is not an enabled module: the Safe itself rejects it (GS104) before any policy
                 runs.
+              </Notice>
+            )}
+
+            {action === 'cow' && v2Installed && (
+              <Notice tone="warn">
+                Policy Engine V2: an order made live with setPreSignature is opaque to the transfer budget
+                (unpriced, so denied unless the budget lets unpriced calls pass). The V2 agent template grants
+                PolicySignLib.signCowOrder instead, which approves the order on-chain with its fields priced;
+                this playground does not build that call yet (use a custom DELEGATECALL). Off-chain order
+                signatures by the owners are refused by PolicyFallbackHandler.
               </Notice>
             )}
 

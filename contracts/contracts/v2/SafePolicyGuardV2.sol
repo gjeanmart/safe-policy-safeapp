@@ -44,19 +44,16 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
     ///      instead of aborting the preview (SPEC.md §6.7).
     uint256 private constant _PREVIEW_GAS_RESERVE = 300_000;
 
+    /// @dev Odd multiplier (64-bit golden ratio) spreading keys over the in-memory hash tables.
+    uint256 private constant _HASH_MULTIPLIER = 0x9e3779b97f4a7c15;
+
     /// @dev {PolicyEngineV2}, deployed by the constructor, DELEGATECALLed for configuration and freeze.
     address private immutable _LOGIC;
 
-    /// @dev A transaction-level policy run being accumulated across calls.
-    struct Run {
-        address policy;
-        uint256 count;
-        bytes32[] ids;
-        uint8[] levels;
-    }
-
     /// @dev Everything one evaluation carries. `ctx.txHash`/`ctx.nonce` are computed lazily on the
-    ///      owner path (only when a policy runs), from the top-level fields kept here.
+    ///      owner path (only when a policy runs), from the top-level fields kept here. `txIds` /
+    ///      `txMetas` queue the transaction-level policy matches of all calls (not deduplicated yet),
+    ///      `txMetas[e] = policy | level << 160`.
     struct Frame {
         Context ctx;
         bool preview;
@@ -68,8 +65,9 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
         address gasToken;
         address refundReceiver;
         PolicyContext[] contexts;
-        Run[] runs;
-        uint256 runCount;
+        bytes32[] txIds;
+        uint256[] txMetas;
+        uint256 txCount;
         GateResult[] gates;
         uint256 gateCount;
     }
@@ -549,18 +547,24 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
         // F5: on the module path, calls to the Safe itself or to the engine need an exact ALLOW.
         bool exactOnly = actor != Scope.OWNERS && (call.to == f.ctx.safe || call.to == address(this));
 
-        Match[] memory matches = _match(f.ctx.safe, actor, call.to, sel, effOp);
+        (uint256[] memory matches, bytes32[8] memory keys) = _match(f.ctx.safe, actor, call.to, sel, effOp);
         bool granted;
-        bool hasPolicy;
+        // This call's call-level policy matches, run once the built-in gates are known.
+        bytes32[] memory ids;
+        uint256[] memory metas;
+        uint256 count;
         for (uint256 k = 0; k < matches.length; k++) {
-            Match memory m = matches[k];
-            if (m.kind == AttachmentKind.DENY) {
-                bytes32 id = Scope.attachmentId(m.scopeKey, m.kind, m.policy);
+            uint256 word = matches[k];
+            uint8 lvl = uint8(word >> _MATCH_LEVEL_SHIFT);
+            uint256 kind = uint8(word >> 160);
+            address policy = address(uint160(word));
+            if (kind == uint8(AttachmentKind.DENY)) {
+                bytes32 id = _attachmentId(keys[lvl], kind, policy);
                 _deny(
                     f,
                     GateResult(
                         uint16(i),
-                        m.level,
+                        lvl,
                         GateKind.DENY,
                         id,
                         address(0),
@@ -568,17 +572,17 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
                         abi.encodeWithSelector(Denied.selector, i, id)
                     )
                 );
-            } else if (m.kind == AttachmentKind.ALLOW) {
-                bool counts = m.level == Scope.EXACT_LEVEL || (effOp == Operation.CALL && !exactOnly);
+            } else if (kind == uint8(AttachmentKind.ALLOW)) {
+                bool counts = lvl == Scope.EXACT_LEVEL || (effOp == Operation.CALL && !exactOnly);
                 granted = granted || counts;
                 if (f.preview) {
                     _pushGate(
                         f,
                         GateResult(
                             uint16(i),
-                            m.level,
+                            lvl,
                             GateKind.ALLOW,
-                            Scope.attachmentId(m.scopeKey, m.kind, m.policy),
+                            _attachmentId(keys[lvl], kind, policy),
                             address(0),
                             counts ? Verdict.ALLOW : Verdict.PASS,
                             counts ? new bytes(0) : abi.encodeWithSelector(AllowNotExact.selector)
@@ -586,7 +590,18 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
                     );
                 }
             } else {
-                hasPolicy = true;
+                bytes32 id = _attachmentId(keys[lvl], kind, policy);
+                uint256 meta = uint160(policy) | (uint256(lvl) << 160);
+                if (uint8(word >> 176) == uint8(PolicyLevel.CALL)) {
+                    if (count == 0) {
+                        ids = new bytes32[](matches.length - k);
+                        metas = new uint256[](matches.length - k);
+                    }
+                    ids[count] = id;
+                    metas[count++] = meta;
+                } else {
+                    _queueTransactionMatch(f, id, meta);
+                }
             }
         }
 
@@ -597,8 +612,8 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
                 _revertWith(notGranted);
             }
         }
-        if (hasPolicy) {
-            _runCallPolicies(f, i, call, matches, topData);
+        if (count != 0) {
+            _runPolicies(f, i, call, new Call[](0), msg.data[0:0], topData, ids, metas, count);
         }
         if (!granted) {
             _pushGate(
@@ -608,86 +623,57 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
         }
     }
 
-    /// @dev Runs each distinct call-level policy once with its ids (first-match order) and queues
-    ///      the transaction-level matches.
-    function _runCallPolicies(
-        Frame memory f,
-        uint256 i,
-        Call memory call,
-        Match[] memory matches,
-        bytes calldata topData
-    ) private {
-        for (uint256 k = 0; k < matches.length; k++) {
-            Match memory m = matches[k];
-            if (m.kind != AttachmentKind.POLICY) {
-                continue;
-            }
-            if (m.policyLevel == PolicyLevel.TRANSACTION) {
-                _queueTransactionMatch(f, m.policy, Scope.attachmentId(m.scopeKey, m.kind, m.policy), m.level);
-                continue;
-            }
-            if (_seenCallPolicy(matches, k)) {
-                continue;
-            }
-
-            uint256 count;
-            for (uint256 j = k; j < matches.length; j++) {
-                if (_isCallPolicyOf(matches[j], m.policy)) {
-                    count++;
-                }
-            }
-            bytes32[] memory ids = new bytes32[](count);
-            uint8[] memory levels = new uint8[](count);
-            count = 0;
-            for (uint256 j = k; j < matches.length; j++) {
-                Match memory o = matches[j];
-                if (_isCallPolicyOf(o, m.policy)) {
-                    ids[count] = Scope.attachmentId(o.scopeKey, o.kind, o.policy);
-                    levels[count++] = o.level;
-                }
-            }
-
-            _ensureContext(f, topData);
-            (bool pass, bytes memory reason) = _callPolicy(
-                f,
-                m.policy,
-                abi.encodeCall(IPolicyV2.checkCall, (f.ctx, call, ids)),
-                IPolicyV2.checkCall.selector
-            );
-            if (!pass && !f.preview) {
-                revert PolicyDenied(i, m.policy, reason);
-            }
-            _policyGates(f, uint16(i), m.policy, ids, levels, count, pass, reason);
-        }
-    }
-
     function _runTransactionPolicies(
         Frame memory f,
         Call[] memory calls,
         bytes calldata signatures,
         bytes calldata topData
     ) private {
-        for (uint256 r = 0; r < f.runCount; r++) {
-            Run memory run = f.runs[r];
-            bytes32[] memory ids = run.ids;
-            uint256 count = run.count;
-            assembly ("memory-safe") {
-                mstore(ids, count)
-            }
-            _ensureContext(f, topData);
+        if (f.txCount != 0) {
+            _runPolicies(f, Scope.TX_INDEX, calls[0], calls, signatures, topData, f.txIds, f.txMetas, f.txCount);
+        }
+    }
+
+    /**
+     * @dev Runs each distinct policy of `count` matches `(ids[e], metas[e])` once, in first-match
+     *      order, with its ids: `checkCall(ctx, call, ids)` for call `callIndex`, or
+     *      `checkTransaction(ctx, calls, signatures, policyData, ids)` for `TX_INDEX` (ids
+     *      deduplicated across calls).
+     */
+    function _runPolicies(
+        Frame memory f,
+        uint256 callIndex,
+        Call memory call,
+        Call[] memory calls,
+        bytes calldata signatures,
+        bytes calldata topData,
+        bytes32[] memory ids,
+        uint256[] memory metas,
+        uint256 count
+    ) private {
+        bool isTx = callIndex == Scope.TX_INDEX;
+        (address[] memory policies, bytes32[][] memory runIds, uint8[][] memory runLevels) = _group(
+            ids,
+            metas,
+            count,
+            isTx
+        );
+        uint256 runs = policies.length;
+        _ensureContext(f, topData);
+        bytes4 magic = isTx ? IPolicyV2.checkTransaction.selector : IPolicyV2.checkCall.selector;
+        for (uint256 r = 0; r < runs; r++) {
+            address policy = policies[r];
+            bytes32[] memory runIdList = runIds[r];
             (bool pass, bytes memory reason) = _callPolicy(
                 f,
-                run.policy,
-                abi.encodeCall(
-                    IPolicyV2.checkTransaction,
-                    (f.ctx, calls, signatures, _policyData(f.contexts, run.policy), ids)
-                ),
-                IPolicyV2.checkTransaction.selector
+                policy,
+                _encodeCheck(magic, f.ctx, call, calls, signatures, _policyData(f.contexts, policy), runIdList),
+                magic
             );
             if (!pass && !f.preview) {
-                revert PolicyDenied(Scope.TX_INDEX, run.policy, reason);
+                revert PolicyDenied(callIndex, policy, reason);
             }
-            _policyGates(f, Scope.TX_INDEX, run.policy, ids, run.levels, count, pass, reason);
+            _policyGates(f, uint16(callIndex), policy, runIdList, runLevels[r], pass, reason);
         }
     }
 
@@ -698,14 +684,13 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
         address policy,
         bytes32[] memory ids,
         uint8[] memory levels,
-        uint256 count,
         bool pass,
         bytes memory reason
     ) private pure {
         if (!f.preview) {
             return;
         }
-        for (uint256 j = 0; j < count; j++) {
+        for (uint256 j = 0; j < ids.length; j++) {
             _pushGate(
                 f,
                 GateResult(
@@ -804,58 +789,138 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
         f.gates[f.gateCount++] = gate;
     }
 
-    /// @dev Adds `(policy, id)` to the transaction-level runs, deduplicated by id.
-    function _queueTransactionMatch(Frame memory f, address policy, bytes32 id, uint8 lvl) private pure {
-        Run memory run;
-        for (uint256 r = 0; r < f.runCount; r++) {
-            if (f.runs[r].policy == policy) {
-                run = f.runs[r];
-                break;
+    /// @dev Queues a transaction-level match; repeated ids are dropped when the runs are formed.
+    function _queueTransactionMatch(Frame memory f, bytes32 id, uint256 meta) private pure {
+        uint256 n = f.txCount;
+        if (n == f.txIds.length) {
+            bytes32[] memory ids = new bytes32[](2 * n + 4);
+            uint256[] memory metas = new uint256[](2 * n + 4);
+            for (uint256 j = 0; j < n; j++) {
+                ids[j] = f.txIds[j];
+                metas[j] = f.txMetas[j];
             }
+            f.txIds = ids;
+            f.txMetas = metas;
         }
-        if (run.policy == address(0)) {
-            if (f.runCount == f.runs.length) {
-                Run[] memory bigger = new Run[](f.runs.length * 2 + 2);
-                for (uint256 r = 0; r < f.runCount; r++) {
-                    bigger[r] = f.runs[r];
-                }
-                f.runs = bigger;
-            }
-            run = Run(policy, 0, new bytes32[](4), new uint8[](4));
-            f.runs[f.runCount++] = run;
-        } else {
-            for (uint256 j = 0; j < run.count; j++) {
-                if (run.ids[j] == id) {
-                    return;
-                }
-            }
-        }
-        if (run.count == run.ids.length) {
-            bytes32[] memory ids = new bytes32[](run.count * 2);
-            uint8[] memory levels = new uint8[](run.count * 2);
-            for (uint256 j = 0; j < run.count; j++) {
-                ids[j] = run.ids[j];
-                levels[j] = run.levels[j];
-            }
-            run.ids = ids;
-            run.levels = levels;
-        }
-        run.ids[run.count] = id;
-        run.levels[run.count] = lvl;
-        run.count++;
+        f.txIds[n] = id;
+        f.txMetas[n] = meta;
+        f.txCount = n + 1;
     }
 
-    function _seenCallPolicy(Match[] memory matches, uint256 k) private pure returns (bool) {
-        for (uint256 j = 0; j < k; j++) {
-            if (_isCallPolicyOf(matches[j], matches[k].policy)) {
-                return true;
+    /**
+     * @dev Groups `count` policy matches `(ids[e], metas[e] = policy | level << 160)` into runs, one
+     *      per distinct policy in first-match order, each with its ids and levels in match order;
+     *      with `dedup`, a repeated id is dropped. Linear in `count` (SPEC.md §9): policies and ids
+     *      are looked up in open-addressing hash tables (power-of-two size, at most half full) in
+     *      memory. Assembly: the same in Solidity costs ~100 gas per array access under via-IR.
+     */
+    function _group(
+        bytes32[] memory ids,
+        uint256[] memory metas,
+        uint256 count,
+        bool dedup
+    ) private pure returns (address[] memory policies, bytes32[][] memory runIds, uint8[][] memory runLevels) {
+        uint256 multiplier = _HASH_MULTIPLIER;
+        assembly ("memory-safe") {
+            // Returns the word of `key` in the table at `table` (`mask + 1` words), else stores
+            // `word` in its free slot and returns 0.
+            function probe(table, mask, multiplier_, key, keyMask, word) -> found {
+                let slot := and(shr(32, mul(key, multiplier_)), mask)
+                for {} 1 {} {
+                    let at := add(table, shl(5, slot))
+                    found := mload(at)
+                    if iszero(found) {
+                        mstore(at, word)
+                        break
+                    }
+                    if eq(and(found, keyMask), key) {
+                        break
+                    }
+                    slot := and(add(slot, 1), mask)
+                }
             }
-        }
-        return false;
-    }
 
-    function _isCallPolicyOf(Match memory m, address policy) private pure returns (bool) {
-        return m.kind == AttachmentKind.POLICY && m.policyLevel == PolicyLevel.CALL && m.policy == policy;
+            let size := 8
+            for {} lt(size, shl(1, count)) {} {
+                size := shl(1, size)
+            }
+            let mask := sub(size, 1)
+            // Scratch: the policy table, the id table (used with `dedup`), then runOf[count]
+            // (run + 1, 0 = dropped) and sizes[count]; then the results.
+            let byPolicy := mload(0x40)
+            let seen := add(byPolicy, shl(5, size))
+            let runOf := add(seen, shl(5, size))
+            let sizes := add(runOf, shl(5, count))
+            policies := add(sizes, shl(5, count))
+            calldatacopy(byPolicy, calldatasize(), sub(add(policies, 0x20), byPolicy))
+            let addressMask := 0xffffffffffffffffffffffffffffffffffffffff
+            let runs := 0
+            for {
+                let e := 0
+            } lt(e, count) {
+                e := add(e, 1)
+            } {
+                let id := mload(add(ids, shl(5, add(e, 1))))
+                if dedup {
+                    if probe(seen, mask, multiplier, id, not(0), id) {
+                        continue
+                    }
+                }
+                let policy := and(mload(add(metas, shl(5, add(e, 1)))), addressMask)
+                let r := runs
+                let found := probe(byPolicy, mask, multiplier, policy, addressMask, or(policy, shl(160, add(runs, 1))))
+                switch found
+                case 0 {
+                    runs := add(runs, 1)
+                    mstore(add(policies, shl(5, runs)), policy)
+                }
+                default {
+                    r := sub(shr(160, found), 1)
+                }
+                mstore(add(runOf, shl(5, e)), add(r, 1))
+                let sizeAt := add(sizes, shl(5, r))
+                mstore(sizeAt, add(mload(sizeAt), 1))
+            }
+            mstore(policies, runs)
+
+            // runIds[runs], runLevels[runs], then each run's two arrays.
+            runIds := add(policies, shl(5, add(runs, 1)))
+            runLevels := add(runIds, shl(5, add(runs, 1)))
+            mstore(runIds, runs)
+            mstore(runLevels, runs)
+            let cursor := add(runLevels, shl(5, add(runs, 1)))
+            for {
+                let r := 0
+            } lt(r, runs) {
+                r := add(r, 1)
+            } {
+                let sizeAt := add(sizes, shl(5, r))
+                let n := mload(sizeAt)
+                mstore(sizeAt, 0)
+                mstore(add(runIds, shl(5, add(r, 1))), cursor)
+                mstore(cursor, n)
+                cursor := add(cursor, shl(5, add(n, 1)))
+                mstore(add(runLevels, shl(5, add(r, 1))), cursor)
+                mstore(cursor, n)
+                cursor := add(cursor, shl(5, add(n, 1)))
+            }
+            for {
+                let e := 0
+            } lt(e, count) {
+                e := add(e, 1)
+            } {
+                let r1 := mload(add(runOf, shl(5, e)))
+                if r1 {
+                    let sizeAt := add(sizes, shl(5, sub(r1, 1)))
+                    let at := add(mload(sizeAt), 1)
+                    mstore(sizeAt, at)
+                    let meta := mload(add(metas, shl(5, add(e, 1))))
+                    mstore(add(mload(add(runIds, shl(5, r1))), shl(5, at)), mload(add(ids, shl(5, add(e, 1)))))
+                    mstore(add(mload(add(runLevels, shl(5, r1))), shl(5, at)), and(shr(160, meta), 0xff))
+                }
+            }
+            mstore(0x40, cursor)
+        }
     }
 
     function _policyData(PolicyContext[] memory contexts, address policy) private pure returns (bytes memory) {
@@ -864,7 +929,92 @@ contract SafePolicyGuardV2 is EngineStorage, IPolicyEngineV2, ISafeTransactionGu
                 return contexts[i].data;
             }
         }
-        return new bytes(0);
+        bytes memory empty;
+        return empty;
+    }
+
+    /**
+     * @dev The ABI-encoded calldata of `checkCall(ctx, one, ids)` (`selector` = its selector) or of
+     *      `checkTransaction(ctx, calls, signatures, policyData, ids)`. Hand-written: the generic
+     *      via-IR encoder costs ~2.5k gas per policy run.
+     */
+    function _encodeCheck(
+        bytes4 selector,
+        Context memory ctx,
+        Call memory one,
+        Call[] memory calls,
+        bytes calldata signatures,
+        bytes memory policyData,
+        bytes32[] memory ids
+    ) private pure returns (bytes memory data) {
+        bool isTx = selector == IPolicyV2.checkTransaction.selector;
+        assembly ("memory-safe") {
+            // `len` bytes at `src` as `[len][bytes, zero-padded]` at `dst`; returns the end.
+            function writeBytes(dst, src, len) -> end {
+                mstore(dst, len)
+                let padded := and(add(len, 31), not(31))
+                if padded {
+                    mstore(add(dst, padded), 0)
+                }
+                mcopy(add(dst, 0x20), src, len)
+                end := add(add(dst, 0x20), padded)
+            }
+            // The tuple `(to, value, data, operation)` of the memory Call `c` at `dst`; returns the end.
+            function writeCall(dst, c) -> end {
+                let bytesPtr := mload(add(c, 0x40))
+                mstore(dst, mload(c))
+                mstore(add(dst, 0x20), mload(add(c, 0x20)))
+                mstore(add(dst, 0x40), 0x80)
+                mstore(add(dst, 0x60), mload(add(c, 0x60)))
+                end := writeBytes(add(dst, 0x80), add(bytesPtr, 0x20), mload(bytesPtr))
+            }
+
+            data := mload(0x40)
+            let start := add(data, 0x20)
+            mstore(start, selector)
+            // Head: the 5 static Context words, then one offset per dynamic argument.
+            let head := add(start, 4)
+            mcopy(head, ctx, 0xa0)
+            let cur
+            switch isTx
+            case 0 {
+                mstore(add(head, 0xa0), 0xe0)
+                cur := writeCall(add(head, 0xe0), one)
+                mstore(add(head, 0xc0), sub(cur, head))
+            }
+            default {
+                mstore(add(head, 0xa0), 0x120)
+                let n := mload(calls)
+                mstore(add(head, 0x120), n)
+                let offsets := add(head, 0x140)
+                cur := add(offsets, shl(5, n))
+                for {
+                    let i := 0
+                } lt(i, n) {
+                    i := add(i, 1)
+                } {
+                    mstore(add(offsets, shl(5, i)), sub(cur, offsets))
+                    cur := writeCall(cur, mload(add(calls, shl(5, add(i, 1)))))
+                }
+                mstore(add(head, 0xc0), sub(cur, head))
+                let length := signatures.length
+                mstore(cur, length)
+                let padded := and(add(length, 31), not(31))
+                if padded {
+                    mstore(add(cur, padded), 0)
+                }
+                calldatacopy(add(cur, 0x20), signatures.offset, length)
+                cur := add(add(cur, 0x20), padded)
+                mstore(add(head, 0xe0), sub(cur, head))
+                cur := writeBytes(cur, add(policyData, 0x20), mload(policyData))
+                mstore(add(head, 0x100), sub(cur, head))
+            }
+            let idsSize := shl(5, add(mload(ids), 1))
+            mcopy(cur, ids, idsSize)
+            cur := add(cur, idsSize)
+            mstore(data, sub(cur, start))
+            mstore(0x40, and(add(cur, 31), not(31)))
+        }
     }
 
     function _isConfigSelector(bytes4 sel) private pure returns (bool) {

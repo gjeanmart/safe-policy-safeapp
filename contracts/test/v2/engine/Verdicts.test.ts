@@ -299,11 +299,11 @@ describe('V2 engine: batches', () => {
     const f = await setup([allow(scope(module.address)), allow(scope(OWNERS))])
     const one = { op: Op.CALL, to: f.targetAddr, value: 0n, data: SEL.ping }
     await expectRevert(
-      execModule(f.safe, f.module, f.multiSendAddr, multiSendData(Array(17).fill(one)), Op.DELEGATECALL),
+      execModule(f.safe, f.module, f.multiSendAddr, multiSendData(Array(9).fill(one)), Op.DELEGATECALL),
       f.engine,
       'BatchTooLarge',
     )
-    await execModule(f.safe, f.module, f.multiSendAddr, multiSendData(Array(16).fill(one)), Op.DELEGATECALL)
+    await execModule(f.safe, f.module, f.multiSendAddr, multiSendData(Array(8).fill(one)), Op.DELEGATECALL)
     await expectRevert(
       execModule(f.safe, f.module, f.multiSendAddr, concat(['0x8d80ff0a', ethers.ZeroHash]), Op.DELEGATECALL),
       f.engine,

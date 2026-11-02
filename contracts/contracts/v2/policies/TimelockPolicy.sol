@@ -184,29 +184,36 @@ contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
 
         uint256 delay;
         bool clearOnFreeze;
+        uint256 listedCount;
         for (uint256 i = 0; i < matches.length; i++) {
             // The engine filters by policy already; re-checked because `engine` is caller-chosen.
             if (!_isOurs(matches[i])) continue;
             Settings storage settings = _settings[_settingsKey(engine, safe, matches[i].attachment.attachmentId)];
             if (settings.delay > delay) delay = settings.delay;
             clearOnFreeze = clearOnFreeze || settings.clearOnFreeze;
+            listedCount += settings.cancellers.length;
         }
 
         Schedule storage s = _schedules[engine][safe][txHash];
         if (s.scheduledAt != 0) {
             require(clearOnFreeze && (s.frozenAtSchedule || s.epoch != epoch), AlreadyScheduled(txHash));
-            delete _cancellers[engine][safe][txHash];
         }
 
-        address[] storage cancellers = _cancellers[engine][safe][txHash];
+        // The union is deduplicated in memory, then written once (replacing a voided schedule's).
+        address[] memory cancellers = new address[](listedCount);
+        uint256 count;
         for (uint256 i = 0; i < matches.length; i++) {
             if (!_isOurs(matches[i])) continue;
             address[] storage listed = _settings[_settingsKey(engine, safe, matches[i].attachment.attachmentId)]
                 .cancellers;
             for (uint256 j = 0; j < listed.length; j++) {
-                _addUnique(cancellers, listed[j]);
+                count = _addUnique(cancellers, count, listed[j]);
             }
         }
+        assembly ("memory-safe") {
+            mstore(cancellers, count)
+        }
+        _cancellers[engine][safe][txHash] = cancellers;
 
         uint64 readyAt = uint64(block.timestamp + delay);
         s.actor = actor;
@@ -310,11 +317,13 @@ contract TimelockPolicy is PolicyBaseV2, ITimelockPolicy {
         return m.attachment.kind == AttachmentKind.POLICY && m.attachment.policy == address(this);
     }
 
-    /// @dev Bounded: at most 8 cancellers per attachment, attachments bounded by the engine caps.
-    function _addUnique(address[] storage list, address account) private {
-        for (uint256 i = 0; i < list.length; i++) {
-            if (list[i] == account) return;
+    /// @dev Appends `account` to the first `count` entries of `list` unless present; returns the new
+    ///      count. Bounded: at most 8 cancellers per attachment, attachments bounded by the engine caps.
+    function _addUnique(address[] memory list, uint256 count, address account) private pure returns (uint256) {
+        for (uint256 i = 0; i < count; i++) {
+            if (list[i] == account) return count;
         }
-        list.push(account);
+        list[count] = account;
+        return count + 1;
     }
 }

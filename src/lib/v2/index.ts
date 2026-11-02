@@ -19,6 +19,7 @@
  * | `preview.ts`     | `preview` call + `Preview(gates)` decoding, reasons, needs, deciding gate (§6.7)       |
  * | `lint.ts`        | Configuration lint rules (PLAN §5), `block` / `warn`                                   |
  * | `identity.ts`    | Safe tx hash, module callHash, proof digests, Timelock / Co-signer / Safenet calls (§7) |
+ * | `queue.ts`       | Timelock queue from events, owner nonce state, merged timelock settings, signature order |
  *
  * Typical flow in the builder:
  *
@@ -47,3 +48,4 @@ export * from './templates'
 export * from './preview'
 export * from './lint'
 export * from './identity'
+export * from './queue'

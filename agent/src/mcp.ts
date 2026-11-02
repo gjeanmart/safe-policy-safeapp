@@ -39,7 +39,7 @@ const TOOLS: Tool[] = [
     name: 'safe_role_status',
     command: 'status',
     description:
-      'Safe version, owners, modules, guards, whether the role is an enabled policy-scoped module, its gas, and whether the signer is running. Report every item in `problems`.',
+      'Safe version, owners, modules, guards (V1 SafePolicyGuard or Policy Engine V2), whether the role is an enabled policy-scoped module, its gas, whether the signer is running, and on V2 the freeze state of the Safe and of this role. Report every item in `problems`.',
     inputSchema: noArgs,
     annotations: { ...read, title: 'Safe status' },
   },
@@ -47,7 +47,7 @@ const TOOLS: Tool[] = [
     name: 'safe_role_policies',
     command: 'policies',
     description:
-      'Active SafePolicyGuard policies, decoded, with what each means for this role. Anything not listed is denied.',
+      'What this role may do. V1: active policies, decoded, with what each means for the role. V2: grants (Allow that applies to the role), protections on the role, protections on everyone, and each transfer budget with what is left and when it resets. Anything not granted is denied.',
     inputSchema: {
       type: 'object',
       properties: { fromBlock: { type: 'string', description: 'Scan from this block (default ~4 weeks)' } },
@@ -110,9 +110,35 @@ const TOOLS: Tool[] = [
     name: 'safe_role_simulate',
     command: 'simulate',
     description:
-      'Dry-runs a plan as the role against the live Safe and names the deciding policy. A denial is an answer: explain it, do not work around it.',
+      'Dry-runs a plan as the role against the live Safe and names the deciding policy. On V2: every gate (Allow / pass / Deny), the deciding gate, `needs` and `next` (schedule, wait, co-signature). A denial is an answer: explain it, do not work around it.',
     inputSchema: planId,
     annotations: { ...read, title: 'Simulate a plan' },
+  },
+  {
+    name: 'safe_role_schedule',
+    command: 'schedule',
+    description:
+      'V2 only: schedules a plan with the Timelock when simulate says it needs a schedule. Sends a transaction from the role (gas only, nothing moves); the signer asks y/N in ask mode. After the delay: simulate, then exec. Only after the user confirmed in chat.',
+    inputSchema: planId,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+      title: 'Schedule a plan (Timelock)',
+    },
+  },
+  {
+    name: 'safe_role_queue',
+    command: 'queue',
+    description:
+      "V2 only: this role's Timelock schedules: status (waiting with a countdown, ready, expired, cleared by a freeze), the plan id and the next step.",
+    inputSchema: {
+      type: 'object',
+      properties: { fromBlock: { type: 'string', description: 'Scan from this block (default ~4 weeks)' } },
+      additionalProperties: false,
+    },
+    annotations: { ...read, title: 'Timelock queue' },
   },
   {
     name: 'safe_role_exec',

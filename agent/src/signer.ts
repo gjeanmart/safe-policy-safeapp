@@ -1,8 +1,19 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
-import { type Address, type Hex, formatUnits, getAddress, isAddressEqual } from 'viem'
+import {
+  type Address,
+  type Hex,
+  createWalletClient,
+  formatUnits,
+  getAddress,
+  http,
+  isAddressEqual,
+} from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
+import { chain, rpcUrl } from '../../src/config/client'
 import { Operation } from '../../src/lib/configurations'
 import { describeError } from '../../src/lib/errors'
+import { fetchSafeState } from '../../src/lib/safe'
+import { durationLabel, timelockPolicyAbi } from '../../src/lib/v2'
 import { type ModuleTx, sendModuleTx } from '../../src/lib/moduleTx'
 import { connect, simulate, txLink } from './chain'
 import { AUDIT_PATH, type Config, label, loadConfig } from './config'
@@ -10,6 +21,7 @@ import { prompt, readKeystore, requireTty } from './keystore'
 import { CliError } from './output'
 import { type Plan, describeTx, planHash } from './plans'
 import { verifyPresign } from './swap'
+import { isoTime, scheduleCheck, v2Context } from './v2'
 
 /**
  * The signer is the only process that holds the role key. The user starts it in a terminal
@@ -27,16 +39,17 @@ import { verifyPresign } from './swap'
 export type SignerResponse =
   { ok: true; [key: string]: unknown } | { ok: false; error: string; hint?: string }
 
-/** What the agent commands need from a signer: its state, and executing a plan. */
+/** What the agent commands need from a signer: its state, executing a plan, scheduling one (V2). */
 export type SignerBackend = {
   describe: () => Promise<Record<string, unknown>>
   exec: (plan: Plan) => Promise<SignerResponse>
+  schedule: (plan: Plan) => Promise<SignerResponse>
 }
 
 type AuditEntry = {
   at: string
   planHash: Hex
-  status: 'sent' | 'rejected'
+  status: 'sent' | 'scheduled' | 'rejected'
   intent: string
   txHash?: Hex
   reason?: string
@@ -59,13 +72,14 @@ export function readAudit(): AuditEntry[] {
     .map((line) => JSON.parse(line) as AuditEntry)
 }
 
-async function handleExec(
+type Reject = (reason: string, intentText?: string, hint?: string) => SignerResponse
+
+/** Rebuilds the transaction from the plan's fields and checks it is for this chain, Safe and role. */
+function checkPlan(
   config: Config,
   role: Address,
-  privateKey: Hex,
   plan: Plan,
-  mode: SignMode,
-): Promise<SignerResponse> {
+): { tx: ModuleTx; hash: Hex; reject: Reject; problem?: string } {
   const tx: ModuleTx = {
     to: getAddress(plan.tx.to),
     value: BigInt(plan.tx.value),
@@ -73,21 +87,41 @@ async function handleExec(
     operation: Number(plan.tx.operation) as ModuleTx['operation'],
   }
   const hash = planHash(config.chainId, config.safe, role, tx)
-  const reject = (reason: string, intentText = '(not decoded)', hint?: string): SignerResponse => {
+  const reject: Reject = (reason, intentText = '(not decoded)', hint) => {
     audit({ at: new Date().toISOString(), planHash: hash, status: 'rejected', intent: intentText, reason })
     console.log(`\n✗ Rejected ${hash.slice(2, 12)}: ${reason}`)
     return { ok: false, error: `Signer refused: ${reason}`, ...(hint ? { hint } : {}) }
   }
-
-  if (
+  const problem =
     plan.chainId !== config.chainId ||
     !isAddressEqual(plan.safe, config.safe) ||
     !isAddressEqual(plan.role, role)
-  ) {
-    return reject('plan targets another chain, Safe or role')
-  }
-  if (plan.hash !== hash) return reject('plan hash does not match its content')
-  if (tx.operation !== Operation.CALL) return reject('only CALL is supported')
+      ? 'plan targets another chain, Safe or role'
+      : plan.hash !== hash
+        ? 'plan hash does not match its content'
+        : tx.operation !== Operation.CALL
+          ? 'only CALL is supported'
+          : undefined
+  return { tx, hash, reject, problem }
+}
+
+async function confirm(reject: Reject, intentText: string): Promise<SignerResponse | undefined> {
+  const answer = await prompt('Sign and send? [y/N] ', { timeoutMs: CONFIRM_TIMEOUT_MS })
+  if (!answer) return reject('not approved by the user (no answer within 2 minutes)', intentText)
+  if (!/^y(es)?$/i.test(answer))
+    return reject('declined by the user', intentText, 'Ask the user why before retrying.')
+  return undefined
+}
+
+async function handleExec(
+  config: Config,
+  role: Address,
+  privateKey: Hex,
+  plan: Plan,
+  mode: SignMode,
+): Promise<SignerResponse> {
+  const { tx, hash, reject, problem } = checkPlan(config, role, plan)
+  if (problem) return reject(problem)
 
   const intent = describeTx(config, tx, plan.cow)
   const mismatch = verifyPresign(config, plan, tx)
@@ -104,10 +138,8 @@ async function handleExec(
     console.log(`Data     ${tx.data.length > 138 ? tx.data.slice(0, 138) + '…' : tx.data}`)
     console.log(`Policy   ${sim.policy ?? 'unknown'} → simulation OK at block ${sim.block}`)
     for (const warning of intent.warnings) console.log(`⚠️  ${warning}`)
-    const answer = await prompt('Sign and send? [y/N] ', { timeoutMs: CONFIRM_TIMEOUT_MS })
-    if (!answer) return reject('not approved by the user (no answer within 2 minutes)', intent.text)
-    if (!/^y(es)?$/i.test(answer))
-      return reject('declined by the user', intent.text, 'Ask the user why before retrying.')
+    const refused = await confirm(reject, intent.text)
+    if (refused) return refused
   }
 
   try {
@@ -115,6 +147,60 @@ async function handleExec(
     audit({ at: new Date().toISOString(), planHash: hash, status: 'sent', intent: intent.text, txHash })
     console.log(`✓ Sent ${txLink(txHash)}`)
     return { ok: true, txHash, intent: intent.text }
+  } catch (error) {
+    return reject(`sending failed: ${describeError(error)}`, intent.text)
+  }
+}
+
+/**
+ * Policy Engine V2: the role schedules its own call with the Timelock (`scheduleModuleTx`, sent from
+ * the role key: `msg.sender` is the actor). Nothing moves now; the schedule is keyed by the call's
+ * `callHash` and consumed when the same call executes after the delay.
+ */
+async function handleSchedule(
+  config: Config,
+  role: Address,
+  privateKey: Hex,
+  plan: Plan,
+  mode: SignMode,
+): Promise<SignerResponse> {
+  const { tx, hash, reject, problem } = checkPlan(config, role, plan)
+  if (problem) return reject(problem)
+  const intent = describeTx(config, tx, plan.cow)
+  const mismatch = verifyPresign(config, plan, tx)
+  if (mismatch) return reject(mismatch, intent.text, 'Plan the swap again.')
+
+  const ctx = await v2Context(config, await fetchSafeState(config.safe))
+  if (!ctx) return reject('this Safe is not guarded by the Policy Engine V2', intent.text)
+  const check = await scheduleCheck(config, ctx, tx, plan.id)
+  if (!check.ok) return reject(check.reason, intent.text, check.hint)
+
+  if (mode === 'ask') {
+    console.log('\n──────── Schedule request (Timelock) ────────')
+    console.log(`Plan      ${hash}`)
+    console.log(`Action    ${intent.text}`)
+    console.log(`Target    ${tx.to}  value ${formatUnits(tx.value, 18)} ETH`)
+    console.log(`Schedule  delay ${durationLabel(check.delay)}, executable from ~${isoTime(check.readyAt)}`)
+    console.log(`CallHash  ${check.callHash}`)
+    console.log('Nothing moves now: this only starts the delay. Owners and cancellers can see and cancel it.')
+    for (const warning of intent.warnings) console.log(`⚠️  ${warning}`)
+    const refused = await confirm(reject, `schedule: ${intent.text}`)
+    if (refused) return refused
+  }
+
+  try {
+    const account = privateKeyToAccount(privateKey)
+    const wallet = createWalletClient({ account, chain, transport: http(rpcUrl()) })
+    const txHash = await wallet.writeContract({
+      account,
+      address: ctx.deployment.policies.timelock,
+      abi: timelockPolicyAbi,
+      functionName: 'scheduleModuleTx',
+      args: [ctx.engine, config.safe, tx.to, tx.value, tx.data, tx.operation],
+    })
+    audit({ at: new Date().toISOString(), planHash: hash, status: 'scheduled', intent: intent.text, txHash })
+    console.log(`✓ Scheduled ${txLink(txHash)}`)
+    return { ok: true, txHash, intent: intent.text, callHash: check.callHash }
   } catch (error) {
     return reject(`sending failed: ${describeError(error)}`, intent.text)
   }
@@ -137,13 +223,15 @@ export async function unlockSigner(
     throw new CliError(`Keystore is for ${role}, config expects ${config.role}.`)
 
   let queue: Promise<unknown> = Promise.resolve()
+  const serialize = (task: () => Promise<SignerResponse>): Promise<SignerResponse> => {
+    const run = queue.then(task)
+    queue = run.catch(() => undefined)
+    return run.catch((error: unknown) => ({ ok: false as const, error: describeError(error) }))
+  }
   const backend: SignerBackend = {
     describe: async () => ({ running: true, mode }),
-    exec: (plan) => {
-      const run = queue.then(() => handleExec(config, role, privateKey, plan, mode))
-      queue = run.catch(() => undefined)
-      return run.catch((error: unknown) => ({ ok: false as const, error: describeError(error) }))
-    },
+    exec: (plan) => serialize(() => handleExec(config, role, privateKey, plan, mode)),
+    schedule: (plan) => serialize(() => handleSchedule(config, role, privateKey, plan, mode)),
   }
   return { config, role, backend }
 }

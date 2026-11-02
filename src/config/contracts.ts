@@ -1,4 +1,5 @@
-import type { Address, Hex } from 'viem'
+import { type Address, type Hex, isAddressEqual } from 'viem'
+import { type V2Deployment, deploymentNames, isDeployed, parseV2Deployment } from '../lib/v2/policies'
 
 /** Sepolia deployments of the Safe Policy Engine (https://github.com/safe-research/policy-engine). */
 export const POLICIES = {
@@ -74,3 +75,99 @@ export const ADDRESS_BOOK: Record<string, string> = Object.fromEntries([
   [COW.settlement.toLowerCase(), 'CoW GPv2Settlement'],
   [COW.vaultRelayer.toLowerCase(), 'CoW VaultRelayer'],
 ])
+
+/**
+ * Policy Engine V2 (contracts/contracts/v2). Not deployed yet: every address is a zero placeholder
+ * and the app shows "V2 not deployed on this chain" until they are filled in.
+ *
+ * To fill in: run `pnpm deploy:v2:sepolia` in `contracts/` and paste each printed JSON block
+ * (`// V2Deployment, engine DELAY 5 seconds` / `24 hours`) as the argument of `parseV2Deployment`
+ * below, as is (it validates and checksums every address). Optionally set `fromBlock` to the
+ * deployment block so the Timelock queue scan starts there. Safenet stays 0x0 when the deploy had
+ * no SAFENET_* variables: the app then hides it.
+ */
+const V2_ZERO = '0x0000000000000000000000000000000000000000'
+
+export type V2Engine = {
+  /** Configuration delay of this engine (DELAY), as a hint: the app reads the real value on-chain. */
+  label: string
+  /** First block worth scanning for this engine's events; undefined scans the recent past only. */
+  fromBlock?: bigint
+  deployment: V2Deployment
+}
+
+export const V2_ENGINES: readonly V2Engine[] = [
+  {
+    label: '5 seconds',
+    deployment: parseV2Deployment({
+      engine: V2_ZERO,
+      signLib: V2_ZERO,
+      fallbackHandler: V2_ZERO,
+      trustedBatches: [
+        '0x9641d764fc13c8B624c04430C7356C1C7C8102e2',
+        '0xA83c336B20401Af773B6219BA5027174338D1836',
+      ],
+      policies: {
+        freeze: V2_ZERO,
+        timelock: V2_ZERO,
+        recipients: V2_ZERO,
+        limit: V2_ZERO,
+        args: V2_ZERO,
+        coSigner: V2_ZERO,
+        safenet: V2_ZERO,
+        quorum: V2_ZERO,
+      },
+    }),
+  },
+  {
+    label: '24 hours',
+    deployment: parseV2Deployment({
+      engine: V2_ZERO,
+      signLib: V2_ZERO,
+      fallbackHandler: V2_ZERO,
+      trustedBatches: [
+        '0x9641d764fc13c8B624c04430C7356C1C7C8102e2',
+        '0xA83c336B20401Af773B6219BA5027174338D1836',
+      ],
+      policies: {
+        freeze: V2_ZERO,
+        timelock: V2_ZERO,
+        recipients: V2_ZERO,
+        limit: V2_ZERO,
+        args: V2_ZERO,
+        coSigner: V2_ZERO,
+        safenet: V2_ZERO,
+        quorum: V2_ZERO,
+      },
+    }),
+  },
+]
+
+/** The V2 engines that exist on this chain. */
+export const deployedV2Engines = (): V2Engine[] => V2_ENGINES.filter((e) => isDeployed(e.deployment))
+
+/**
+ * The deployment entry of an installed V2 engine. An engine the config does not know (deployed by
+ * someone else) reuses the known policies, which serve any engine (they key state by engine).
+ */
+export function v2EngineFor(engine: Address): V2Engine | undefined {
+  const known = V2_ENGINES.find(
+    (e) => isDeployed(e.deployment) && isAddressEqual(e.deployment.engine, engine),
+  )
+  if (known) return known
+  const base = deployedV2Engines()[0]
+  return base && { label: 'unknown engine', deployment: { ...base.deployment, engine } }
+}
+
+for (const { label, deployment } of deployedV2Engines()) {
+  const nameOf = deploymentNames(deployment)
+  ADDRESS_BOOK[deployment.engine.toLowerCase()] = `SafePolicyGuardV2 (${label})`
+  for (const address of [
+    deployment.signLib,
+    deployment.fallbackHandler,
+    ...Object.values(deployment.policies),
+  ]) {
+    const name = nameOf(address)
+    if (name) ADDRESS_BOOK[address.toLowerCase()] ??= name
+  }
+}

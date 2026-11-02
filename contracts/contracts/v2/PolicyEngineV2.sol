@@ -475,7 +475,8 @@ contract PolicyEngineV2 is EngineStorage {
             calls[0] = Call(to, value, data, operation);
         }
 
-        Match[][] memory perCall = new Match[][](calls.length);
+        uint256[][] memory perCall = new uint256[][](calls.length);
+        bytes32[8][] memory keys = new bytes32[8][](calls.length);
         bytes4[] memory selectors = new bytes4[](calls.length);
         uint256 total;
         for (uint256 i = 0; i < calls.length; i++) {
@@ -485,9 +486,9 @@ contract PolicyEngineV2 is EngineStorage {
                 continue;
             }
             Operation effOp = _effectiveOperation(calls[i].to, calls[i].operation, selectors[i]);
-            perCall[i] = _match(safe, actor, calls[i].to, selectors[i], effOp);
+            (perCall[i], keys[i]) = _match(safe, actor, calls[i].to, selectors[i], effOp);
             for (uint256 k = 0; k < perCall[i].length; k++) {
-                if (policy == address(0) || perCall[i][k].policy == policy) {
+                if (policy == address(0) || address(uint160(perCall[i][k])) == policy) {
                     total++;
                 }
             }
@@ -497,17 +498,23 @@ contract PolicyEngineV2 is EngineStorage {
         uint256 n;
         for (uint256 i = 0; i < calls.length; i++) {
             for (uint256 k = 0; k < perCall[i].length; k++) {
-                Match memory m = perCall[i][k];
-                if (policy != address(0) && m.policy != policy) {
+                uint256 word = perCall[i][k];
+                if (policy != address(0) && address(uint160(word)) != policy) {
                     continue;
                 }
+                uint8 lvl = uint8(word >> _MATCH_LEVEL_SHIFT);
                 views[n++] = MatchView(
                     uint16(i),
-                    m.level,
+                    lvl,
                     _view(
-                        m.scopeKey,
-                        _scopeAt(m.level, actor, calls[i].to, selectors[i]),
-                        Attachment(m.policy, m.kind, m.opMask, m.policyLevel)
+                        keys[i][lvl],
+                        _scopeAt(lvl, actor, calls[i].to, selectors[i]),
+                        Attachment(
+                            address(uint160(word)),
+                            AttachmentKind(uint8(word >> 160)),
+                            uint8(word >> 168),
+                            PolicyLevel(uint8(word >> 176))
+                        )
                     )
                 );
             }

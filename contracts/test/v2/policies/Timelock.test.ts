@@ -920,6 +920,23 @@ describe('TimelockPolicy (WP3)', () => {
       await execModule(fx, fx.ops, c)
     })
 
+    it("replaces the voided schedule's cancellers with the current ones", async () => {
+      const fx = await loadFixture(withFreeze)
+      const safe = await fx.safe.getAddress()
+      const stub = await fx.stub.getAddress()
+      const [a, b] = [fx.outsider.address, fx.attacker.address]
+      const ops = scope(fx.ops.address)
+      await attach(fx, ops, fx.timelock, tl(HOUR, { clearOnFreeze: true, cancellers: [a, b] }))
+      const c = call(fx.target)
+      const { hash } = await scheduleModule(fx, fx.ops, c)
+      expect([...(await fx.timelock.getCancellers(stub, safe, hash))]).to.deep.equal([a, b])
+      await fx.stub.connect(fx.guardian).freezeActor(safe, fx.ops.address)
+      await fx.stub.connect(fx.guardian).lift(safe, fx.ops.address)
+      await attach(fx, ops, fx.timelock, tl(HOUR, { clearOnFreeze: true, cancellers: [b] }))
+      await scheduleModule(fx, fx.ops, c)
+      expect([...(await fx.timelock.getCancellers(stub, safe, hash))]).to.deep.equal([b])
+    })
+
     it("does not let a voided schedule be replaced when nothing clears it (recovery's queue)", async () => {
       const fx = await loadFixture(withFreeze)
       const safe = await fx.safe.getAddress()

@@ -37,6 +37,8 @@ function GuardSlot({
   /** Extra status after the value, e.g. that this Safe version has no such guard slot. */
   badge?: ReactNode
 }) {
+  const { guard, v2Installed } = useSandbox()
+  const isV2 = v2Installed && isAddressEqual(address, guard)
   return (
     <>
       <span className="field-label">{label}</span>
@@ -48,6 +50,8 @@ function GuardSlot({
             <AddressView address={address} />
             {isKnownGuard(address) ? (
               <GuardTiming guard={address} />
+            ) : isV2 ? (
+              <Badge tone="ok">Policy Engine V2</Badge>
             ) : (
               <Badge tone="warn">unknown guard</Badge>
             )}

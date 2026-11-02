@@ -21,6 +21,7 @@ import {
 import { MCP_TOKEN_PATH, ensureToken, httpSigner, mcpEndpoint } from './http'
 import { MIN_PASSWORD_LENGTH, keystoreAddress, prompt, requireTty, writeKeystore } from './keystore'
 import { CliError, printResult } from './output'
+import { detectV2 } from './v2'
 import type { SignMode } from './signer'
 
 /** Where to enable the role and write policies. */
@@ -133,7 +134,9 @@ export async function runSetup(
   const guard = activeGuard(safe)
   const guardLabel = GUARDS.find((g) => guard && isAddressEqual(g.address, guard))?.label
   ok(`Safe ${safe.version}, ${safe.threshold}-of-${safe.owners.length}, ${safe.modules.length} module(s)`)
-  if (guard && safe.moduleGuard !== zeroAddress)
+  const v2 = await detectV2(safe)
+  if (v2?.modulePath) ok(`Policy Engine V2 on the module path (${v2.engine})`)
+  else if (guard && safe.moduleGuard !== zeroAddress)
     ok(`SafePolicyGuard on the module path (${guardLabel ?? guard})`)
   else todo(`No SafePolicyGuard on the module path: modules are not scoped. Install it in the Safe App.`)
 

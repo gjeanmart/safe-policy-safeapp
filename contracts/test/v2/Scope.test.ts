@@ -210,12 +210,12 @@ describe('V2 scope library (WP0)', () => {
       ])
     })
 
-    it('accepts 16 calls and reports more as too many', async () => {
+    it('accepts 8 calls and reports more as too many', async () => {
       const tx = { op: 0, to: usdc, value: 0n, data: '0x' }
-      const [ok16] = await harness.decodeMultiSend(safe, multiSendData(Array(16).fill(tx)))
-      expect(ok16).to.equal(true)
-      const [ok17, tooMany17] = await harness.decodeMultiSend(safe, multiSendData(Array(17).fill(tx)))
-      expect([ok17, tooMany17]).to.deep.equal([false, true])
+      const [ok8] = await harness.decodeMultiSend(safe, multiSendData(Array(8).fill(tx)))
+      expect(ok8).to.equal(true)
+      const [ok9, tooMany9] = await harness.decodeMultiSend(safe, multiSendData(Array(9).fill(tx)))
+      expect([ok9, tooMany9]).to.deep.equal([false, true])
     })
 
     it('rejects malformed batches without reverting', async () => {
