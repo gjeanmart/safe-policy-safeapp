@@ -15,7 +15,8 @@ import { EyeIcon, EyeOffIcon } from './icons'
 import { ProposeButton } from './ProposeButton'
 import { SafeStatus } from './setup/SafeStatus'
 import { RefreshButton } from './RefreshButton'
-import { InfoTip } from './Tooltip'
+import { GLOSSARY } from './Term'
+import { InfoTip, Tooltip } from './Tooltip'
 import { AddressView, AsyncButton, Badge, Card, CopyButton, Notice, Tag } from './ui'
 
 const TOP_UP = parseEther('0.01')
@@ -36,16 +37,29 @@ function LegacyKeysNotice() {
   const plain = rolesStore.use().filter((r) => r.privateKey).length
   if (vault || plain === 0) return null
   return (
-    <Notice tone="warn">
+    <Notice tone="warn" title={`${plain} role key${plain > 1 ? 's are' : ' is'} stored unencrypted`}>
       <div className="row wrap notice-row">
-        <span>
-          {plain} role key{plain > 1 ? 's' : ''} from before passwords were required{' '}
-          {plain > 1 ? 'are' : 'is'} stored <strong>unencrypted</strong>.
-        </span>
+        <span>{plain > 1 ? 'They were' : 'It was'} created before passwords were required.</span>
         <AsyncButton onClick={unlockForSession}>Create a password</AsyncButton>
       </div>
     </Notice>
   )
+}
+
+/** One table row: a local role, a signer (owner) of the Safe, or both. */
+type RoleEntry = { address: Address; role?: Role; signer?: number }
+
+/** The Safe's signers first (merged with their local role, if any), then the other roles. */
+function roleEntries(roles: readonly Role[], owners: readonly Address[]): RoleEntry[] {
+  const isOwner = (a: Address) => owners.some((o) => isAddressEqual(o, a))
+  return [
+    ...owners.map((address, signer) => ({
+      address,
+      signer,
+      role: roles.find((r) => isAddressEqual(r.address, address)),
+    })),
+    ...roles.filter((r) => !isOwner(r.address)).map((role) => ({ address: role.address, role })),
+  ]
 }
 
 export function RolesPanel() {
@@ -53,25 +67,35 @@ export function RolesPanel() {
   const { state, reloadState } = useSandbox()
   const balances = useBalances(roles.map((r) => r.address))
   const [adding, setAdding] = useState(false)
+  const entries = roleEntries(roles, state?.owners ?? [])
+  const localSigners = entries.filter(
+    (e) => e.signer !== undefined && e.role && roleKind(e.role) === 'eoa',
+  ).length
 
   return (
     <>
       <SafeStatus />
-      <SignersCard roles={roles} />
 
       <Card
         title={
           <span className="row">
             Roles
             <InfoTip>
-              A role is an address enabled as a module on this Safe: a local EOA, another Safe, or a contract.
-              What it may do is bounded by the policies. A relayer only pays gas to send transactions others
-              signed.
+              Signers own the Safe: an owner (multisig) transaction needs{' '}
+              {state?.threshold ?? 'the threshold'} of their signatures. Module roles (a local EOA, another
+              Safe, a contract) act on their own, bounded by the policies. A relayer only pays gas to send
+              what others signed.
             </InfoTip>
           </span>
         }
         actions={
           <>
+            {state && (
+              <span className="muted small">
+                {state.threshold}-of-{state.owners.length} multisig · {localSigners} local signer key
+                {localSigners === 1 ? '' : 's'}
+              </span>
+            )}
             <button type="button" className="btn btn-primary" onClick={() => setAdding(true)}>
               Add role
             </button>
@@ -90,19 +114,7 @@ export function RolesPanel() {
         <LegacyKeysNotice />
         {adding && <AddRoleDialog onClose={() => setAdding(false)} />}
 
-        {roles.length === 0 ? (
-          <div className="stack">
-            <p className="muted">
-              No roles yet. Add one (a new or imported EOA, a relayer, a Safe or a contract), then enable it
-              as a module.
-            </p>
-            <Notice>
-              Roles are stored in this browser for this address of the app ({window.location.origin}). Roles
-              made on another address (another deployment or preview) are not here: export them there, then
-              import the file here.
-            </Notice>
-          </div>
-        ) : (
+        {entries.length > 0 && (
           <div className="table-scroll">
             <table className="roles-table">
               <thead>
@@ -114,24 +126,85 @@ export function RolesPanel() {
                 </tr>
               </thead>
               <tbody>
-                {roles.map((role) => (
-                  <RoleRow
-                    key={role.address}
-                    role={role}
-                    eth={balances.data?.[role.address]?.eth}
-                    enabled={state ? isModuleEnabled(state, role.address) : undefined}
-                  />
-                ))}
+                {entries.map((e) =>
+                  e.role ? (
+                    <RoleRow
+                      key={e.address}
+                      role={e.role}
+                      signer={e.signer}
+                      eth={balances.data?.[e.address]?.eth}
+                      enabled={state ? isModuleEnabled(state, e.address) : undefined}
+                    />
+                  ) : (
+                    <SignerRow key={e.address} address={e.address} index={e.signer!} />
+                  ),
+                )}
               </tbody>
             </table>
           </div>
+        )}
+        {roles.length === 0 && (
+          <Notice
+            title="No roles yet"
+            more={
+              <>
+                Roles are stored in this browser for this address of the app ({window.location.origin}). Roles
+                made on another address (another deployment or preview) are not here: export them there, then
+                import the file here.
+              </>
+            }
+          >
+            Add one (a new or imported EOA, a relayer, a Safe or a contract), then enable it as a module or
+            make it a signer.
+          </Notice>
         )}
       </Card>
     </>
   )
 }
 
-function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: boolean }) {
+/** "Signer · multisig": an owner of the Safe, part of the owners' (multisig) path. */
+const SignerBadge = () => (
+  <Tooltip content={GLOSSARY.signer}>
+    <Badge tone="ok">Signer · multisig</Badge>
+  </Tooltip>
+)
+
+/** A signer with no key in this browser: it signs in Safe{Wallet}, there is nothing to do here. */
+function SignerRow({ address, index }: { address: Address; index: number }) {
+  return (
+    <tr>
+      <td>
+        <div className="row">
+          <strong>Signer {index + 1}</strong>
+          <SignerBadge />
+        </div>
+        <AddressView address={address} name="" full />
+        <div className="muted small">Signs in Safe{'{Wallet}'}</div>
+      </td>
+      <td>
+        <span className="muted">-</span>
+      </td>
+      <td>
+        <span className="muted">-</span>
+      </td>
+      <td colSpan={5} />
+    </tr>
+  )
+}
+
+function RoleRow({
+  role,
+  signer,
+  eth,
+  enabled,
+}: {
+  role: Role
+  /** Index among the Safe's owners, when the role is one. */
+  signer?: number
+  eth?: bigint
+  enabled?: boolean
+}) {
   const { safe, state } = useSandbox()
   const [revealed, setRevealed] = useState<Hex>()
   const [revealError, setRevealError] = useState<string>()
@@ -143,7 +216,7 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
   const relayer = kind === 'relayer'
   const keyed = hasLocalKey(role)
   const executor = useAsync(() => resolveExecutor(role), `${role.address}:${kind}`)
-  const isSigner = !!state?.owners.some((o) => isAddressEqual(o, role.address))
+  const isSigner = signer !== undefined
 
   const toggleKey = async () => {
     setRevealError(undefined)
@@ -161,11 +234,12 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
         <div className="row">
           <strong>{role.label}</strong>
           <Tag tone={kind === 'eoa' ? 'neutral' : 'info'}>{KIND_LABELS[kind]}</Tag>
-          {relayer && <Badge>relayer</Badge>}
+          {isSigner && <SignerBadge />}
         </div>
         <AddressView address={role.address} name="" full />
         {!keyed && executor.data && <ExecutorNote executor={executor.data} />}
         {relayer && <div className="muted small">Only pays gas to send what others signed.</div>}
+        {isSigner && kind === 'eoa' && <div className="muted small">Signs owner transactions here</div>}
         {showKey && key && (
           // Truncated so the revealed key never widens the column; copy still yields the full key.
           <div className="secret">
@@ -197,12 +271,6 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
           <Badge tone="ok">enabled</Badge>
         ) : (
           <Badge>not enabled</Badge>
-        )}
-        {isSigner && (
-          <>
-            {' '}
-            <Badge tone="ok">signer</Badge>
-          </>
         )}
       </td>
       {/* One cell per action so buttons line up across rows. */}
@@ -293,59 +361,4 @@ function ExecutorNote({ executor }: { executor: Executor }) {
 /** Display name of a signer: its local role, else "Signer N". */
 export function signerName(owner: Address, index: number, roles: readonly Role[]): string {
   return roles.find((r) => isAddressEqual(r.address, owner))?.label ?? `Signer ${index + 1}`
-}
-
-/**
- * The Safe's signers (owners): the multisig path. A signer whose key is a local role can sign owner
- * transactions in this app (Act as a role → Owners, the Queue); the others sign in Safe{Wallet}.
- */
-function SignersCard({ roles }: { roles: readonly Role[] }) {
-  const { state } = useSandbox()
-  if (!state) return null
-  const local = state.owners.filter((o) =>
-    roles.some((r) => roleKind(r) === 'eoa' && isAddressEqual(r.address, o)),
-  ).length
-  return (
-    <Card
-      title={
-        <span className="row">
-          Signers
-          <InfoTip>
-            The owners of this Safe: together they form the multisig path ({state.threshold} signature
-            {state.threshold === 1 ? '' : 's'} needed). A signer whose key is a local role signs here; the
-            others sign in Safe{'{Wallet}'}. To test the owner path from this app, add an EOA role and click
-            Make signer.
-          </InfoTip>
-        </span>
-      }
-      actions={
-        <span className="muted small">
-          {state.threshold}-of-{state.owners.length} · {local} local key{local === 1 ? '' : 's'}
-        </span>
-      }
-    >
-      <ul className="plain stack">
-        {state.owners.map((owner, i) => {
-          const role = roles.find((r) => roleKind(r) === 'eoa' && isAddressEqual(r.address, owner))
-          return (
-            <li key={owner} className="row wrap">
-              <strong>{signerName(owner, i, roles)}</strong>
-              <AddressView address={owner} name="" full />
-              {role ? (
-                <Badge tone="ok">local key: signs here</Badge>
-              ) : (
-                <Badge>signs in Safe{'{Wallet}'}</Badge>
-              )}
-            </li>
-          )
-        })}
-      </ul>
-      {local < state.threshold && (
-        <p className="muted small">
-          This app holds {local} of the {state.threshold} signature{state.threshold === 1 ? '' : 's'} needed:
-          owner transactions go through Safe{'{Wallet}'}. Make signer on an EOA role lets the app sign too.
-        </p>
-      )}
-    </Card>
-  )
 }

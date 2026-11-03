@@ -2,24 +2,34 @@ import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import { deploySafe, execAsOwners } from '../fixtures/safe'
 import { expectEvent } from '../helpers'
+import { ZeroAddress } from 'ethers'
 import {
   HOUR,
+  Kind,
+  Mask,
   OWNERS,
+  Op,
   SEL,
   T,
   addrOf,
   allow,
   anyCall,
+  approve,
   attach,
+  attachmentId,
   call,
+  configureCall,
   deployWorld,
+  detach,
   execModule,
   execOwners,
+  expectConfigurationFailed,
   expectPolicyDenied,
   expectPolicyError,
   install,
   onContract,
   onFunction,
+  safeCall,
   scheduleModule,
   scheduleOwners,
   timelockSettings,
@@ -142,5 +152,142 @@ describe('Story: another Safe cancels queued transactions (Spark)', () => {
         [who.address],
       )
     }
+  })
+
+  describe('rev 4: a 72 h delay on USDC.transfer alone, the escape routes covered (review B1)', () => {
+    const H72 = 3n * T
+    /** Owners: no owner-wide delay; the transfer 72 h with guardian G and spark as canceller, and the routes. */
+    /**
+     * The "Delay on one function" shape: the narrow 72 h with G and spark, and the three route covers,
+     * G on them too (`guardOnCovers`, the default): the covers are what the owners' `configure` matches.
+     */
+    async function narrowWorld(guardOnCovers = true) {
+      const w = await deployWorld()
+      const spark = await deploySafe([w.newOwner2], 1, { infra: w.infra })
+      const cover = timelockSettings({ delay: H72, guardians: guardOnCovers ? [w.guardian.address] : [] })
+      const routes = [
+        attach(onContract(OWNERS, w.safeAddress), w.timelock, cover),
+        attach(onFunction(OWNERS, w.engineAddress, SEL.configure), w.timelock, cover),
+        attach(anyCall(OWNERS), w.timelock, cover, Mask.DELEGATECALL),
+      ]
+      const narrow = attach(
+        onFunction(OWNERS, w.tokenAddress, SEL.transfer),
+        w.timelock,
+        timelockSettings({
+          delay: H72,
+          guardians: [w.guardian.address],
+          cancellers: [await spark.getAddress()],
+        }),
+      )
+      return { w, spark, routes, narrow }
+    }
+
+    it('each missing route cover is named; with the three the configuration is accepted', async () => {
+      const { w, routes, narrow } = await narrowWorld()
+      const missing = [
+        [ZeroAddress, '0x00000000', Mask.DELEGATECALL],
+        [w.safeAddress, SEL.setGuard, Mask.CALL],
+        [w.engineAddress, SEL.configure, Mask.CALL],
+      ]
+      for (const [i, args] of [
+        [2, missing[0]],
+        [0, missing[1]],
+        [1, missing[2]],
+      ] as const) {
+        await expectConfigurationFailed(
+          install(w, [allow(anyCall(OWNERS)), narrow, ...routes.filter((_, j) => j !== i)]),
+          w,
+          w.timelock,
+          'TimelockNotCoveringConfiguration',
+          [...args, H72],
+        )
+      }
+      await install(w, [allow(anyCall(OWNERS)), narrow, ...routes])
+    })
+
+    it('the guardian stops the removal of the delay only through the configure cover (review rev 4, fable S1)', async () => {
+      // Without G on the covers: G freezes the narrow delay, the owners' detach of it runs at 72 h anyway.
+      const bare = await narrowWorld(false)
+      const narrowScope = onFunction(OWNERS, bare.w.tokenAddress, SEL.transfer)
+      const dropOf = (w: typeof bare.w) => configureCall(w, [detach(narrowScope, Kind.POLICY, w.timelock)])
+      let w = bare.w
+      await install(w, [allow(anyCall(OWNERS)), bare.narrow, ...bare.routes])
+      await scheduleOwners(w, dropOf(w))
+      await w.timelock
+        .connect(w.guardian)
+        .freeze(w.engineAddress, w.safeAddress, [attachmentId(narrowScope, Kind.POLICY, addrOf(w.timelock))])
+      await time.increase(H72)
+      await execOwners(w, dropOf(w))
+      await execOwners(w, transfer(w, w.attacker.address, usdc(1)))
+      // With G on the covers (the template's shape): G freezes the configure cover and the detach waits.
+      const guarded = await narrowWorld()
+      w = guarded.w
+      await install(w, [allow(anyCall(OWNERS)), guarded.narrow, ...guarded.routes])
+      await scheduleOwners(w, dropOf(w))
+      const cfg = attachmentId(
+        onFunction(OWNERS, w.engineAddress, SEL.configure),
+        Kind.POLICY,
+        addrOf(w.timelock),
+      )
+      await w.timelock.connect(w.guardian).freeze(w.engineAddress, w.safeAddress, [cfg])
+      await time.increase(H72)
+      await expectPolicyDenied(execOwners(w, dropOf(w)), w, w.timelock, 'AttachmentFrozen')
+    })
+
+    it('approve, ETH and other calls are instant; transfers, Safe admin, configure and DELEGATECALLs wait 72 h', async () => {
+      const { w, spark, routes, narrow } = await narrowWorld()
+      await install(w, [allow(anyCall(OWNERS)), narrow, ...routes])
+      await execOwners(w, call(w.vendorA.address, '0x', 1n))
+      await execOwners(w, approve(w, w.vendorA.address, 1n))
+      await expectPolicyDenied(
+        execOwners(w, transfer(w, w.vendorA.address, 1n)),
+        w,
+        w.timelock,
+        'NotScheduled',
+      )
+      for (const [fn, args] of [
+        ['setGuard', [ZeroAddress]],
+        ['setModuleGuard', [ZeroAddress]],
+        ['enableModule', [w.attacker.address]],
+        ['disableModule', [OWNERS, w.attacker.address]],
+        ['setFallbackHandler', [w.attacker.address]],
+        ['addOwnerWithThreshold', [w.attacker.address, 1]],
+      ] as const)
+        await expectPolicyDenied(execOwners(w, safeCall(w, fn, [...args])), w, w.timelock, 'NotScheduled')
+      const drop = configureCall(w, [
+        detach(onFunction(OWNERS, w.tokenAddress, SEL.transfer), Kind.POLICY, w.timelock),
+      ])
+      await expectPolicyDenied(execOwners(w, drop), w, w.timelock, 'NotScheduled')
+      // A DELEGATECALL needs an exact Allow: granting it is a configure (72 h), then the call waits 72 h too.
+      const target = w.attacker.address
+      const grant = configureCall(w, [allow(onFunction(OWNERS, target, '0xdeadbeef'), Mask.DELEGATECALL)])
+      await scheduleOwners(w, grant)
+      await time.increase(H72)
+      await execOwners(w, grant)
+      await expectPolicyDenied(
+        execOwners(w, { to: target, data: '0xdeadbeef', operation: Op.DELEGATECALL }),
+        w,
+        w.timelock,
+        'NotScheduled',
+      )
+      // A scheduled transfer runs after 72 h; the spark Safe can cancel one.
+      const pay = transfer(w, w.vendorB.address, 5n)
+      await scheduleOwners(w, pay)
+      await time.increase(H72)
+      await execOwners(w, pay)
+      expect(await w.token.balanceOf(w.vendorB.address)).to.equal(5n)
+      const steal = transfer(w, w.attacker.address, usdc(50_000))
+      const hash = await scheduleOwners(w, steal)
+      await execAsOwners(
+        spark,
+        call(
+          addrOf(w.timelock),
+          w.timelock.interface.encodeFunctionData('cancel', [w.engineAddress, w.safeAddress, hash]),
+        ),
+        [w.newOwner2],
+      )
+      await time.increase(H72)
+      await expectPolicyDenied(execOwners(w, steal), w, w.timelock, 'NotScheduled', [hash])
+    })
   })
 })

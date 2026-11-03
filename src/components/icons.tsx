@@ -87,3 +87,39 @@ export const EyeOffIcon = () => (
     <path d="M2 2l20 20" />
   </Icon>
 )
+
+export const WarningIcon = () => (
+  <Icon>
+    <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+    <path d="M12 9v4M12 17h.01" />
+  </Icon>
+)
+
+export const ErrorIcon = () => (
+  <Icon>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M15 9l-6 6M9 9l6 6" />
+  </Icon>
+)
+
+export const CheckCircleIcon = () => (
+  <Icon>
+    <circle cx="12" cy="12" r="10" />
+    <path d="m8 12 3 3 5-6" />
+  </Icon>
+)
+
+/** A quarter-open ring; spun by the `.spinner` class. */
+export const SpinnerIcon = () => (
+  <span className="spinner" aria-hidden="true">
+    <Icon>
+      <path d="M21 12a9 9 0 1 1-6.2-8.6" />
+    </Icon>
+  </span>
+)
+
+export const ChevronIcon = () => (
+  <Icon>
+    <path d="m6 9 6 6 6-6" />
+  </Icon>
+)

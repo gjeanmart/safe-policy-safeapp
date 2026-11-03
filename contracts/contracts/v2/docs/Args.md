@@ -14,13 +14,16 @@ conditions on the call: who receives, who may spend, how much, which receiver. T
 `abi.encode(Settings)` with `Settings { Constraint[] constraints; bool strict }`, at most 16 constraints and 32 values
 each.
 
-| Constraint field | Meaning                                                                                                                                   |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `selector`       | The function it applies to; `0xffffffff` = every call of the attachment; `0x00000000` = empty calldata                                    |
-| `target`         | `WORD` (head word `index` of the calldata), `CALL_TO` (the call's `to`), `VALUE` (the call's value)                                       |
-| `index`          | The head word, for `WORD` only (0 is the first argument)                                                                                  |
-| `op`             | `EQ`, `NEQ` (1 value), `IN`, `NOT_IN` (1 to 32 values), `LTE`, `GTE` (1 value, unsigned), `EQ_SAFE` (no value: the word must be the Safe) |
-| `values`         | ABI words (addresses left-padded)                                                                                                         |
+| Constraint field | Meaning                                                                                                                                                         |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `selector`       | The function it applies to; `0xffffffff` = every call of the attachment; `0x00000000` = empty calldata                                                          |
+| `target`         | `WORD` (head word `index` of the calldata), `CALL_TO` (the call's `to`), `VALUE` (the call's value), `VALUE_TO` (the call's `to`, judged only when `value > 0`) |
+| `index`          | The head word, for `WORD` only (0 is the first argument)                                                                                                        |
+| `op`             | `EQ`, `NEQ` (1 value), `IN`, `NOT_IN` (1 to 32 values), `LTE`, `GTE` (1 value, unsigned), `EQ_SAFE` (no value: the word must be the Safe)                       |
+| `values`         | ABI words (addresses left-padded)                                                                                                                               |
+
+`VALUE_TO` is for native value: with selector `0xffffffff` it reads "ETH only to these destinations, whatever the
+calldata". On a zero-value call it does not apply (it never counts as applied for `strict`).
 
 `strict`: a call to which no constraint applies is denied (`NoConstraint`). An empty list must be strict (it denies
 every matched call: a carve-out).
@@ -29,9 +32,14 @@ every matched call: a carve-out).
 
 | Preset               | Constraints                                                                                                                                          |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Recipients           | `transfer` word 0 IN list; `transferFrom` word 1 IN list; empty calldata `CALL_TO` IN list                                                           |
+| Recipients           | `transfer` word 0 IN list; `transferFrom` word 1 IN list; any selector `VALUE_TO` IN list                                                            |
 | Spenders             | `approve` word 0 IN list; `approve` word 1 LTE cap                                                                                                   |
 | Receiver is the Safe | `EQ_SAFE` on the protocol's receiver word (Aave `supply` word 2, Morpho `withdraw` word 8, Uniswap `exactInputSingle` word 3, ENS `register` word 1) |
+
+Recipients reads: tokens by `transfer` / `transferFrom`, ETH by destination whenever value moves, whatever the
+calldata. Rev 3 used `CALL_TO` on empty calldata only, so ETH sent with any 4-byte calldata (`0xdeadbeef`) skipped it
+under a non-strict attachment (review rev 3, A1). Consequence: a payable protocol call (ENS `register` with value)
+under a Recipients attachment needs the protocol contract listed as a recipient, or Recipients scoped to the token.
 
 ## Who calls what, and when
 
@@ -74,7 +82,7 @@ address. The app presets are all allowlists.
 ```
 allow  (Ops, USDC.transfer)
 attach (Ops, USDC.transfer) ArgsPolicy {strict: true, constraints: [
-  transfer word 0 IN [vendorA, vendorB], transferFrom word 1 IN [...], empty calldata CALL_TO IN [...] ]}
+  transfer word 0 IN [vendorA, vendorB], transferFrom word 1 IN [...], any selector VALUE_TO IN [...] ]}
 ```
 
 Proven by `test/v2/stories/Erc20Payments.test.ts`, `Erc721.test.ts`, `Aave.test.ts`, `Morpho.test.ts`,

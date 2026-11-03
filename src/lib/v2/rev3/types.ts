@@ -1,5 +1,5 @@
 /**
- * Policy Engine V2 rev 3: pure constants mirroring `contracts/contracts/v2/libraries/Types.sol`,
+ * Policy Engine V2 (rev 3 layout, rev 4 values): pure constants mirroring `contracts/contracts/v2/libraries/Types.sol`,
  * `Scope.sol` (library `ScopeLib`), `Constants.sol` and the policy interfaces (SPEC.md §2 to §5).
  * No imports, so the contracts tests can load it: `contracts/test/v2/Scope.test.ts` checks every
  * value against the Solidity harness.
@@ -77,6 +77,13 @@ export const Selectors = {
   configure: '0xada59cb2',
   /** `IPolicy.check(Context,Call[],Match[])`: the PASS value a policy returns. */
   check: '0x45f1bacd',
+  // Safe administration: with `configure` and any DELEGATECALL, the owner-path routes a
+  // delayed owners' Timelock must cover (the covering rule, SPEC.md §5.1).
+  safeSetGuard: '0xe19a9dd9',
+  safeSetModuleGuard: '0xe068df37',
+  safeEnableModule: '0x610b5925',
+  safeDisableModule: '0xe009cfde',
+  safeSetFallbackHandler: '0xf08a0323',
 } as const satisfies Record<string, Hex>
 
 /** ArgsPolicy: a constraint with this selector applies to every call. */
@@ -86,11 +93,11 @@ export const ERC1271_MAGIC_VALUE: Hex = '0x1626ba7e'
 /** ERC-165 ids (`type(I).interfaceId`, own functions only). */
 export const InterfaceIds = {
   IPolicyGuard: '0x0f8d6033',
-  IPolicy: '0xedd49bcb',
-  ITimelockPolicy: '0xa46bc64f',
+  IPolicy: '0xcda8ff30',
+  ITimelockPolicy: '0x01a547c8',
   IArgsPolicy: '0x365878b9',
   ILimitPolicy: '0x64ad8ac4',
-  ICoSignerPolicy: '0x9c977234',
+  ICoSignerPolicy: '0x89f9635f',
   ISafenetPolicy: '0x1f1cd9d7',
 } as const satisfies Record<string, Hex>
 
@@ -99,7 +106,7 @@ export const InterfaceIds = {
 // ---------------------------------------------------------------------------------------------
 
 /** `IArgsPolicy.Target` */
-export const ArgsTarget = { WORD: 0, CALL_TO: 1, VALUE: 2 } as const
+export const ArgsTarget = { WORD: 0, CALL_TO: 1, VALUE: 2, VALUE_TO: 3 } as const
 export type ArgsTarget = (typeof ArgsTarget)[keyof typeof ArgsTarget]
 
 /** `IArgsPolicy.Op` */

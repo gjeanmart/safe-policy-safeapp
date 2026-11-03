@@ -122,7 +122,7 @@ const installV2Owners = (w: W, extra: ReturnType<typeof allow>[] = []) =>
     ...extra,
   ])
 
-describe('V1 vs V2 rev 3 (design doc §1, on real Safes 1.5.0)', () => {
+describe('V1 vs V2 (design doc §1, on real Safes 1.5.0)', () => {
   describe('§1 row 1: a narrow rule hides the fallback timelock (WA-4014)', () => {
     it('setGuard(0) under an exact Allow rule: V1 executes at once, V2 delayed (NotScheduled)', async () => {
       const w = await loadFixture(deploy)
@@ -287,7 +287,7 @@ describe('V1 vs V2 rev 3 (design doc §1, on real Safes 1.5.0)', () => {
   })
 
   describe('§1 row 4: a freeze cannot cover configuration changes', () => {
-    it('a pending malicious configuration under a deny-everything fallback: V1 applies it (drain), V2 blocked by the freeze (AttachmentFrozen)', async () => {
+    it('a pending malicious configuration under a deny-everything fallback: V1 applies it, V2 blocked by the freeze (AttachmentFrozen)', async () => {
       const w = await loadFixture(deploy)
       // V1: everything is already denied (the strongest "freeze" V1 has), yet configuration passes.
       const v1 = await deployV1(w, [v1Fallback(addrOf(w.v1p.deny))])
@@ -543,7 +543,7 @@ describe('V1 vs V2 rev 3 (design doc §1, on real Safes 1.5.0)', () => {
       return { w, v1, drainWithPermit }
     }
 
-    it('an off-chain owner signature on a permit: V1 drained, V2 refused (its install sets TokenCallbackHandler, no ERC-1271)', async () => {
+    it('an off-chain owner signature on a permit: V1 honours it, V2 refused (its install sets TokenCallbackHandler, no ERC-1271)', async () => {
       const { w, v1, drainWithPermit } = await permitWorld()
       // V1 keeps the CompatibilityFallbackHandler: it answers isValidSignature from the owners' signatures.
       await drainWithPermit(v1.safe)
@@ -562,7 +562,7 @@ describe('V1 vs V2 rev 3 (design doc §1, on real Safes 1.5.0)', () => {
       expect(await w.token.balanceOf(w.safeAddress)).to.equal(usdc(100_000))
     })
 
-    it('the documented gap: V2 installed keeping the CompatibilityFallbackHandler is drained by the same permit', async () => {
+    it('the documented gap: V2 installed keeping the CompatibilityFallbackHandler honours the same permit', async () => {
       const { w, v1, drainWithPermit } = await permitWorld(null)
       await drainWithPermit(v1.safe)
       await drainWithPermit(w.safe)

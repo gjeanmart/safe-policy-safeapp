@@ -212,6 +212,7 @@ function SettingsFields({
               <option value={String(ArgsTarget.WORD)}>an argument</option>
               <option value={String(ArgsTarget.CALL_TO)}>the target</option>
               <option value={String(ArgsTarget.VALUE)}>the native value</option>
+              <option value={String(ArgsTarget.VALUE_TO)}>the destination when value moves</option>
             </select>
           </Field>
           {Number(raw.argTarget) === ArgsTarget.WORD &&

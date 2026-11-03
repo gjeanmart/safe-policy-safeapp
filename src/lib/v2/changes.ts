@@ -9,6 +9,7 @@ import {
   zeroAddress,
 } from 'viem'
 import { policyGuardAbi } from './abi'
+import { type UncoveredRoute, uncoveredRoute } from './rev3/cover'
 import type { Attachment } from './attachments'
 import {
   POLICY_INFO,
@@ -31,11 +32,9 @@ import {
   Operation,
   type Scope,
   actorLabel,
-  anyCall,
   attachmentId,
   isAny,
   isNormalized,
-  isOwners,
   levelOf,
   normalizeOpMask,
   normalizeScope,
@@ -47,6 +46,7 @@ import {
   type PolicySettings,
   type TimelockSettings,
   decodeSettings,
+  durationLabel,
   encodeSettings,
   settingsLabel,
   validateSettings,
@@ -152,24 +152,13 @@ export const mergeChanges = (
   isAttached: (id: Hex) => boolean,
 ): Change[] => changes.reduce((acc, c) => mergeChange(acc, c, isAttached), [...draft])
 
-const isTimelockChange = (deployment: V2Deployment, c: Change) =>
-  c.kind === Kind.POLICY && policyNameOf(deployment, c.policy) === 'timelock'
-
 /**
- * The order `configure` needs: detaches first (they free slots under the per-scope cap), then
- * everything else, Timelocks on `*` before narrower ones (a narrow owners' Timelock needs a covering
- * one already attached, `TimelockNotCoveringConfiguration`).
+ * The order `configure` applies: detaches first (they free slots under the per-scope cap), then
+ * every attach in draft order. The Timelock covering rule is checked on the final configuration
+ * (`IPolicy.validate`), so the order of the Timelocks does not matter.
  */
-export function sortForApply(deployment: V2Deployment, changes: readonly Change[]): Change[] {
-  const attaches = changes.filter((c) => !c.detach)
-  const timelocks = attaches
-    .filter((c) => isTimelockChange(deployment, c))
-    .sort((a, b) => a.scope.callMatch - b.scope.callMatch)
-  return [
-    ...changes.filter((c) => c.detach),
-    ...attaches.filter((c) => !isTimelockChange(deployment, c)),
-    ...timelocks,
-  ]
+export function sortForApply(changes: readonly Change[]): Change[] {
+  return [...changes.filter((c) => c.detach), ...changes.filter((c) => !c.detach)]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -221,6 +210,7 @@ export function projectAttachments(
   return result
 }
 
+/** `index`: the change it is about, or -1 for the draft as a whole. */
 export type ChangeProblem = { index: number; message: string }
 
 /** The ids a Timelock must sit at to cover `actor`'s call to `engine.configure` (SPEC.md §5.1). */
@@ -233,36 +223,46 @@ export const configureCoverIds = (deployment: V2Deployment, actor: Address): Hex
     ),
   )
 
-/** The one Timelock id that counts as covering `actor`'s configuration: `(actor, *)` (rev 3 fix T3). */
-export const configurationCoverId = (deployment: V2Deployment, actor: Address): Hex =>
-  attachmentId(scopeKey(normalizeScope(anyCall(actor))), Kind.POLICY, deployment.policies.timelock)
-
 /**
- * `TimelockNotCoveringConfiguration`: a Timelock with `delay > 0` at OWNERS or ANY needs a Timelock
- * at that actor's `*` (`(Owners, *)`, `(ANY, *)` for ANY) with CALL in its mask and a delay at least
- * as long, attached before it or itself. A cover at `(Owners, engine.configure)` alone no longer
- * counts: it left `setGuard(0)` and other Safe admin calls faster than the delay.
+ * The Timelock covering rule (SPEC.md §5.1, `TimelockNotCoveringConfiguration`) on a final
+ * configuration: the first owner-path route (any DELEGATECALL, `engine.configure`, `Safe.setGuard`,
+ * `setModuleGuard`, `enableModule`, `disableModule`, `setFallbackHandler`) not delayed as long as the
+ * owners' longest delay, or `null`. Mirrors `TimelockPolicyFreeze.validate` (`rev3/cover.ts`, checked
+ * against the engine by the contract tests); `(ANY, *)` covers count, as on-chain.
  */
-export function coversConfiguration(
-  deployment: V2Deployment,
+export function validateTimelockCover(
   state: readonly Attachment[],
-  id: Hex,
-  actor: Address,
-  opMask: number,
-  delay: number,
-): boolean {
-  const cover = configurationCoverId(deployment, actor)
-  if (cover === id) return (opMask & OP_CALL) !== 0
-  const a = state.find((x) => x.attachmentId === cover)
-  const s = a?.settings?.policy === 'timelock' ? a.settings.settings : undefined
-  return !!a && !!s && s.delay >= delay && (a.opMask & OP_CALL) !== 0
+  context: { deployment: V2Deployment; safe: Address },
+): UncoveredRoute | null {
+  const { deployment, safe } = context
+  const covers = state.flatMap((a) =>
+    a.kind === Kind.POLICY &&
+    isAddressEqual(a.policy, deployment.policies.timelock) &&
+    a.settings?.policy === 'timelock'
+      ? [{ scope: a.scope, opMask: a.opMask, delay: a.settings.settings.delay }]
+      : [],
+  )
+  return uncoveredRoute(covers, deployment.engine, safe)
 }
+
+/** Where the "Admin delay" template puts each route's cover. */
+const ROUTE_COVER: Record<string, string> = {
+  'any DELEGATECALL': '(Owners, any call) with DELEGATECALL',
+  'engine.configure': '(Owners, engine.configure)',
+}
+
+/** The sentence for an uncovered route. */
+export const uncoveredRouteMessage = (route: UncoveredRoute): string =>
+  `${route.name.charAt(0).toUpperCase()}${route.name.slice(1)} must be delayed at least ${durationLabel(route.delay)}, the owners' longest delay: otherwise ` +
+  `the owners could remove or bypass that delay faster than it delays. Add a Timelock of ` +
+  `${durationLabel(route.delay)} at ${ROUTE_COVER[route.name] ?? '(Owners, Safe.*)'} (the "Admin delay" template does).`
 
 /**
  * Every configure-time rule of the engine (SPEC.md §3.2) and of the known policies, applied in order
  * on a projection: `InvalidScope`, `AllowNotPerActor`, `DelegateCallNotExact`, `InvalidOpMask`,
- * `InvalidPolicy` (shape only: the engine checks ERC-165), the policies' `InvalidSettings` and
- * `TimelockNotCoveringConfiguration`, `TooManyAttachments`, `NotAttached`.
+ * `InvalidPolicy` (shape only: the engine checks ERC-165), the policies' `InvalidSettings`,
+ * `TooManyAttachments`, `NotAttached`; then, on the final projection, the Timelock covering rule
+ * (`TimelockNotCoveringConfiguration`, reported with `index: -1`, the draft as a whole).
  */
 export function validateChanges(
   current: readonly Attachment[],
@@ -295,16 +295,6 @@ export function validateChanges(
           const value = decodeSettings(name, change.settings)
           for (const message of validateSettings(value, { safe: context.safe, actor: scope.actor }))
             add(message)
-          if (
-            value.policy === 'timelock' &&
-            value.settings.delay > 0 &&
-            (isAny(scope.actor) || isOwners(scope.actor)) &&
-            !coversConfiguration(deployment, state, id, scope.actor, opMask, value.settings.delay)
-          )
-            add(
-              `A ${actorLabel(scope.actor)} Timelock needs one at least as long at (${actorLabel(scope.actor)}, any call) ` +
-                '(attach it first): otherwise the owners could detach it, or leave the engine, faster than it delays',
-            )
         } catch {
           add('Settings do not decode')
         }
@@ -324,6 +314,9 @@ export function validateChanges(
       add(`At most ${MAX_ATTACHMENTS_PER_SCOPE} attachments per scope`)
     state = projectAttachments(state, [change], deployment)
   })
+  // Checked once, on the final configuration, as `configure` does after the batch.
+  const uncovered = validateTimelockCover(state, context)
+  if (uncovered) problems.push({ index: -1, message: uncoveredRouteMessage(uncovered) })
   return problems
 }
 
@@ -407,7 +400,7 @@ export function installCalls(
   const setHandler =
     fallbackHandler !== null && !(currentHandler && isAddressEqual(currentHandler, fallbackHandler))
   return [
-    configureCall(deployment.engine, sortForApply(deployment, [...detaches, ...changes])),
+    configureCall(deployment.engine, sortForApply([...detaches, ...changes])),
     ...(setHandler ? [safeCalls.setFallbackHandler(safe, fallbackHandler)] : []),
     safeCalls.setModuleGuard(safe, deployment.engine),
     safeCalls.setGuard(safe, deployment.engine),

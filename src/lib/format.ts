@@ -27,3 +27,12 @@ export function formatTime(ms: number): string {
     `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   )
 }
+
+/** Local time of a unix timestamp (seconds) as `HH:mm`, with the date when it is not today. */
+export function formatClock(seconds: bigint | number): string {
+  const d = new Date(Number(seconds) * 1000)
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return d.toDateString() === new Date().toDateString()
+    ? time
+    : `${formatTime(d.getTime()).slice(0, 10)} ${time}`
+}

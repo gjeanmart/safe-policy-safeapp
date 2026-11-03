@@ -7,6 +7,7 @@ import {
   SELECTORS,
   SPEND_SELECTORS,
   type V2Deployment,
+  selectorName,
 } from './policies'
 import {
   CallMatch,
@@ -24,7 +25,7 @@ import {
 import { type LabelContext, durationLabel } from './settings'
 
 /**
- * Lint over a (projected) rev 3 configuration (DESIGN §9.6, 16 rules). Pure: give it the
+ * Lint over a (projected) V2 configuration (DESIGN §9.6 and rev 4 §7, 19 rules). Pure: give it the
  * attachments after the draft (`projectAttachments`) and the Safe's modules. `block` findings need
  * an explicit confirmation in the UI; `warn` ones are advice. The engine's own configure rules are
  * not repeated here: `validateChanges` refuses those.
@@ -53,6 +54,9 @@ export type LintRule =
   | 'canceller-covers-owners'
   | 'delay-below-cooldown'
   | 'self-oversight'
+  | 'narrow-delay-other-actor'
+  | 'narrow-delay-spend-shape'
+  | 'configure-cover-unguarded'
 
 export type LintFinding = { rule: LintRule; severity: LintSeverity; message: string; attachmentIds: Hex[] }
 
@@ -188,9 +192,11 @@ export function lint(input: LintInput): LintFinding[] {
       )
   }
 
-  // 9. No way back: a co-signer reaches the owners' configure and no recovery can configure.
-  const ownersConfigCoSigners = attachments.filter(
-    (a) => a.policyName === 'coSigner' && scopeCovers(a.scope, OWNERS, engine, SELECTORS.configure),
+  // 9. No way back: a co-signer or Safenet reaches the owners' configure and no module can
+  //    configure free of it: if that service disappears, nothing can be repaired.
+  const isService = (a: Attachment) => a.policyName === 'coSigner' || a.policyName === 'safenet'
+  const ownersConfigServices = attachments.filter(
+    (a) => isService(a) && scopeCovers(a.scope, OWNERS, engine, SELECTORS.configure),
   )
   const recoveryCanConfigure = allows.some(
     (a) =>
@@ -200,16 +206,15 @@ export function lint(input: LintInput): LintFinding[] {
       isAddressEqual(a.scope.to, engine) &&
       a.scope.selector.toLowerCase() === SELECTORS.configure &&
       !attachments.some(
-        (c) =>
-          c.policyName === 'coSigner' && scopeCovers(c.scope, a.scope.actor, engine, SELECTORS.configure),
+        (c) => isService(c) && scopeCovers(c.scope, a.scope.actor, engine, SELECTORS.configure),
       ),
   )
-  if (ownersConfigCoSigners.length > 0 && !recoveryCanConfigure)
+  if (ownersConfigServices.length > 0 && !recoveryCanConfigure)
     add(
       'no-way-back',
       'block',
-      'A co-signer must approve every configuration change and no recovery module can configure without it: if the co-signer disappears, nothing can ever be changed again. Add a Recovery with engine.configure.',
-      ownersConfigCoSigners,
+      `${ownersConfigServices.some((a) => a.policyName === 'safenet') ? 'Safenet' : 'A co-signer'} must approve every configuration change and no recovery module can configure without it: if that service disappears, nothing can ever be changed again. Add a Recovery with engine.configure.`,
+      ownersConfigServices,
     )
 
   // 10. A Deny covering configure locks the configuration.
@@ -353,6 +358,74 @@ export function lint(input: LintInput): LintFinding[] {
             `${who(subject)} is its own ${role} at ${at(a)}: ${role === 'approver' ? 'it approves its own transactions, the co-signer checks nothing' : 'it can lift any freeze put on it, nobody can stop it'}. List someone else.`,
             [a],
           )
+  }
+
+  // 17 and 18. A narrow owners' delay (on one contract or function), and what it does not bound.
+  const delayed = (actor: Address, to: Address, selector: Hex | undefined, need: number) =>
+    attachments.some((g) => {
+      const t = timelockOf(g)
+      if (!t || t.delay < need) return false
+      if (!isAny(g.scope.actor) && !isAddressEqual(g.scope.actor, actor)) return false
+      if (g.scope.callMatch === CallMatch.ANY) return true
+      if (!isAddressEqual(g.scope.to, to)) return false
+      return g.scope.callMatch === CallMatch.CONTRACT || g.scope.selector.toLowerCase() === selector
+    })
+  for (const a of attachments) {
+    const t = timelockOf(a)
+    if (!t || t.delay <= 0 || !reachesOwners(a) || a.scope.callMatch === CallMatch.ANY) continue
+    const selector =
+      a.scope.callMatch === CallMatch.FUNCTION ? (a.scope.selector.toLowerCase() as Hex) : undefined
+    // 17. Another actor granted the same call without a delay as long: the owners wait, it does not.
+    const others = allows.filter(
+      (g) =>
+        !isOwners(g.scope.actor) &&
+        (g.scope.callMatch === CallMatch.ANY ||
+          (isAddressEqual(g.scope.to, a.scope.to) &&
+            (g.scope.callMatch === CallMatch.CONTRACT ||
+              selector === undefined ||
+              g.scope.selector.toLowerCase() === selector))) &&
+        !delayed(g.scope.actor, a.scope.to, selector, t.delay),
+    )
+    if (others.length > 0)
+      add(
+        'narrow-delay-other-actor',
+        'warn',
+        `${at(a)} waits ${durationLabel(t.delay)}, but ${[...new Set(others.map((g) => who(g.scope.actor)))].join(', ')} may make the same call with no delay that long: the owners' delay does not bound what another actor (a module they control) can do at once.`,
+        [a, ...others],
+      )
+    // 18. One spend shape of a token delayed, the others not: approve + transferFrom moves the same tokens.
+    if (selector && SPEND_SELECTORS.includes(selector)) {
+      const open = SPEND_SELECTORS.filter(
+        (f) => f !== selector && !delayed(a.scope.actor, a.scope.to, f, t.delay),
+      )
+      if (open.length > 0)
+        add(
+          'narrow-delay-spend-shape',
+          'warn',
+          `${at(a)} waits ${durationLabel(t.delay)}, but ${open.map((f) => selectorName(f) ?? f).join(', ')} of the same token do not: they move the same tokens around the delay. Delay all four (the "Delay on one function" template does).`,
+          [a],
+        )
+    }
+  }
+
+  // 19. An owners' delay with guardians, while the Timelocks matching the owners' engine.configure
+  //     list none of them: a freeze of that delay does not stop the configure that removes it
+  //     (review rev 4, fable S1). Block when it is the owners' longest delay.
+  const ownerDelays = attachments.filter((a) => reachesOwners(a) && (timelockOf(a)?.delay ?? 0) > 0)
+  const longest = Math.max(0, ...ownerDelays.map((a) => timelockOf(a)!.delay))
+  const configureGuardians = attachments
+    .filter((a) => a.opMask & OP_CALL && scopeCovers(a.scope, OWNERS, engine, SELECTORS.configure))
+    .flatMap((a) => timelockOf(a)?.guardians ?? [])
+  for (const a of ownerDelays) {
+    const t = timelockOf(a)!
+    if (t.guardians.length === 0) continue
+    if (t.guardians.some((g) => configureGuardians.some((c) => isAddressEqual(c, g)))) continue
+    add(
+      'configure-cover-unguarded',
+      t.delay >= longest ? 'block' : 'warn',
+      `${t.guardians.map(who).join(', ')} guard ${at(a)}, but no Timelock on the owners' engine.configure lists them: a freeze of that delay does not stop the configure that removes it. Add them as guardians of the (Owners, engine.configure) or (Owners, any call) Timelock.`,
+      [a],
+    )
   }
 
   return findings

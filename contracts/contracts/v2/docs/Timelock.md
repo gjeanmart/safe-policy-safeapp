@@ -1,7 +1,7 @@
 # TimelockPolicy: delay, freeze, cancel
 
 Source: `policies/TimelockPolicy.sol`, `policies/TimelockPolicyQueue.sol` (schedule, cancel) and
-`policies/TimelockPolicyFreeze.sol` (freeze, lift), both reached by DELEGATECALL from the policy's address; interface
+`policies/TimelockPolicyFreeze.sol` (freeze, lift, the covering rule), both reached by DELEGATECALL from the policy's address; interface
 `interfaces/policies/ITimelockPolicy.sol`, SPEC §5.1. Research prototype, unaudited. Deployment: the queue, then the
 freeze module `TimelockPolicyFreeze(F, C)`, then `TimelockPolicy(F, C, queue, freezer)` (it checks the freezer's F and
 C match).
@@ -9,7 +9,7 @@ C match).
 ## What it does
 
 A transaction matched by a Timelock attachment runs only if it was scheduled on-chain at least `delay` before. The
-same attachment can be frozen by its guardians, each guardian for at most F per F + C, lifted early by its guardians
+same attachment can be frozen by its guardians, an actor's attachments at most F per F + C whoever freezes, lifted early by its guardians
 or lifters, and a schedule can be cancelled by its cancellers, by the module that made it, or by the owners. One policy, three jobs:
 
 | Settings                            | Use                                                                                |
@@ -18,6 +18,7 @@ or lifters, and a schedule can be cancelled by its cancellers, by the module tha
 | `delay = 0`, guardians              | A kill switch: nothing waits, the guardian can stop the actor at once (Ops, Agent) |
 | `delay = R`, no guardians, a window | Recovery's delay: nobody can freeze it                                             |
 | narrow scope, cancellers            | Spark: another Safe can cancel queued calls to one contract                        |
+| route covers ("Admin delay")        | `(Owners, Safe.*)`, `(Owners, engine.configure)`, `(Owners, *)` DELEGATECALL only  |
 
 ## Settings
 
@@ -34,25 +35,36 @@ or lifters, and a schedule can be cancelled by its cancellers, by the module tha
 No zero address, no duplicate, never the Safe itself (`InvalidSettings`). Immutables of the deployment: `MAX_FREEZE`
 (F, 7 days) and `COOLDOWN` (C, 12 hours).
 
-Configuration invariant: a delay at actor `OWNERS` or `ANY` needs an attached Timelock of this policy at `(actor, *)`
-or `(ANY, *)`, at least as long, with CALL in its op mask (the new attachment counts when it is that one). Otherwise
-`configure` reverts `TimelockNotCoveringConfiguration`. A cover at `engine.*` or `engine.configure` does not count:
-it would not delay `setGuard(0)` or `setModuleGuard(0)`, which remove the whole engine. So the owners can never remove
-a delay faster than the delay itself, and a narrow owners' delay always sits under an owners-wide one at least as long.
-Module attachments are exempt: the owners remove them through their own delay. Order matters inside one `configure`:
-attach the `(actor, *)` cover before the narrow one.
+Covering rule, checked by `validate` after every `configure` that touches this policy, on the final configuration
+(order inside the batch does not matter). Let D be the longest delay of this policy's attachments at actor `OWNERS` or
+`ANY`. Each owner-path route out of a policy must be delayed at least D by an attachment of this policy that matches it,
+with the route's operation in its op mask:
+
+| Route                                                                                    | Covered by (examples)                                             |
+| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| any DELEGATECALL                                                                         | `(Owners, *)` or `(ANY, *)` with DELEGATECALL in the mask, only   |
+| `engine.configure`                                                                       | `(Owners, *)`, `(Owners, engine.*)`, `(Owners, engine.configure)` |
+| `Safe.setGuard`, `setModuleGuard`, `enableModule`, `disableModule`, `setFallbackHandler` | `(Owners, *)`, `(Owners, Safe.*)`, or each exact function         |
+
+Otherwise `configure` reverts `PolicyConfigurationFailed(timelock, TimelockNotCoveringConfiguration(to, selector, op,
+delay))`, naming the first uncovered route (`to == 0` for any DELEGATECALL) and D. An `(Owners, *)` Timelock with the
+default mask covers everything by itself. Lowering or detaching a cover while a longer delay stands is refused;
+detaching both in one batch passes. Module attachments are exempt: the owners remove them through their own delay.
+Owner management is not a route (new owners are delayed the same); `(Owners, Safe.*)` delays it anyway. A Timelock of
+another deployment never counts. What a narrow delay still does not bound (other actors, other spend shapes of the same
+token, ETH, an ERC-1271 handler kept at install): SPEC "Administration and emergency exits".
 
 ## Who calls what, and when
 
-| Function                                              | Who                                                                                                    | When                                                                                                                                                                                      |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schedule(engine, safe, safeTx, signatures)`          | anyone relaying the owners' threshold signatures over the Safe transaction                             | before an owner transaction; the nonce is part of the hash, so schedule at a future nonce when other transactions come first                                                              |
-| `scheduleModuleTx(engine, safe, to, value, data, op)` | the module itself                                                                                      | before its own call                                                                                                                                                                       |
-| `cancel(engine, safe, txHash)`                        | a canceller of a matched attachment (never on a configuration change), or the module that scheduled it | any time before execution                                                                                                                                                                 |
-| `cancelAsOwners(engine, safe, txHash, signatures)`    | anyone relaying `threshold` owner signatures over `cancelDigest`                                       | owner-path schedules only (`NotOwnersQueue` for a module's)                                                                                                                               |
-| `freeze(engine, safe, ids[])`                         | a guardian of every listed id                                                                          | frozen until the end of the guardian's window (F from its first freeze); frozen or cooling ids, and every id while the guardian cools down, are skipped (`FreezeSkipped`), never extended |
-| `lift(engine, safe, id)`                              | a guardian or lifter of the id                                                                         | ends the freeze, starts the id's cooldown C; the guardian that froze it, if left with nothing frozen, starts its own cooldown                                                             |
-| `check`                                               | the engine                                                                                             | during the guarded transaction; consumes the schedule                                                                                                                                     |
+| Function                                              | Who                                                                                                    | When                                                                                                                                                                                          |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schedule(engine, safe, safeTx, signatures)`          | anyone relaying the owners' threshold signatures over the Safe transaction                             | before an owner transaction; the nonce is part of the hash, so schedule at a future nonce when other transactions come first                                                                  |
+| `scheduleModuleTx(engine, safe, to, value, data, op)` | the module itself                                                                                      | before its own call                                                                                                                                                                           |
+| `cancel(engine, safe, txHash)`                        | a canceller of a matched attachment (never on a configuration change), or the module that scheduled it | any time before execution                                                                                                                                                                     |
+| `cancelAsOwners(engine, safe, txHash, signatures)`    | anyone relaying `threshold` owner signatures over `cancelDigest`                                       | owner-path schedules only (`NotOwnersQueue` for a module's)                                                                                                                                   |
+| `freeze(engine, safe, ids[])`                         | a guardian of every listed id                                                                          | frozen until the end of the actor's window (F from the first freeze of any of its ids); frozen or cooling ids, and every id of a cooling actor, are skipped (`FreezeSkipped`), never extended |
+| `lift(engine, safe, id)`                              | a guardian or lifter of the id                                                                         | ends the freeze, starts the id's cooldown C; if none of the actor's ids is left frozen, the actor's window closes and its cooldown starts                                                     |
+| `check`                                               | the engine                                                                                             | during the guarded transaction; consumes the schedule                                                                                                                                         |
 
 ## The check (merge over every matched attachment)
 
@@ -81,21 +93,26 @@ A configuration change (`isConfiguration`) is the owners' way out, so a listed c
 `cancelAsOwners`, or the module that scheduled it). A canceller on `(Owners, *)` therefore vetoes payments one by one,
 never the `configure` that removes it.
 
-## Freeze windows: one guardian, at most F per F + C
+## Freeze windows: one actor, at most F per F + C
 
-Freezes are bounded per guardian and Safe, not only per attachment. A guardian's first freeze opens a window that ends
-F later; every freeze it makes while the window is open ends with the window (it joins it, never extends it). When the
-window ends, or when lifts leave the guardian nothing frozen, the guardian cannot freeze anything in that Safe for C
-(`guardianWindow(engine, safe, guardian)` shows `end`, `cooldownUntil` and the count of ids it still holds). Per
-attachment, a frozen or cooling id is skipped. So one guardian freezes any attachment at most F per F + C, however
-many attachments it guards: staggering two attachments that both match the owners' `configure` (review rev 3, P3)
-ends at the first window's end. Two colluding guardians can chain their windows (up to 2F for two attachments): list
-one guardian per Safe, or the same one everywhere.
+Freezes are bounded per actor and Safe, whoever the guardian. The first freeze of any of an actor's attachments opens
+the actor's window, ending F later; every later freeze of that actor's attachments, by any guardian, ends with the
+window (it joins it, never extends it). When the window ends, or when lifts leave none of the actor's attachments
+frozen, none of them can be frozen for C (`actorWindow(engine, safe, actor)` shows `end`, `cooldownUntil` and the
+count of ids frozen in the window). Per attachment, a frozen or cooling id is skipped. A transaction of an actor
+matches only that actor's and `ANY`'s attachments, and `ANY` attachments have no guardians, so the actor's
+transactions, the owners' `configure` included, are blocked by freezes at most F per F + C, with any number of
+colluding guardians, per TimelockPolicy deployment: a second deployment attached at the same actor keeps its own window
+(the app refuses policies outside its deployment) (review rev 3, A4: two guardians alternating over two attachments matching `configure` used to
+block the owners indefinitely).
+
+The trade-off: a rogue or hasty guardian's freeze uses up the actor's window. Honest guardians cannot add time after
+it, nor freeze during the C that follows; a lift by recovery closes the window for everyone.
 
 Keep the owners' delay T above the cooldown C: after a window ends, anything an attacker holding the owner keys
 schedules is still pending when the guardian can freeze again (C < T), and that freeze voids it.
 
-Freeze state is keyed by attachment id and guardian: `configure`, detach and re-attach keep it, so a re-attach never
+Freeze state is keyed by attachment id (the window by actor): `configure`, detach and re-attach keep it, so a re-attach never
 shortens a freeze or a cooldown. That is deliberate: a reset would hand whoever can reconfigure a way to shorten a
 freeze, and a fresh attachment that inherits a freeze can still be detached by the owners like any other.
 
@@ -110,7 +127,7 @@ freeze, and a fresh attachment that inherits a freeze can still be detached by t
 | Error                                                                                                           | When                                                                     |
 | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `InvalidSettings`                                                                                               | a list rule above is broken                                              |
-| `TimelockNotCoveringConfiguration`                                                                              | the configuration invariant                                              |
+| `TimelockNotCoveringConfiguration(to, selector, op, delay)`                                                     | the covering rule (through `PolicyConfigurationFailed`)                  |
 | `NoTimelock(txHash)`                                                                                            | `schedule`: no attachment of this policy matches the call for that actor |
 | `CancelledTransaction(txHash)`                                                                                  | `schedule`: this owner-path transaction was cancelled                    |
 | `AlreadyScheduled(txHash)`                                                                                      | a live schedule exists (expired or void ones are replaced)               |
@@ -125,4 +142,14 @@ attach (Owners, *)   TimelockPolicy {delay: 86400, window: 0, guardians: [G], li
 attach (Recovery, *) TimelockPolicy {delay: 259200, window: 604800, guardians: [], lifters: [], cancellers: []}
 ```
 
-Proven by `test/v2/stories/OwnersTimelock.test.ts`, `Recovery.test.ts`, `Freeze.test.ts` and `Spark.test.ts`.
+## Example: a 72 h delay on one function (Spark), every other owner call instant
+
+```
+attach (Owners, USDC.transfer)    TimelockPolicy {delay: 259200, guardians: [G], cancellers: [spark]}
+attach (Owners, Safe.*)           TimelockPolicy {delay: 259200}
+attach (Owners, engine.configure) TimelockPolicy {delay: 259200}
+attach (Owners, *) opMask 2       TimelockPolicy {delay: 259200}   // DELEGATECALL only
+```
+
+Proven by `test/v2/stories/OwnersTimelock.test.ts`, `Recovery.test.ts`, `Freeze.test.ts`, `Spark.test.ts`,
+`Review.test.ts`, and the random orderings of `Configure.test.ts`.

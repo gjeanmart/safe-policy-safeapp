@@ -17,17 +17,27 @@ duplicate, never the Safe; `required` from 1 to the number of approvers. Approve
 
 ## Who calls what, and when
 
-| Function                                                          | Who                                                                                      | When                                                |
-| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `approve(engine, safe, txHash, validUntil)`                       | the approver (anyone may call, only listed approvers count)                              | after reviewing the transaction, before it executes |
-| `approveWithSig(engine, safe, txHash, approver, validUntil, sig)` | anyone, relaying the approver's EIP-712 signature (so the co-signer service pays no gas) | same                                                |
-| `revoke(engine, safe, txHash)`                                    | the approver                                                                             | before execution                                    |
-| `check`                                                           | the engine                                                                               | consumes every approval of the hash on pass         |
+| Function                                                          | Who                                                                                      | When                                                 |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `approve(engine, safe, txHash, validUntil)`                       | the approver (anyone may call, only listed approvers count)                              | after reviewing the transaction, before it executes  |
+| `approveWithSig(engine, safe, txHash, approver, validUntil, sig)` | anyone, relaying the approver's EIP-712 signature (so the co-signer service pays no gas) | same                                                 |
+| `revoke(engine, safe, txHash)`                                    | the approver                                                                             | before execution; also voids its unpushed signatures |
+| `check`                                                           | the engine                                                                               | consumes every approval of the hash on pass          |
 
 `txHash` is the Safe transaction hash on the owner path and the module call hash
 `keccak256(abi.encode(safe, module, to, value, data, op))` on the module path. The signed digest is
-`Approval(engine, safe, txHash, useCount, validUntil)` in the domain ("CoSignerPolicy", "1", chain id, policy); each
-digest can be pushed once, so a revoked approval cannot be replayed.
+`Approval(engine, safe, txHash, approver, useCount, revision, validUntil)` in the domain ("CoSignerPolicy", "1", chain id,
+policy), read with `approvalDigest(engine, safe, txHash, approver, validUntil)`. `revision(engine, safe, txHash,
+approver)` counts the approver's revokes of that hash, so:
+
+- a revoke removes the approver's recorded approval **and** voids every signature it made but nobody pushed yet
+  (`InvalidSignature`): a relayer holding the signature cannot record it after the revoke (review rev 3, A2);
+- it touches only that approver: the other approvers' signatures stay valid;
+- after a revoke, the approver signs again over the new revision;
+- each digest can be pushed once per approver (`SignatureAlreadyUsed`), and a consumption (`useCount`) voids
+  everyone's signatures of the previous use.
+
+Signers (the app, the `safe-role` CLI) read `useCount` and `revision` right before signing.
 
 ## The check
 
@@ -43,13 +53,13 @@ and the next execution of the same module call needs new ones.
 
 ## Errors
 
-| Error                                            | When                                                             |
-| ------------------------------------------------ | ---------------------------------------------------------------- |
-| `InvalidSettings`                                | a rule above                                                     |
-| `ApprovalExpired(validUntil)`                    | approving with a `validUntil` in the past                        |
-| `InvalidSignature(approver)`                     | `approveWithSig`: not the approver's ECDSA or ERC-1271 signature |
-| `SignatureAlreadyUsed(digest)`                   | the digest was already pushed                                    |
-| `MissingApprovals(attachmentId, required, have)` | the check                                                        |
+| Error                                            | When                                                                                                                                   |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `InvalidSettings`                                | a rule above                                                                                                                           |
+| `ApprovalExpired(validUntil)`                    | approving with a `validUntil` in the past                                                                                              |
+| `InvalidSignature(approver)`                     | `approveWithSig`: not the approver's ECDSA or ERC-1271 signature of the current digest (a revoke or a consumption since it was signed) |
+| `SignatureAlreadyUsed(digest)`                   | the digest was already pushed                                                                                                          |
+| `MissingApprovals(attachmentId, required, have)` | the check                                                                                                                              |
 
 ## Example: an agent with a co-signer service
 
@@ -57,5 +67,6 @@ and the next execution of the same module call needs new ones.
 attach (Agent, *) CoSignerPolicy {approvers: [cosignerService], required: 1}
 ```
 
-Proven by `test/v2/stories/CowAgent.test.ts` (required, consumed, not listed, signature relayed) and the module-path
-row of `test/v2/compare/V1vsV2.test.ts`.
+Proven by `test/v2/stories/CowAgent.test.ts` (required, consumed, not listed, signature relayed), `Review.test.ts`
+(revoke before the push), `test/v2/policies/CoSigner.test.ts` ("revoke against signatures not pushed yet") and the
+module-path row of `test/v2/compare/V1vsV2.test.ts`.

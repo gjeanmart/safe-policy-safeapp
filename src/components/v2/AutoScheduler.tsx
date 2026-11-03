@@ -1,9 +1,10 @@
 import { useEffect } from 'react'
 import { publicClient } from '../../config/client'
 import { useSandbox } from '../../context'
-import { describeError } from '../../lib/errors'
 import { readSafeNonce, readSchedule, timelockCalls } from '../../lib/v2'
-import { logActivity, relayStore, v2TrackedStore } from '../../store'
+import { describeCall } from '../../lib/describeTx'
+import { relayStore, settleProposal, v2TrackedStore } from '../../store'
+import { useDescribeContext } from '../useDescribe'
 import { hasGasFields, loadOwnerTx, readRoute } from './ownerTx'
 import { relay, useRelayer } from './relayer'
 
@@ -23,6 +24,7 @@ export function AutoScheduler() {
   const relayer = useRelayer()
   const tracked = v2TrackedStore.use()[safe.toLowerCase()]
   const threshold = state?.threshold
+  const describeCtx = useDescribeContext()
 
   useEffect(() => {
     if (!autoSchedule || !v2 || !v2Installed || !relayer || threshold === undefined || !tracked?.length)
@@ -43,17 +45,19 @@ export function AutoScheduler() {
           attempted.add(key)
           if ((await readRoute(deployment, safe, data.tx)).route !== 'schedule') continue
           const call = timelockCalls.schedule(deployment, safe, data.tx, data.signatures)
-          const description = `auto-schedule owner transaction #${data.tx.nonce}`
+          const summary = describeCall(data.tx, describeCtx)
+          const log = {
+            mode: 'schedule' as const,
+            label: `Auto-schedule: ${summary.title}`,
+            safeTxHash: t.hash,
+            nonce: data.tx.nonce,
+            lines: summary.lines,
+          }
           try {
-            await relay(relayer, { ...call, description })
-          } catch (error) {
-            logActivity({
-              role: relayer.address,
-              mode: 'execute',
-              label: description,
-              status: 'failed',
-              detail: describeError(error),
-            })
+            await relay(relayer, call, log)
+            settleProposal(t.hash, 'scheduled')
+          } catch {
+            // relay logged the failure; the transaction is not tried again this session.
           }
         }
       } catch {
@@ -65,7 +69,7 @@ export function AutoScheduler() {
     void tick()
     const timer = setInterval(() => void tick(), AUTO_SCHEDULE_MS)
     return () => clearInterval(timer)
-  }, [autoSchedule, v2, v2Installed, relayer, threshold, tracked, safe, getQueuedTx])
+  }, [autoSchedule, v2, v2Installed, relayer, threshold, tracked, safe, getQueuedTx, describeCtx])
 
   return null
 }

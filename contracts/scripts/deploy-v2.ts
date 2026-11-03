@@ -17,7 +17,7 @@ import {
 } from './lib/v2-deployment'
 
 /**
- * Deploys the Policy Engine V2 prototype (rev 3, SPEC.md) on Sepolia, one contract per transaction:
+ * Deploys the Policy Engine V2 prototype (rev 4, SPEC.md) on Sepolia, one contract per transaction:
  *
  *   PolicyGuardConfig → PolicyGuard(trusted batches, config)
  *   → TimelockPolicyQueue → TimelockPolicyFreeze(F, C) → TimelockPolicy(MAX_FREEZE 7 d, COOLDOWN 12 h, queue, freezer)
@@ -31,7 +31,7 @@ import {
  *   DRY_RUN=1 npx hardhat run scripts/deploy-v2.ts
  *
  * The engine has no configuration delay of its own (the owners' Timelock is the delay), so one
- * engine serves every Safe. V2_LABEL (default "rev 3") names it in the printed config entry.
+ * engine serves every Safe. V2_LABEL (default "rev 4") names it in the printed config entry.
  *
  * Fees: Sepolia's base fee is a tiny fraction of a gwei, while ethers' default tip is 1 gwei (paying
  * ~50 million times the base fee). Every transaction is therefore priced from the network: tip =
@@ -51,7 +51,7 @@ import {
 
 const DRY_RUN = process.env.DRY_RUN === '1'
 const SEPOLIA_CHAIN_ID = 11155111n
-const LABEL = process.env.V2_LABEL || 'rev 3'
+const LABEL = process.env.V2_LABEL || 'rev 4'
 /** Fee parameters in gwei, as decimal strings (e.g. "0.001"). */
 const PRIORITY_FEE_FLOOR = ethers.parseUnits(process.env.PRIORITY_FEE_GWEI ?? '0.001', 'gwei')
 const MAX_FEE = ethers.parseUnits(process.env.MAX_FEE_GWEI ?? '1', 'gwei')

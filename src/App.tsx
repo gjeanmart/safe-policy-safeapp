@@ -12,6 +12,7 @@ import { SetupPanel } from './components/setup/SetupPanel'
 import { EngineSwitch } from './components/v2/EngineSwitch'
 import { V2SetupPanel } from './components/v2/V2SetupPanel'
 import { WhyV2 } from './components/v2/WhyV2'
+import { ActivityPanel } from './components/ActivityPanel'
 import { AddressView, Badge, Notice } from './components/ui'
 import { chain, publicClient } from './config/client'
 import { deployedV2Engines, v2EngineFor } from './config/contracts'
@@ -136,10 +137,14 @@ function Workspace({
       </header>
 
       {safeState.error !== undefined && (
-        <Notice tone="bad">Could not read the Safe: {describeError(safeState.error)}</Notice>
+        <Notice tone="bad" title="Could not read the Safe">
+          {describeError(safeState.error)}
+        </Notice>
       )}
       {unknownGuard && (
-        <Notice tone="warn">The Safe has a module guard that is not one of the known policy guards.</Notice>
+        <Notice tone="warn" title="Unknown module guard">
+          It is not one of the known policy guards.
+        </Notice>
       )}
 
       <nav className="tabs">
@@ -179,6 +184,8 @@ function Workspace({
         {tab === 'settings' && <SettingsPanel />}
       </main>
 
+      <ActivityPanel />
+
       <Footer onOpenNotes={() => setTab('notes')} />
       <VaultDialogs />
       <AutoScheduler />
@@ -196,8 +203,8 @@ export function App() {
     if (!isSupportedChain(connection.chainId)) {
       return (
         <div className="container">
-          <Notice tone="bad">
-            This sandbox only supports {chain.name}. Switch the Safe{'{Wallet}'} network.
+          <Notice tone="bad" title={`Only ${chain.name} is supported`}>
+            Switch the Safe{'{Wallet}'} network.
           </Notice>
         </div>
       )

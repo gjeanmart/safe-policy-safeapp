@@ -22,7 +22,6 @@ import {
   MAX_ARGS_VALUES,
   MAX_LIMIT_TOKENS,
   MAX_ROLE_MEMBERS,
-  NO_SELECTOR,
   isAny,
 } from './scopes'
 
@@ -255,7 +254,7 @@ export type ArgsPreset = 'recipients' | 'spenders' | 'receiverIsSafe'
 export const ARGS_PRESETS: Record<ArgsPreset, { label: string; help: string }> = {
   recipients: {
     label: 'Recipients',
-    help: 'transfer / transferFrom pay only these addresses; plain native transfers go only to them.',
+    help: 'transfer / transferFrom pay only these addresses; native value goes only to them, whatever the calldata (list a protocol you pay ETH to).',
   },
   spenders: {
     label: 'Spenders',
@@ -267,13 +266,17 @@ export const ARGS_PRESETS: Record<ArgsPreset, { label: string; help: string }> =
   },
 }
 
-/** `transfer` word 0 IN, `transferFrom` word 1 IN, empty calldata CALL_TO IN. */
+/**
+ * `transfer` word 0 IN, `transferFrom` word 1 IN, and any call with value: VALUE_TO IN. Tokens by
+ * `transfer` / `transferFrom`, ETH by destination whatever the calldata (a payable protocol call
+ * needs the protocol listed).
+ */
 export const recipientsConstraints = (recipients: readonly Address[]): ArgsConstraint[] => {
   const values = recipients.map(addressWord)
   return [
     { selector: SELECTORS.transfer, target: ArgsTarget.WORD, index: 0, op: ArgsOp.IN, values },
     { selector: SELECTORS.transferFrom, target: ArgsTarget.WORD, index: 1, op: ArgsOp.IN, values },
-    { selector: NO_SELECTOR, target: ArgsTarget.CALL_TO, index: 0, op: ArgsOp.IN, values },
+    { selector: ANY_SELECTOR, target: ArgsTarget.VALUE_TO, index: 0, op: ArgsOp.IN, values },
   ]
 }
 
@@ -376,7 +379,12 @@ const OP_LABELS: Record<ArgsOp, string> = {
   6: 'is the Safe',
 }
 
-const TARGET_LABELS: Record<ArgsTarget, string> = { 0: 'argument', 1: 'target', 2: 'value' }
+const TARGET_LABELS: Record<ArgsTarget, string> = {
+  0: 'argument',
+  1: 'target',
+  2: 'value',
+  3: 'destination when value moves',
+}
 
 const wordLabel = (word: Hex, ctx: LabelContext): string => {
   const n = BigInt(word)

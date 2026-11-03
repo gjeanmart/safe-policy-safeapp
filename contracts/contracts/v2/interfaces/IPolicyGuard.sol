@@ -116,7 +116,7 @@ interface IPolicyGuard is ISafeTransactionGuard, ISafeModuleGuard {
     ///         ERC-165; ALLOW or DENY with a non-zero policy or non-empty settings.
     error InvalidPolicy(address policy);
 
-    /// @notice `IPolicy.configure` reverted; `reason` is its revert data.
+    /// @notice `IPolicy.configure` or `IPolicy.validate` reverted; `reason` is its revert data.
     error PolicyConfigurationFailed(address policy, bytes reason);
 
     /// @notice Attaching would put more than `ScopeLib.MAX_ATTACHMENTS_PER_SCOPE` at `scopeKey`.
@@ -140,7 +140,10 @@ interface IPolicyGuard is ISafeTransactionGuard, ISafeModuleGuard {
      *         owners' Timelock delays it and their freeze blocks it. Before the guard is set,
      *         the install batch calls it unguarded.
      * @dev Attach / update calls `IPolicy.configure` for POLICY; emits `Attached`. Detach does not
-     *      call the policy; emits `Detached`. Reverts `Reentrancy` during a check.
+     *      call the policy; emits `Detached`. After the whole batch, `IPolicy.validate(safe)` is
+     *      STATICCALLed once per policy the batch attached, updated or detached, unless none of its
+     *      attachments is left: the policy checks its invariants over the final configuration.
+     *      Reverts `Reentrancy` during a check.
      */
     function configure(Change[] calldata changes) external;
 

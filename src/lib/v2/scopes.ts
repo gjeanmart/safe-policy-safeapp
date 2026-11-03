@@ -15,8 +15,6 @@ import {
   CallMatch,
   Kind,
   LEVEL_COUNT,
-  OP_ALL,
-  OP_CALL,
   type Operation,
   levelOf as rawLevelOf,
 } from './rev3/types'
@@ -147,9 +145,7 @@ export const moduleCallHash = (
 
 export const opBit = (operation: Operation): number => 1 << operation
 
-/** The stored mask: 0 means CALL for ALLOW, both ops for DENY and POLICY (`ScopeLib.normalizeOpMask`). */
-export const normalizeOpMask = (kind: Kind, opMask: number): number =>
-  opMask !== 0 ? opMask : kind === Kind.ALLOW ? OP_CALL : OP_ALL
+export { normalizeOpMask } from './rev3/opmask'
 
 // ---------------------------------------------------------------------------------------------
 // Labels

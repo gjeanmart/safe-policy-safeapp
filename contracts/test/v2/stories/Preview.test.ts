@@ -201,6 +201,17 @@ describe('Story: preview (matches + eth_call of each policy) equals the real che
     expect(await owners(w, transfer(w, w.attacker.address, 1n))).to.equal('PolicyDenied/ConstraintFailed')
   })
 
+  it('owner path: ETH with calldata under an owner-wide, non-strict Recipients (review A1 shape)', async () => {
+    const w = await loadFixture(world)
+    const recipients = argsSettings(recipientsPreset([w.vendorA.address]), false)
+    await execOwners(w, configureCall(w, [attach(anyCall(OWNERS), w.args, recipients)]))
+    const eth = ethers.parseEther('1')
+    expect(await owners(w, call(w.attacker.address, '0xdeadbeef', eth))).to.equal(
+      'PolicyDenied/ConstraintFailed',
+    )
+    expect(await owners(w, call(w.vendorA.address, '0xdeadbeef', eth))).to.equal('pass')
+  })
+
   it('owner path: a batch of 3 that passes, then one whose second call fails Args', async () => {
     const w = await loadFixture(world)
     const ok = [

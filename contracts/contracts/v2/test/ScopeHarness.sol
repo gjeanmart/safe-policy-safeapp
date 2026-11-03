@@ -119,6 +119,18 @@ contract ScopeHarness {
         ];
     }
 
+    /// @notice Safe administration routes of the covering rule: `[setGuard, setModuleGuard,
+    ///         enableModule, disableModule, setFallbackHandler]`.
+    function safeAdminSelectors() external pure returns (bytes4[5] memory) {
+        return [
+            C.SAFE_SET_GUARD,
+            C.SAFE_SET_MODULE_GUARD,
+            C.SAFE_ENABLE_MODULE,
+            C.SAFE_DISABLE_MODULE,
+            C.SAFE_SET_FALLBACK_HANDLER
+        ];
+    }
+
     /// @notice ERC-165 ids: `[IPolicyGuard, IPolicy, ITimelockPolicy, IArgsPolicy, ILimitPolicy,
     ///         ICoSignerPolicy, ISafenetPolicy]`.
     function interfaceIds() external pure returns (bytes4[7] memory) {

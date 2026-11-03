@@ -1,7 +1,7 @@
-# Policy Engine V2 (rev 3) cookbook
+# Policy Engine V2 (rev 4) cookbook
 
-One section per use case: the exact `Change[]` to pass to `engine.configure`, and the story test that proves it on a
-real Safe 1.5.0 (`test/v2/stories/`). Research prototype, unaudited.
+One section per use case: the exact `Change[]` to pass to `engine.configure`, what it guarantees (and what it does not),
+and the story test that proves it on a real Safe 1.5.0 (`test/v2/stories/`). Research prototype, unaudited.
 
 ## How to read the tables
 
@@ -29,6 +29,9 @@ Per-policy reference: [`docs/Timelock.md`](docs/Timelock.md), [`docs/Args.md`](d
 | `(Owners, *)` | Allow    |                                                      |
 | `(Owners, *)` | Timelock | delay T, window 0, guardians [G], lifters [Recovery] |
 
+**Guarantees.** Every owner transaction, `configure` included, is public for T before it runs; G can stop new ones for F
+per F + C. Not stopped: allowances and operator rights already given, pre-signed orders, module actors.
+
 The owners `schedule` each transaction with their signatures (anyone relays), wait T, then execute. `configure` itself
 waits T: the implicit grant does not skip the Timelock. A narrow Allow such as `(Owners, Safe.setGuard)` does not hide
 the Timelock (WA-4014): every matching scope runs.
@@ -41,17 +44,21 @@ Timelock longer than the covering one is rejected".
 
 ## 2. ERC-20 payments by an ops actor within a monthly budget
 
-| Scope                  | Kind     | Settings                                                                                                                                |
-| ---------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `(Ops, USDC.transfer)` | Allow    |                                                                                                                                         |
-| `(Ops, USDC.transfer)` | Args     | Recipients preset: `transfer` word 0 IN [vendorA, vendorB]; `transferFrom` word 1 IN [same]; empty calldata `CALL_TO` IN [same]; strict |
-| `(Ops, USDC.approve)`  | Allow    |                                                                                                                                         |
-| `(Ops, USDC.approve)`  | Args     | Spenders preset: `approve` word 0 IN [processor]; `approve` word 1 LTE 10,000 USDC; strict                                              |
-| `(Ops, *)`             | Limit    | USDC 10,000 per 30 days; passUnpriced false                                                                                             |
-| `(Ops, *)`             | Timelock | delay 0 (kill switch), guardians [G]                                                                                                    |
+| Scope                  | Kind     | Settings                                                                                                                               |
+| ---------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `(Ops, USDC.transfer)` | Allow    |                                                                                                                                        |
+| `(Ops, USDC.transfer)` | Args     | Recipients preset: `transfer` word 0 IN [vendorA, vendorB]; `transferFrom` word 1 IN [same]; any selector `VALUE_TO` IN [same]; strict |
+| `(Ops, USDC.approve)`  | Allow    |                                                                                                                                        |
+| `(Ops, USDC.approve)`  | Args     | Spenders preset: `approve` word 0 IN [processor]; `approve` word 1 LTE 10,000 USDC; strict                                             |
+| `(Ops, *)`             | Limit    | USDC 10,000 per 30 days; passUnpriced false                                                                                            |
+| `(Ops, *)`             | Timelock | delay 0 (kill switch), guardians [G]                                                                                                   |
+
+**Guarantees.** Ops authorizes at most 10,000 USDC per 30 days to listed recipients, approvals counted in full; ETH
+(any calldata) only to listed recipients; G stops new Ops transactions at once, not pulls on existing allowances.
 
 A batch is summed; approvals count in full; a revocation is free and gives nothing back, so approve, revoke, approve
-again cannot refill the budget.
+again cannot refill the budget. The Recipients preset judges native value by destination whatever the calldata
+(`VALUE_TO`): a payable protocol call under a Recipients attachment needs the protocol listed as a recipient.
 
 Proven by `Erc20Payments.test.ts`: "pays a listed vendor; the budget goes down by the amount", "denies an unlisted
 recipient (Args ConstraintFailed)", "denies a payment over the budget, and refills it next month (fixed windows)", "sums
@@ -88,6 +95,9 @@ at (Ops, *) reads the NFT transfer as an ERC-20 spend of an unlisted token: Unpr
 | `(Agent, USDC.approve)`                   | Allow    |                                                                   |
 | `(Agent, USDC.approve)`                   | Args     | `approve` word 0 EQ vault relayer; word 1 LTE 20,000 USDC; strict |
 | `(Agent, GPv2Settlement.setPreSignature)` | Allow    |                                                                   |
+
+**Guarantees.** Every agent transaction needs the co-signer; the bound on what an order can sell is every allowance to
+the vault relayer; a freeze stops new approvals and pre-signatures, not orders already pre-signed.
 
 Every agent transaction needs the co-signer's approval of its module call hash (`approve`, or `approveWithSig` pushed by
 anyone), consumed on use. What the policies cannot see: the order inside the `orderUid` (sell token, amounts,
@@ -173,6 +183,8 @@ unpriced: with native unlisted, even passUnpriced denies (Unpriced)".
 | `(Recovery, *)`              | Timelock | delay R, window 7 d, no guardians (nothing can freeze it) |
 | `(Owners, *)`                | Timelock | (from section 1) lifters [Recovery]                       |
 
+**Guarantees.** Nothing freezes recovery; the owners can detach it within T < R; a rogue recovery is visible for R.
+
 Recovery schedules `swapOwner` (a batch of swaps is one schedule) and executes after R. The owners cannot cancel it
 with their signatures; they detach it with a configure, which waits T < R. A payment allowlist never blocks it unless
 it is strict at `(ANY, *)`.
@@ -186,29 +198,44 @@ recovery included (NoConstraint)".
 
 Configuration of sections 1 and 9. Proven by `Freeze.test.ts`:
 
-| Compromise    | Test                                                                                                                                                                                                                |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Owner keys    | "owner keys compromised: G freezes, recovery replaces the owners within R < F, the new owners cancel the attacker configuration, the attacker queue is void"                                                        |
-| Guardian      | "guardian compromised: the owners replace G with a configure scheduled during the freeze, executed in the cooldown; G cannot re-freeze", and "... with recovery as lifter: the owners get out after T instead of F" |
-| Recovery key  | "recovery key compromised: it must wait R in the open; the owners detach it after T < R"                                                                                                                            |
-| Two colluding | "two colluding (guardian + recovery key): lost, as documented ..."                                                                                                                                                  |
-| Voiding       | "the owners' queue is void after a freeze, but a scheduled configure is exempt"                                                                                                                                     |
-| Cooldown      | "a lift starts the cooldown at once; a freeze during C is skipped; after C the guardian can freeze again"                                                                                                           |
+| Compromise     | Test                                                                                                                                                                                                                |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Owner keys     | "owner keys compromised: G freezes, recovery replaces the owners within R < F, the new owners cancel the attacker configuration, the attacker queue is void"                                                        |
+| Guardian       | "guardian compromised: the owners replace G with a configure scheduled during the freeze, executed in the cooldown; G cannot re-freeze", and "... with recovery as lifter: the owners get out after T instead of F" |
+| Recovery key   | "recovery key compromised: it must wait R in the open; the owners detach it after T < R"                                                                                                                            |
+| Two colluding  | "two colluding (guardian + recovery key): lost, as documented ..."                                                                                                                                                  |
+| Voiding        | "the owners' queue is void after a freeze, but a scheduled configure is exempt"                                                                                                                                     |
+| Cooldown       | "a lift starts the cooldown at once; a freeze during C is skipped; after C the guardian can freeze again"                                                                                                           |
+| Many guardians | "any number of guardians: the owners are frozen at most F per F + C": "the second guardian freeze joins the window ...", "ten cycles of alternating guardians to day 60+ ..."                                       |
 
-## 11. Spark: another Safe as a canceller
+## 11. Spark: a delay on one function, another Safe as a canceller
 
-| Scope                  | Kind     | Settings                                  |
-| ---------------------- | -------- | ----------------------------------------- |
-| `(Owners, *)`          | Allow    |                                           |
-| `(Owners, *)`          | Timelock | delay T, guardians [G] (covers configure) |
-| `(Owners, USDC.*)`     | Timelock | delay T, cancellers [spark Safe]          |
-| `(Ops, USDC.transfer)` | Allow    |                                           |
-| `(Ops, USDC.*)`        | Timelock | delay 1 h, cancellers [spark Safe]        |
+| Scope                            | Kind     | Settings                                                                       |
+| -------------------------------- | -------- | ------------------------------------------------------------------------------ |
+| `(Owners, *)`                    | Allow    |                                                                                |
+| `(Owners, USDC.transfer)`        | Timelock | delay 72 h, guardians [G], cancellers [spark Safe]                             |
+| `(Owners, Safe.*)`               | Timelock | delay 72 h, guardians [G] (setGuard, setModuleGuard, modules, handler, owners) |
+| `(Owners, engine.configure)`     | Timelock | delay 72 h, guardians [G]                                                      |
+| `(Owners, *)`, DELEGATECALL only | Timelock | delay 72 h, guardians [G]                                                      |
+| `(Ops, USDC.transfer)`           | Allow    |                                                                                |
+| `(Ops, USDC.*)`                  | Timelock | delay 1 h, cancellers [spark Safe]                                             |
 
-The narrow owners' Timelock needs the covering `(Owners, *)` one at least as long, or `configure` reverts
-`TimelockNotCoveringConfiguration`. Proven by `Spark.test.ts`: "the spark Safe cancels the owners' queued token
-transfer", "the spark Safe cancels the ops actor's queued transfer", "the spark Safe cannot cancel what its attachments
-did not match (NotCanceller)".
+**Guarantees.** Owners' other calls are instant; USDC transfers, Safe administration, configure and DELEGATECALLs wait
+72 h; the spark Safe cancels transfers. Not delayed: `approve`, `increaseAllowance` and `transferFrom` of USDC (add them,
+or use the "Delay on one function" template, which does), ETH, other actors.
+
+The three route covers are what the covering rule asks for (SPEC §5.1): without one of them `configure` reverts
+`TimelockNotCoveringConfiguration` naming the uncovered route and the delay. The app's "Admin delay" template emits the
+three. G must be on the covers, not only on the transfer delay: the owners' `configure` that would remove the transfer
+delay matches the `(Owners, engine.configure)` cover, so only a freeze of that cover stops it (lint
+`configure-cover-unguarded`). An owner-wide `(Owners, *)` Timelock of 72 h replaces all three, at the cost of
+delaying every owner call.
+
+Proven by `Spark.test.ts`: "the spark Safe cancels the owners' queued token transfer", "the spark Safe cancels the ops
+actor's queued transfer", "the spark Safe cannot cancel what its attachments did not match (NotCanceller)", and the
+rev 4 group "each missing route cover is named; with the three the configuration is accepted", "approve, ETH and other
+calls are instant; transfers, Safe admin, configure and DELEGATECALLs wait 72 h", "the guardian stops the removal of
+the delay only through the configure cover".
 
 ## 12. Committee: approval tiers without Quorum
 
@@ -236,22 +263,26 @@ schedule per batch: the owners schedule the batch once and execute it after T".
 
 ## 14. Configuration
 
-| Path     | Rule                                                                                                                                                                                          |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Owners   | `configure` is granted without an Allow; Denys and policies still apply, except Limit and Args, which never judge a call to the engine (it moves nothing), so neither can lock the owners out |
-| A module | needs the exact Allow `(module, engine.configure)`; `(module, *)` is not enough                                                                                                               |
-| Anywhere | never in a batch, never with value, never as DELEGATECALL; other engine functions are denied (`GuardTargetDenied`)                                                                            |
-| Install  | leftovers of an earlier install stay attached: detach them first in the install batch                                                                                                         |
+| Path     | Rule                                                                                                                                                                                            |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Owners   | `configure` is granted without an Allow; Denys and policies still apply, except Limit and Args, which never judge a call to the engine (it moves nothing), so neither can lock the owners out   |
+| A module | needs the exact Allow `(module, engine.configure)`; `(module, *)` is not enough                                                                                                                 |
+| Anywhere | never in a batch, never with value, never as DELEGATECALL; other engine functions are denied (`GuardTargetDenied`)                                                                              |
+| Install  | leftovers of an earlier install stay attached: detach them first in the install batch                                                                                                           |
+| Validate | after the batch, `validate` runs for every policy the batch touched that is still attached: a configure that would leave a longer delay uncovered is refused, whatever the order of its changes |
 
 Proven by `Configure.test.ts`: "the owners configure without any Allow (implicit grant on the owner path); nothing else
 is granted", "a module with (Ops, *) cannot configure: calls to the engine need the exact Allow (F5, NotGranted)", "a
 module with the exact Allow (Recovery, engine.configure) configures", "configure inside a batch is denied
 (GuardTargetDenied names the sub-call)", "the install batch detaches the leftovers first, then attaches the new
 configuration", "a Limit at (Owners, *) without passUnpriced: payments are priced, configure passes, Safe admin calls
-stay Unpriced", "a strict Args at (Owners, *) (Recipients preset): configure passes, Safe admin calls stay NoConstraint".
+stay Unpriced", "a strict Args at (Owners, *) (Recipients preset): configure passes, Safe admin calls stay NoConstraint",
+"200 sequences: the engine accepts a batch exactly when the mirror does; the rule holds after each".
 
 ## 15. Preview before signing
 
 The app calls `engine.matches(safe, actor, to, value, data, op)`, then `eth_call`s each matched policy's `check` with
 `from = engine`, in first-match order. Same code, same state, nothing persists. Proven by `Preview.test.ts`, which
-compares the preview with the real transaction's revert in each scenario.
+compares the preview with the real transaction's revert in each scenario. Caveat: each policy is `eth_call`ed alone
+against the current state, so a policy reading state another policy writes in the same transaction would preview
+differently (none of the five does).

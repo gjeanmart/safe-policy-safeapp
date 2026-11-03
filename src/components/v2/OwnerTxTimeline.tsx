@@ -8,12 +8,24 @@ const STEPS: { key: Exclude<OwnerStep, 'done'>; label: string }[] = [
   { key: 'execute', label: 'Execute' },
 ]
 
-/** Sign → schedule → wait → execute, with the current step highlighted. */
-export function OwnerTxTimeline({ current, delay }: { current: OwnerStep; delay?: string }) {
-  const at = current === 'done' ? STEPS.length : STEPS.findIndex((s) => s.key === current)
+/**
+ * Sign → schedule → wait → execute, with the current step highlighted. A module schedules its own
+ * call, so its timeline (`module`) has no signing step.
+ */
+export function OwnerTxTimeline({
+  current,
+  delay,
+  module = false,
+}: {
+  current: OwnerStep
+  delay?: string
+  module?: boolean
+}) {
+  const steps = module ? STEPS.slice(1) : STEPS
+  const at = current === 'done' ? steps.length : steps.findIndex((s) => s.key === current)
   return (
-    <ol className="timeline" aria-label="Steps of an owner transaction">
-      {STEPS.map((s, i) => (
+    <ol className="timeline" aria-label="Steps of a delayed transaction">
+      {steps.map((s, i) => (
         <li
           key={s.key}
           className={i < at ? 'done' : i === at ? 'current' : undefined}

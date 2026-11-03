@@ -21,7 +21,7 @@ import { type Operation, moduleCallHash } from './scopes'
  * - module path: `moduleCallHash(safe, module, to, value, data, op)` (no nonce, no chain id);
  *   proofs are consumed on use.
  *
- * Digests: CoSigner `Approval(engine, safe, txHash, useCount, validUntil)` under
+ * Digests: CoSigner `Approval(engine, safe, txHash, approver, useCount, revision, validUntil)` under
  * `("CoSignerPolicy", "1")`, TimelockPolicy `Cancel(engine, safe, txHash, scheduledAt)` under
  * `("TimelockPolicy", "1")`, Safenet `ModuleTransaction(engine, safe, callHash, deadline)` under
  * `("SafenetPolicy", "1")`.
@@ -30,7 +30,8 @@ import { type Operation, moduleCallHash } from './scopes'
  * const tx = safeTransaction(call, await readSafeNonce(client, safe))
  * const hash = safeTxHash(chainId, safe, tx)                         // owners sign this
  * timelockCalls.schedule(deployment, safe, tx, signatures)          // anyone relays
- * const digest = coSignerApprovalDigest(chainId, deployment.policies.coSigner, engine, safe, hash, useCount, until)
+ * const { useCount, revision } = await readApprovalNonces(client, deployment, safe, hash, approver)
+ * const digest = coSignerApprovalDigest(chainId, deployment.policies.coSigner, engine, safe, hash, approver, useCount, revision, until)
  */
 
 export { moduleCallHash }
@@ -104,8 +105,11 @@ export const txHashOf = (
 
 /**
  * What a co-signer signs for {@link coSignerCalls.approveWithSig}: EIP-712
- * `Approval(engine, safe, txHash, useCount, validUntil)` under `("CoSignerPolicy", "1", chainid,
- * policy)`, with the current `useCount(engine, safe, txHash)`. Equals the policy's `approvalDigest`.
+ * `Approval(engine, safe, txHash, approver, useCount, revision, validUntil)` under `("CoSignerPolicy", "1",
+ * chainid, policy)`, with the current `useCount(engine, safe, txHash)` and the approver's
+ * `revision(engine, safe, txHash, approver)` (bumped by each of its revokes, which voids its
+ * signatures not pushed yet). Equals the policy's `approvalDigest(..., approver, validUntil)`:
+ * read both right before signing.
  */
 export const coSignerApprovalDigest = (
   chainId: number,
@@ -113,7 +117,9 @@ export const coSignerApprovalDigest = (
   engine: Address,
   safe: Address,
   txHash: Hex,
+  approver: Address,
   useCount: bigint,
+  revision: bigint,
   validUntil: bigint,
 ): Hex =>
   hashTypedData({
@@ -123,12 +129,14 @@ export const coSignerApprovalDigest = (
         { name: 'engine', type: 'address' },
         { name: 'safe', type: 'address' },
         { name: 'txHash', type: 'bytes32' },
+        { name: 'approver', type: 'address' },
         { name: 'useCount', type: 'uint256' },
+        { name: 'revision', type: 'uint256' },
         { name: 'validUntil', type: 'uint64' },
       ],
     },
     primaryType: 'Approval',
-    message: { engine, safe, txHash, useCount, validUntil },
+    message: { engine, safe, txHash, approver, useCount, revision, validUntil },
   })
 
 /**
@@ -413,4 +421,30 @@ export async function readApprovals(
     useCount: useCount as bigint,
     approvedUntil: new Map(approvers.map((a, i) => [a, BigInt(until[i] as bigint | number)])),
   }
+}
+
+/** What `approver` must sign over now: the hash's `useCount` and the approver's own `revision`. */
+export async function readApprovalNonces(
+  client: PublicClient,
+  deployment: V2Deployment,
+  safe: Address,
+  txHash: Hex,
+  approver: Address,
+): Promise<{ useCount: bigint; revision: bigint }> {
+  const address = deployment.policies.coSigner
+  const [useCount, revision] = await Promise.all([
+    client.readContract({
+      address,
+      abi: coSignerPolicyAbi,
+      functionName: 'useCount',
+      args: [deployment.engine, safe, txHash],
+    }),
+    client.readContract({
+      address,
+      abi: coSignerPolicyAbi,
+      functionName: 'revision',
+      args: [deployment.engine, safe, txHash, approver],
+    }),
+  ])
+  return { useCount: BigInt(useCount), revision: BigInt(revision) }
 }

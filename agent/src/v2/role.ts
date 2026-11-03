@@ -655,12 +655,18 @@ async function policyNext(
       )
       const pending = s.approvers.filter((_, i) => until[i]! < now)
       const validUntil = now + (await proofLifetime(config, ctx, at.timelock))
-      const digest = await readApprovalDigest(run.policy, ctx.engine, config.safe, callHash, validUntil)
+      // The digest is per approver: it carries the approver's revision (bumped by each of its revokes).
+      const digests = await Promise.all(
+        pending.map(
+          async (ap) =>
+            `${ctx.names(ap)}: ${await readApprovalDigest(run.policy, ctx.engine, config.safe, callHash, ap, validUntil)}`,
+        ),
+      )
       return need(
         `Co-signer: needs ${Number(a[1]) - Number(a[2])} more approval(s) of callHash ${callHash} from ` +
           `${pending.map(ctx.names).join(', ')}. Tell the user; an approver approves with ` +
           `\`safe-role approve ${callHash} --valid-until ${validUntil}\` (if it runs safe-role) or CoSignerPolicy(${run.policy}).approve(engine ${ctx.engine}, ` +
-          `safe ${config.safe}, ${callHash}, validUntil), or signs the EIP-712 digest ${digest} (validUntil ${validUntil} = ` +
+          `safe ${config.safe}, ${callHash}, validUntil), or signs its EIP-712 digest (${digests.join('; ')}; validUntil ${validUntil} = ` +
           `${isoTime(validUntil)}) for anyone to relay with approveWithSig. Then simulate again.`,
       )
     }
@@ -1244,10 +1250,24 @@ export async function prepareAction(
         const targets = wanted.filter((w): w is (typeof guarded)[number] => typeof w !== 'string')
         if (!targets.length)
           return fail('This role is not a guardian of any Timelock attachment of this Safe.')
-        const fresh = targets.filter(({ t }) => now >= t.cooldownUntil)
+        // Freezes are bounded per actor: the first freeze of an actor's attachments opens its
+        // window (F); later ones join it (same end); after it, none for C.
+        const windows = await Promise.all(
+          targets.map(async ({ a }) => {
+            const [end, cooldownUntil] = await client().readContract({
+              address: a.policy,
+              abi: timelockPolicyAbi,
+              functionName: 'actorWindow',
+              args: [ctx.engine, config.safe, a.scope.actor],
+            })
+            return { end: BigInt(end), cooldownUntil: BigInt(cooldownUntil) }
+          }),
+        )
+        const actorCooling = (i: number) => now >= windows[i]!.end && now < windows[i]!.cooldownUntil
+        const fresh = targets.filter(({ t }, i) => now >= t.cooldownUntil && !actorCooling(i))
         if (!fresh.length)
           return fail(
-            'Every target is already frozen or cooling down: a freeze would be skipped.',
+            'Every target is already frozen or cooling down (the attachment, or its actor): a freeze would be skipped.',
             'Run safe-role status for the freeze state.',
           )
         const timelock = fresh[0]!.a.policy
@@ -1257,14 +1277,25 @@ export async function prepareAction(
           abi: timelockPolicyAbi,
           functionName: 'MAX_FREEZE',
         })
+        const untilOf = (x: (typeof targets)[number]) => {
+          const w = windows[targets.indexOf(x)]!
+          return now < w.end ? { until: w.end, joins: true } : { until: now + F, joins: false }
+        }
         return {
           ok: true,
           title: 'FREEZE request (Timelock guardian)',
           intent: `freeze ${ids.map(({ a }) => label(a)).join(', ')}`,
           lines: [
-            ...ids.map(({ a }) => `Freeze    ${label(a)} (${a.attachmentId})`),
-            `Until     ${isoTime(now + F)} (${duration(F)}), unless lifted earlier`,
-            'Every call these attachments match is denied while frozen, and their schedules made before are void.',
+            ...ids.map((x) => {
+              const { until, joins } = untilOf(x)
+              return (
+                `Freeze    ${label(x.a)} (${x.a.attachmentId}) until ${isoTime(until)}` +
+                (joins ? " (joins the actor's open freeze window)" : ` (${duration(F)})`)
+              )
+            }),
+            'Unless lifted earlier. Stops new transactions of this actor: every call these attachments match is',
+            'denied while frozen, and their schedules made before are void. Allowances, operator rights and',
+            'pre-signed orders stay usable: revoke them separately.',
             ...targets
               .filter((x) => !fresh.includes(x))
               .map(({ a }) => `Skipped   ${label(a)}: frozen or cooling down`),

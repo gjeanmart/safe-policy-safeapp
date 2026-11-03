@@ -69,3 +69,13 @@ Everything else from rev 2 is in git: `git show 3c6d740:<path>`.
 `contracts/test/v2/fixtures/safe.ts`, `e2e/world.ts`, `compare/v1.ts` (kept, still on the rev 2 API: `world.ts` and
 `scripts/lib/v2-deployment.ts` do not typecheck until WP E rewrites them), `contracts/scripts/*`,
 `contracts/contracts/v2/COMPARISON.md`, `GAS.md`, `contracts/README.md`, the root `src/` and `agent/`.
+
+## Rev 4 (after the external review of rev 3)
+
+One pass on the same files, no new work packages (`DESIGN-rev4.md` §10). The frozen interfaces changed, additively
+where possible: `IPolicy.validate(safe)` (every policy, interface id `0xcda8ff30`); `ITimelockPolicy`
+`TimelockNotCoveringConfiguration(to, selector, op, delay)` and `actorWindow` replacing `guardianWindow`;
+`ICoSignerPolicy` `approvalDigest(..., approver, validUntil)`, `revision(...)`, and `approver` plus `revision` in the EIP-712 `Approval`;
+`IArgsPolicy.Target.VALUE_TO`; five Safe admin selectors in `Constants.sol`; `EngineStorage._policyCounts`. The TS
+mirror `src/lib/v2/rev3/types.ts` follows, and `src/lib/v2/rev3/cover.ts` mirrors the covering rule (checked against
+the engine in `test/v2/stories/Configure.test.ts`). Every contract is redeployed.

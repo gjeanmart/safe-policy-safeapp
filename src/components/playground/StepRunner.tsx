@@ -8,7 +8,7 @@ import { resolvePolicy } from '../../lib/moduleTx'
 import { type Executor, nestedModuleCall, resolveExecutor } from '../../lib/roleExec'
 import { type RunMode, type Step, runSteps } from '../../lib/runner'
 import { type Role, logActivity, roleKind } from '../../store'
-import { AddressView, AsyncButton, CopyButton, Notice } from '../ui'
+import { AddressView, AsyncButton, CopyButton, ErrorLine, Notice } from '../ui'
 import { GatePreview } from '../v2/GatePreview'
 
 type Resolution = { label: string; policy: string; fallback: boolean }
@@ -155,13 +155,17 @@ export function StepRunner({
             Resolve policy
           </AsyncButton>
         )}
-        <AsyncButton
-          disabled={disabled}
-          onClick={() => run('simulate')}
-          title="Dry-run execTransactionFromModule as this role (eth_call): nothing is sent"
-        >
-          Simulate
-        </AsyncButton>
+        {/* Under V2 the gate preview below is the simulation: every gate, not only the final revert. */}
+        {!v2Engine && (
+          <AsyncButton
+            disabled={disabled}
+            onClick={() => run('simulate')}
+            busyLabel="Simulating…"
+            title="Dry-run execTransactionFromModule as this role (eth_call): nothing is sent"
+          >
+            Simulate
+          </AsyncButton>
+        )}
         {manual ? (
           <button
             type="button"
@@ -177,6 +181,7 @@ export function StepRunner({
               variant="primary"
               disabled={disabled || !executor}
               onClick={() => run('execute')}
+              busyLabel="Executing…"
               title={sendTitle}
             >
               Execute
@@ -185,6 +190,7 @@ export function StepRunner({
               variant="danger"
               disabled={disabled || !executor}
               onClick={() => run('force')}
+              busyLabel="Sending…"
               title="Skip the dry-run and send with a fixed gas limit so the revert lands on-chain"
             >
               Force-send
@@ -194,7 +200,11 @@ export function StepRunner({
       </div>
       {v2Engine && !disabled && <GatePreview key={key} role={role} steps={steps} engine={v2Engine} />}
       {manual && showCalls && <NestedCalls role={role} steps={steps} reason={manual.reason} />}
-      {error?.key === key && <Notice tone="bad">{error.value}</Notice>}
+      {error?.key === key && (
+        <Notice tone="bad" title="Could not run">
+          <ErrorLine message={error.value} />
+        </Notice>
+      )}
       {resolutions?.key === key && (
         <ul className="plain small">
           {resolutions.value.map((r) => (

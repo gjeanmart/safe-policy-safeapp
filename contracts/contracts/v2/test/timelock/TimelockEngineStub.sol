@@ -9,10 +9,10 @@ import {AttachmentView, Call, Change, Context, Kind, Match, MatchView, Scope} fr
 
 /**
  * @title Timelock engine stub
- * @notice Test double of the rev 3 engine for the TimelockPolicy tests (WP B), built while the
- *         real engine (WP A) is written in parallel. Same ABI for what the policy uses
- *         (`configure`, `matches`, `getAttachment`, the four guard hooks) and calls policies as the
- *         engine does (`msg.sender` = engine, one `check` per policy with all its matches).
+ * @notice Test double of the engine for the TimelockPolicy tests (WP B), built while the real
+ *         engine (WP A) was written in parallel. Same ABI for what the policy uses (`configure`
+ *         then `validate`, `matches`, `getAttachment(s)`, the four guard hooks) and calls policies
+ *         as the engine does (`msg.sender` = engine, one `check` per policy with all its matches).
  * @dev Simplified on purpose: one call per transaction (no batch decoding); no DENY; the owner
  *      path is granted without an ALLOW, the module path needs any matching ALLOW (no level rule);
  *      `configureFor` configures any Safe without authorization (test setup).
@@ -56,11 +56,13 @@ contract TimelockEngineStub {
 
     function _apply(address safe, Change[] calldata changes) private {
         Stored[] storage list = _attachments[safe];
+        address[] memory touched = new address[](changes.length);
         for (uint256 i = 0; i < changes.length; i++) {
             Change calldata c = changes[i];
             bytes32 key = ScopeLib.key(c.scope);
             bytes32 id = ScopeLib.attachmentId(key, c.kind, c.policy);
             (bool found, uint256 index) = _find(list, id);
+            if (c.kind == Kind.POLICY) touched[i] = c.policy;
             if (c.detach) {
                 require(found, NotAttached(id));
                 list[index] = list[list.length - 1];
@@ -79,6 +81,23 @@ contract TimelockEngineStub {
                 }
             }
         }
+        // As the engine: `validate` on the final configuration, for each touched policy still attached.
+        for (uint256 i = 0; i < touched.length; i++) {
+            address policy = touched[i];
+            if (policy == address(0) || !_hasPolicy(list, policy)) continue;
+            bool repeat;
+            for (uint256 j = 0; j < i && !repeat; j++) repeat = touched[j] == policy;
+            if (repeat) continue;
+            (bool ok, bytes memory reason) = policy.staticcall(abi.encodeCall(IPolicy.validate, (safe)));
+            require(ok, PolicyConfigurationFailed(policy, reason));
+        }
+    }
+
+    function _hasPolicy(Stored[] storage list, address policy) private view returns (bool) {
+        for (uint256 i = 0; i < list.length; i++) {
+            if (list[i].kind == Kind.POLICY && list[i].policy == policy) return true;
+        }
+        return false;
     }
 
     // =============================================================================================
@@ -125,6 +144,16 @@ contract TimelockEngineStub {
         if (!found) return (false, attachment);
         Stored storage a = list[index];
         return (true, AttachmentView(a.id, a.scopeKey, a.scope, a.kind, a.policy, a.opMask));
+    }
+
+    /// @notice As `IPolicyGuard.getAttachments`.
+    function getAttachments(address safe) external view returns (AttachmentView[] memory all) {
+        Stored[] storage list = _attachments[safe];
+        all = new AttachmentView[](list.length);
+        for (uint256 i = 0; i < list.length; i++) {
+            Stored storage a = list[i];
+            all[i] = AttachmentView(a.id, a.scopeKey, a.scope, a.kind, a.policy, a.opMask);
+        }
     }
 
     // =============================================================================================

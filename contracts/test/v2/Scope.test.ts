@@ -11,31 +11,16 @@ import {
   toBeHex,
   zeroPadValue,
 } from 'ethers'
-import { readFileSync } from 'fs'
 import { ethers } from 'hardhat'
-import { join } from 'path'
-import { ModuleKind, transpileModule } from 'typescript'
-import { runInNewContext } from 'vm'
-import type * as Mirror from '../../../src/lib/v2/rev3/types'
 import type { ScopeHarness } from '../../typechain-types'
+import type * as Mirror from '../../../src/lib/v2/rev3/types'
+import { opmask, types as ts } from './mirror'
 
 /**
  * WP0 (rev 3) frozen definitions: scope keys, the 6 levels, attachment ids, op masks, caps, the
  * module call hash and the batch cap, checked against an independent ethers encoding, and the TS
  * mirror `src/lib/v2/rev3/types.ts` checked against the Solidity harness.
  */
-
-// The root package is ESM and this one CommonJS, so the mirror (import-free by design) is
-// transpiled and evaluated here instead of required.
-const MIRROR = join(__dirname, '../../../src/lib/v2/rev3/types.ts')
-const ts = (() => {
-  const { outputText } = transpileModule(readFileSync(MIRROR, 'utf8'), {
-    compilerOptions: { module: ModuleKind.CommonJS },
-  })
-  const exports = {}
-  runInNewContext(outputText, { exports })
-  return exports as typeof Mirror
-})()
 
 const coder = AbiCoder.defaultAbiCoder()
 const { ANY, OWNERS, CallMatch, Kind } = ts
@@ -285,6 +270,36 @@ describe('V2 rev 3 scope library (WP0)', () => {
       expect(S.erc20IncreaseAllowance).to.equal(sig('increaseAllowance(address,uint256)'))
       expect(S.erc20DecreaseAllowance).to.equal(sig('decreaseAllowance(address,uint256)'))
       expect(ts.ERC1271_MAGIC_VALUE).to.equal(sig('isValidSignature(bytes32,bytes)'))
+      expect(await h.safeAdminSelectors()).to.deep.equal([
+        S.safeSetGuard,
+        S.safeSetModuleGuard,
+        S.safeEnableModule,
+        S.safeDisableModule,
+        S.safeSetFallbackHandler,
+      ])
+      expect(S.safeSetGuard).to.equal(sig('setGuard(address)'))
+      expect(S.safeSetModuleGuard).to.equal(sig('setModuleGuard(address)'))
+      expect(S.safeEnableModule).to.equal(sig('enableModule(address)'))
+      expect(S.safeDisableModule).to.equal(sig('disableModule(address,address)'))
+      expect(S.safeSetFallbackHandler).to.equal(sig('setFallbackHandler(address)'))
+    })
+
+    it('op masks: the app normalizes as ScopeLib, and weakerOps flags a narrowed DENY / POLICY or a widened ALLOW', async () => {
+      for (const kind of [Kind.ALLOW, Kind.DENY, Kind.POLICY])
+        for (let mask = 0; mask <= 3; mask++)
+          expect(opmask.normalizeOpMask(kind, mask), `kind ${kind} mask ${mask}`).to.equal(
+            Number(await h.normalizeOpMask(kind, mask)),
+          )
+      const { OP_CALL, OP_DELEGATECALL, OP_ALL } = ts
+      // Review rev 4 S3: "Admin delay" turns the "Owners" (Owners, *) Timelock DELEGATECALL-only.
+      expect(opmask.weakerOps(Kind.POLICY, OP_ALL, OP_DELEGATECALL)).to.deep.equal([
+        'no longer applies to CALL',
+      ])
+      expect(opmask.weakerOps(Kind.POLICY, OP_ALL, 0)).to.deep.equal([])
+      expect(opmask.weakerOps(Kind.POLICY, OP_CALL, OP_ALL)).to.deep.equal([])
+      expect(opmask.weakerOps(Kind.DENY, 0, OP_CALL)).to.deep.equal(['no longer applies to DELEGATECALL'])
+      expect(opmask.weakerOps(Kind.ALLOW, 0, OP_ALL)).to.deep.equal(['now also grants DELEGATECALL'])
+      expect(opmask.weakerOps(Kind.ALLOW, OP_ALL, OP_CALL)).to.deep.equal([])
     })
 
     it('interface ids equal type(I).interfaceId', async () => {

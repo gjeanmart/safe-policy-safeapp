@@ -33,7 +33,7 @@ export function useLabelContext(engine?: V2Engine): LabelContext {
       if (role) return role.label
       if (isAddressEqual(address, safe)) return 'Safe'
       const owner = state?.owners.findIndex((o) => isAddressEqual(o, address)) ?? -1
-      if (owner >= 0) return `Owner ${owner + 1}`
+      if (owner >= 0) return `Signer ${owner + 1}`
       return deploymentName(address) ?? ADDRESS_BOOK[address.toLowerCase()]
     }
     const tokenOf = (token: Address): TokenInfo | undefined =>

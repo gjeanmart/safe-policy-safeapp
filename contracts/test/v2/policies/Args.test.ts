@@ -24,7 +24,7 @@ const OWNERS = getAddress('0x0000000000000000000000000000000000000001')
 const CALL = 0
 const ANY_SELECTOR = '0xffffffff'
 const NO_SELECTOR = '0x00000000'
-const Target = { WORD: 0, CALL_TO: 1, VALUE: 2 }
+const Target = { WORD: 0, CALL_TO: 1, VALUE: 2, VALUE_TO: 3 }
 const Op = { EQ: 0, NEQ: 1, IN: 2, NOT_IN: 3, LTE: 4, GTE: 5, EQ_SAFE: 6 }
 const coder = AbiCoder.defaultAbiCoder()
 
@@ -67,7 +67,7 @@ const recipients = (list: string[], strict = true) => ({
   constraints: [
     c(TRANSFER, Target.WORD, 0, Op.IN, list),
     c(TRANSFER_FROM, Target.WORD, 1, Op.IN, list),
-    c(NO_SELECTOR, Target.CALL_TO, 0, Op.IN, list),
+    c(ANY_SELECTOR, Target.VALUE_TO, 0, Op.IN, list),
   ],
   strict,
 })
@@ -80,7 +80,7 @@ const receiverIsSafe = (selector: string, index: number) => ({
   strict: true,
 })
 
-describe('V2 rev 3 ArgsPolicy (WP C)', () => {
+describe('V2 ArgsPolicy (rev 4)', () => {
   let policy: ArgsPolicy
   let engine: ArgsLimitEngineStub
   let engineAddr: string
@@ -151,6 +151,7 @@ describe('V2 rev 3 ArgsPolicy (WP C)', () => {
         Array.from({ length: 17 }, () => c(TRANSFER, Target.WORD, 0, Op.EQ_SAFE)),
         [c(TRANSFER, Target.CALL_TO, 1, Op.EQ, [alice])], // index on a non-WORD target
         [c(TRANSFER, Target.VALUE, 1, Op.LTE, [1n])],
+        [c(ANY_SELECTOR, Target.VALUE_TO, 1, Op.IN, [alice])],
         [c(TRANSFER, Target.WORD, 0, Op.EQ, [])], // single-operand ops need exactly one value
         [c(TRANSFER, Target.WORD, 0, Op.NEQ, [alice, bob])],
         [c(TRANSFER, Target.WORD, 0, Op.LTE, [])],
@@ -198,14 +199,16 @@ describe('V2 rev 3 ArgsPolicy (WP C)', () => {
           [[[[TRANSFER, target, 0, op, [word(alice)]]], false]],
         )
       await engine.configure(policy, safe, A, scope, 3, raw(Target.WORD, Op.EQ))
-      await expectAnyRevert(engine.configure(policy, safe, A, scope, 3, raw(3, Op.EQ)))
+      await engine.configure(policy, safe, A, scope, 3, raw(Target.VALUE_TO, Op.EQ))
+      await expectAnyRevert(engine.configure(policy, safe, A, scope, 3, raw(4, Op.EQ)))
       await expectAnyRevert(engine.configure(policy, safe, A, scope, 3, raw(Target.WORD, 7)))
     })
 
     it('supports IPolicy and ERC-165', async () => {
       const iPolicy =
         BigInt(policy.interface.getFunction('configure')!.selector) ^
-        BigInt(policy.interface.getFunction('check')!.selector)
+        BigInt(policy.interface.getFunction('check')!.selector) ^
+        BigInt(policy.interface.getFunction('validate')!.selector)
       expect(await policy.supportsInterface(toBeHex(iPolicy, 4))).to.equal(true)
       expect(await policy.supportsInterface('0x01ffc9a7')).to.equal(true)
       expect(await policy.supportsInterface('0xffffffff')).to.equal(false)
@@ -239,6 +242,29 @@ describe('V2 rev 3 ArgsPolicy (WP C)', () => {
       await check1(call(usdc, '0x', 5n))
       await expectRevert(check1(call(pool, '0x', 5n)), policy, 'ConstraintFailed', [0, A, 0])
       await expectRevert(check1(call(usdc, '0x', 6n)), policy, 'ConstraintFailed', [0, A, 1])
+    })
+
+    it('VALUE_TO reads the target of a call with value, whatever its selector; a zero-value call is not judged', async () => {
+      await configure(A, {
+        constraints: [c(ANY_SELECTOR, Target.VALUE_TO, 0, Op.IN, [alice])],
+        strict: false,
+      })
+      await check1(call(alice, '0x', 1n))
+      await check1(call(alice, '0xdeadbeef', 1n))
+      // Review A1: the same send with junk calldata is judged like a plain one.
+      await expectRevert(check1(call(eve, '0x', 1n)), policy, 'ConstraintFailed', [0, A, 0])
+      await expectRevert(check1(call(eve, '0xdeadbeef', 1n)), policy, 'ConstraintFailed', [0, A, 0])
+      await expectRevert(
+        check1(call(usdc, erc20.encodeFunctionData('transfer', [alice, 1n]), 1n)),
+        policy,
+        'ConstraintFailed',
+        [0, A, 0],
+      )
+      // Zero value: skipped. Non-strict passes; strict finds no constraint applied.
+      await check1(call(eve, '0xdeadbeef'))
+      await configure(A, { constraints: [c(ANY_SELECTOR, Target.VALUE_TO, 0, Op.IN, [alice])], strict: true })
+      await check1(call(alice, '0x', 1n))
+      await expectRevert(check1(call(alice, '0xdeadbeef')), policy, 'NoConstraint', [0, A])
     })
 
     const cases: [string, number, (string | bigint)[], bigint[], bigint[]][] = [
@@ -401,7 +427,7 @@ describe('V2 rev 3 ArgsPolicy (WP C)', () => {
   })
 
   describe('presets', () => {
-    it('Recipients: transfer word 0, transferFrom word 1, plain sends to, all IN the list', async () => {
+    it('Recipients: transfer word 0, transferFrom word 1, the destination of any value, all IN the list', async () => {
       await configure(A, recipients([alice, bob]))
       await check1(transfer(alice))
       await check1(transfer(bob))
@@ -415,6 +441,9 @@ describe('V2 rev 3 ArgsPolicy (WP C)', () => {
         [0, A, 1],
       )
       await expectRevert(check1(call(eve, '0x', 1n)), policy, 'ConstraintFailed', [0, A, 2])
+      // ETH with calldata is judged by destination too (review A1); a payable call to a listed one passes.
+      await expectRevert(check1(call(eve, '0xdeadbeef', 1n)), policy, 'ConstraintFailed', [0, A, 2])
+      await check1(call(alice, '0xdeadbeef', 1n))
       // Strict: any other shape is denied, including a revocation (dropped from rev 2 Recipients).
       await expectRevert(
         check1(call(usdc, erc20.encodeFunctionData('approve', [eve, 0n]))),

@@ -1,4 +1,4 @@
-import { type Address, type Hex, isAddressEqual, size } from 'viem'
+import { type Address, BaseError, type Hex, isAddressEqual, size } from 'viem'
 import { chain, publicClient } from '../../config/client'
 import type { V2Deployment } from '../../lib/v2'
 import {
@@ -17,6 +17,7 @@ import {
   sortOwnerSignatures,
 } from '../../lib/v2'
 import type { QueuedSafeTx } from '../../hooks/useSafeApp'
+import { describeError } from '../../lib/errors'
 import { v2OwnerTxStore } from '../../store'
 
 /** A signed (or being signed) owner transaction and the signatures collected so far. */
@@ -171,4 +172,44 @@ export async function readOwnerRow(
   const signed = !!data && data.count >= threshold && !hasGasFields(data.tx) && !data.executed
   const route = !schedule && signed ? await readRoute(deployment, safe, data.tx) : undefined
   return { data, schedule, merged, route }
+}
+
+/** The outcome of an `eth_call` run as if the block were at a later time. */
+export type TimedSimulation =
+  | { ok: true }
+  | { ok: false; reason: string }
+  /** The RPC refused block overrides: nothing could be learned about that time. */
+  | { unsupported: true }
+
+const OVERRIDES_REFUSED =
+  /-32602|invalid (argument|param)|too many arguments|override|not supported|unknown field/i
+
+/**
+ * Dry-runs `call` from `from` with the block time overridden to `time` (eth_call block overrides),
+ * to see whether it would pass once a Timelock is ready. Reverts come back as a reason; an RPC that
+ * does not take overrides is reported apart, so the caller can say so instead of showing a false
+ * "denied".
+ */
+export async function simulateAtTime(
+  from: Address,
+  call: { to: Address; data: Hex; value?: bigint },
+  time: bigint,
+): Promise<TimedSimulation> {
+  try {
+    await publicClient.call({
+      account: from,
+      to: call.to,
+      data: call.data,
+      value: call.value,
+      blockOverrides: { time },
+    })
+    return { ok: true }
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error)
+    const reverted =
+      error instanceof BaseError &&
+      (/revert/i.test(raw) || !!error.walk((e) => typeof (e as { data?: unknown }).data === 'string'))
+    if (!reverted && OVERRIDES_REFUSED.test(raw)) return { unsupported: true }
+    return { ok: false, reason: describeError(error) }
+  }
 }

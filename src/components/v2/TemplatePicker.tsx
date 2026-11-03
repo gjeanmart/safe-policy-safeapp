@@ -17,8 +17,10 @@ import {
   deployedPolicies,
   describeChange,
   templates,
+  weakerLabel,
+  weakerReplacements,
 } from '../../lib/v2'
-import { parseAddressList } from '../../lib/validation'
+import { parseAddressList, parseSelectorInput } from '../../lib/validation'
 import { canAct, rolesStore } from '../../store'
 import { AddressShortcuts } from '../AddressShortcuts'
 import { Field, Notice } from '../ui'
@@ -92,7 +94,7 @@ const buildPayments =
   }
 
 export const GUARDIANS_INFO =
-  'Can freeze this actor at once: nothing it scheduled executes while frozen. A freeze lasts at most F, then a cooldown C before a new one. Pick people or devices that are not this actor.'
+  "Can freeze this actor at once: it cannot start new transactions, and what it scheduled before is void. The first freeze of any of its rules opens the actor's window (at most F, whoever freezes); later freezes join it; then a cooldown C with no new freeze. Allowances and pre-signed orders stay usable. Pick people or devices that are not this actor."
 export const LIFTERS_INFO =
   'Can end a freeze early, but cannot start one. Typical: the recovery module, so a stuck freeze never blocks recovery.'
 export const CANCELLERS_INFO =
@@ -147,6 +149,63 @@ const FORMS: TemplateForm[] = [
       const cancellers = list(v.cancellers!, 'cancellers')
       if (isErr(cancellers)) return cancellers.error
       return templates.everyone.build(d, { delay: Number(v.delay), cancellers }, context)
+    },
+  },
+  {
+    id: 'adminDelay',
+    needs: ['timelock'],
+    fields: [
+      { key: 'delay', label: 'Delay (D)', kind: 'delay', initial: String(3 * DAY) },
+      { key: 'guardians', label: 'Guardians (optional)', kind: 'addresses', info: GUARDIANS_INFO },
+    ],
+    build: (d, v, context) => {
+      const guardians = list(v.guardians!, 'guardians')
+      if (isErr(guardians)) return guardians.error
+      return templates.adminDelay.build(d, { delay: Number(v.delay), guardians }, context)
+    },
+  },
+  {
+    id: 'functionDelay',
+    needs: ['timelock'],
+    fields: [
+      { key: 'to', label: 'Contract', kind: 'token', initial: TOKENS.USDC.address },
+      {
+        key: 'token',
+        label: 'It is a token: delay transfer, transferFrom, approve and increaseAllowance',
+        kind: 'bool',
+        initial: 'true',
+        info: 'Delaying transfer alone is pointless: approve then transferFrom moves the same tokens.',
+      },
+      {
+        key: 'function',
+        label: 'Function (when not a token)',
+        kind: 'text',
+        initial: 'transfer(address,uint256)',
+      },
+      { key: 'delay', label: 'Delay (D)', kind: 'delay', initial: String(3 * DAY) },
+      { key: 'guardians', label: 'Guardians', kind: 'addresses', info: GUARDIANS_INFO },
+      { key: 'cancellers', label: 'Cancellers (optional)', kind: 'addresses', info: CANCELLERS_INFO },
+    ],
+    build: (d, v, context) => {
+      const to = address(v.to!, 'the contract')
+      const guardians = list(v.guardians!, 'the guardians', true)
+      const cancellers = list(v.cancellers!, 'cancellers')
+      const error = firstError(to, guardians, cancellers)
+      if (error) return error
+      const selector = parseSelectorInput(v.function!)
+      if (v.token !== 'true' && !selector.ok) return selector.error
+      return templates.functionDelay.build(
+        d,
+        {
+          to: to as Address,
+          selector: selector.ok ? selector.value : '0x00000000',
+          delay: Number(v.delay),
+          guardians: guardians as Address[],
+          cancellers: cancellers as Address[],
+          token: v.token === 'true',
+        },
+        context,
+      )
     },
   },
   {
@@ -324,16 +383,28 @@ export function TemplatePicker({
   const [id, setId] = useState<TemplateId>('owners')
   const form = FORMS.find((f) => f.id === id)!
   const [values, setValues] = useState<Record<string, Values>>({})
+  const [acceptWeaker, setAcceptWeaker] = useState(false)
   const v = values[id] ?? initialValues(form)
   const missing = form.needs.filter((p) => !deployed.includes(p))
   const result = form.build(deployment, v, context)
   const template = templates[id]
-  const set = (key: string, next: string) => setValues((all) => ({ ...all, [id]: { ...v, [key]: next } }))
+  const weaker =
+    typeof result === 'string' ? [] : weakerReplacements(result, context.attachments, deployment, ctx)
+  const set = (key: string, next: string) => {
+    setAcceptWeaker(false)
+    setValues((all) => ({ ...all, [id]: { ...v, [key]: next } }))
+  }
 
   return (
     <div className="stack">
       <Field label="Template">
-        <select value={id} onChange={(e) => setId(e.target.value as TemplateId)}>
+        <select
+          value={id}
+          onChange={(e) => {
+            setAcceptWeaker(false)
+            setId(e.target.value as TemplateId)
+          }}
+        >
           {FORMS.map((f) => (
             <option key={f.id} value={f.id}>
               {templates[f.id].title}
@@ -380,17 +451,41 @@ export function TemplatePicker({
         <p className="muted small">{result}</p>
       ) : (
         <ul className="plain small">
-          {result.map((c, i) => (
-            <li key={i}>{describeChange(c, deployment, ctx)}</li>
-          ))}
+          {result.map((c, i) => {
+            const w = weaker.find((x) => x.change === c)
+            return (
+              <li key={i}>
+                {describeChange(c, deployment, ctx)}
+                {w && <span className="error-text"> — {weakerLabel(w, ctx)}</span>}
+              </li>
+            )
+          })}
         </ul>
+      )}
+      {weaker.length > 0 && (
+        <Notice tone="warn">
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={acceptWeaker}
+              onChange={(e) => setAcceptWeaker(e.target.checked)}
+            />
+            This template replaces{' '}
+            {weaker.length === 1 ? 'an existing rule' : `${weaker.length} existing rules`} with weaker
+            settings (marked above). Replace anyway.
+          </label>
+        </Notice>
       )}
       <div className="row">
         <button
           type="button"
           className="btn btn-primary"
-          disabled={typeof result === 'string' || missing.length > 0}
-          onClick={() => typeof result !== 'string' && onAdd(result)}
+          disabled={typeof result === 'string' || missing.length > 0 || (weaker.length > 0 && !acceptWeaker)}
+          onClick={() => {
+            if (typeof result === 'string') return
+            onAdd(result)
+            setAcceptWeaker(false)
+          }}
         >
           Add to draft
         </button>

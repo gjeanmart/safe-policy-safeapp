@@ -61,4 +61,17 @@ interface IPolicy is IERC165 {
         Call[] calldata calls,
         Match[] calldata matches
     ) external returns (bytes4 magicValue);
+
+    /**
+     * @notice Checks this policy's invariants over the Safe's final configuration. Called by the
+     *         engine by STATICCALL at the end of every `configure` that attached, updated or
+     *         detached an attachment of this policy, while at least one remains attached (a fully
+     *         detached policy is never called: liveness).
+     * @dev Revert to reject the whole configuration (`PolicyConfigurationFailed`). Read the final
+     *      attachments through `IPolicyGuard(msg.sender).getAttachments(safe)`. Declared without
+     *      `view` so an implementation may DELEGATECALL a module; it must not write state (the
+     *      engine calls it by STATICCALL, so a write reverts). It runs only when the batch touched
+     *      this policy: an invariant may depend only on this policy's own attachments.
+     */
+    function validate(address safe) external;
 }

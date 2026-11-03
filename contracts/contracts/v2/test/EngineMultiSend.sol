@@ -49,3 +49,19 @@ contract EngineMultiSend {
         }
     }
 }
+
+/**
+ * @title Batch recorder
+ * @notice Records every call it receives (CALL or DELEGATECALL) for the differential MultiSend
+ *         test: `id` is this deployment (an immutable, so a DELEGATECALL into it still reports
+ *         it), `self` is `address(this)` (the Safe under DELEGATECALL).
+ */
+contract BatchRecorder {
+    address private immutable _ID = address(this);
+
+    event Recorded(address id, address self, uint256 value, bytes data);
+
+    fallback() external payable {
+        emit Recorded(_ID, address(this), msg.value, msg.data);
+    }
+}

@@ -59,7 +59,7 @@ contract ArgsPolicy is PolicyBase, IArgsPolicy {
         Constraint[] storage stored = $constraints[_versionKey(key, version)];
         for (uint256 i; i < n; ++i) {
             Constraint memory c = s.constraints[i];
-            _validate(c);
+            _validateConstraint(c);
             stored.push(c);
         }
     }
@@ -93,18 +93,21 @@ contract ArgsPolicy is PolicyBase, IArgsPolicy {
             Constraint storage c = constraints[j];
             bytes4 cSelector = c.selector;
             if (cSelector != selector && cSelector != ANY_SELECTOR) continue;
+            Target target = c.target;
+            // VALUE_TO judges the destination only when value moves.
+            if (target == Target.VALUE_TO && call.value == 0) continue;
             applied = true;
 
             bytes32 word;
-            Target target = c.target;
             if (target == Target.WORD) {
                 uint256 offset = 4 + 32 * uint256(c.index);
                 require(data.length >= offset + 32, ArgumentMissing(callIndex, attachmentId, uint16(j)));
                 word = bytes32(data[offset:offset + 32]);
-            } else if (target == Target.CALL_TO) {
-                word = bytes32(uint256(uint160(call.to)));
-            } else {
+            } else if (target == Target.VALUE) {
                 word = bytes32(call.value);
+            } else {
+                // CALL_TO or VALUE_TO
+                word = bytes32(uint256(uint160(call.to)));
             }
             require(_holds(c, word, safe), ConstraintFailed(callIndex, attachmentId, uint16(j)));
         }
@@ -132,7 +135,7 @@ contract ArgsPolicy is PolicyBase, IArgsPolicy {
 
     /// @dev EQ_SAFE takes no operand, IN / NOT_IN 1 to 32, the others exactly one; `index` is
     ///      WORD-only.
-    function _validate(Constraint memory c) private pure {
+    function _validateConstraint(Constraint memory c) private pure {
         require(c.target == Target.WORD || c.index == 0, InvalidSettings());
         uint256 n = c.values.length;
         if (c.op == Op.EQ_SAFE) require(n == 0, InvalidSettings());

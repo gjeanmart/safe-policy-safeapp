@@ -77,7 +77,7 @@ export const ADDRESS_BOOK: Record<string, string> = Object.fromEntries([
 ])
 
 /**
- * Policy Engine V2, rev 3 (contracts/contracts/v2/SPEC.md). Until it is deployed every address is a
+ * Policy Engine V2 (contracts/contracts/v2/SPEC.md). Until it is deployed every address is a
  * zero placeholder and the app shows "V2 not deployed on this chain".
  *
  * To fill in: run `pnpm deploy:v2:sepolia` in `contracts/` and replace the entry below with the
@@ -93,7 +93,30 @@ export type V2Engine = { label: string; deployment: V2Deployment }
 export const V2_ENGINES: readonly V2Engine[] = [
   {
     // Sepolia, deployed 2026-11-03 by contracts/scripts/deploy-v2.ts (Safenet skipped: no SAFENET_* variables).
-    label: 'rev 3',
+    label: 'rev 4',
+    deployment: parseV2Deployment({
+      engine: '0xe0Aa9874E3d4eE6fAd632d8dBCCcF8D61dfCD3B5',
+      engineConfig: '0xEf696d5d3285c10C7e996D43035CB6ad97D837f0',
+      trustedBatches: [
+        '0x9641d764fc13c8B624c04430C7356C1C7C8102e2',
+        '0xA83c336B20401Af773B6219BA5027174338D1836',
+      ],
+      policies: {
+        timelock: '0x59a502E8A103670A0743Ba30257A8e6dCF55Cb7d',
+        timelockQueue: '0x77882359557112e039E6D295DC1a7cbeBE513471',
+        timelockFreeze: '0xC0192B5620E75BEdE185A16fE0c042f786cc1724',
+        args: '0x196ea4bf5e99Cc18C4b401aA452C839c327D66a2',
+        limit: '0xf3645eB0fD52BAAbE3F61Dd450CAB7cE982e42D5',
+        coSigner: '0x6D338Fb2505262da97c61485693428929e4436d1',
+        safenet: V2_ZERO,
+      },
+      fromBlock: 12058074,
+    }),
+  },
+  {
+    // Rev 3, superseded by rev 4. Kept only so a Safe that still runs it can schedule its uninstall
+    // through the rev 3 Timelock (same schedule / execute interface); new installs use rev 4.
+    label: 'rev 3 (legacy)',
     deployment: parseV2Deployment({
       engine: '0x0d08b0B71dF73F454c5c2DA2bbC4Ee82D20DdF1E',
       engineConfig: '0x647D108A63ab9050e2c1BC89e0Ac68598E452F8C',

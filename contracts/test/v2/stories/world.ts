@@ -186,7 +186,7 @@ export const timelockSettings = (s: TimelockSettings) =>
     [[s.delay, s.window ?? 0, s.guardians ?? [], s.lifters ?? [], s.cancellers ?? []]],
   )
 
-export const ArgsTarget = { WORD: 0, CALL_TO: 1, VALUE: 2 } as const
+export const ArgsTarget = { WORD: 0, CALL_TO: 1, VALUE: 2, VALUE_TO: 3 } as const
 export const ArgsOp = { EQ: 0, NEQ: 1, IN: 2, NOT_IN: 3, LTE: 4, GTE: 5, EQ_SAFE: 6 } as const
 export type Constraint = { selector: string; target: number; index: number; op: number; values: string[] }
 export const word = (v: string | bigint) =>
@@ -206,11 +206,11 @@ export const argsSettings = (constraints: Constraint[], strict = true) =>
     ],
     [[constraints.map((c) => [c.selector, c.target, c.index, c.op, c.values]), strict]],
   )
-/** App preset "Recipients": `transfer` word 0 IN, `transferFrom` word 1 IN, empty calldata CALL_TO IN. */
+/** App preset "Recipients" (rev 4): `transfer` word 0 IN, `transferFrom` word 1 IN, any call with value: VALUE_TO IN. */
 export const recipientsPreset = (recipients: string[]): Constraint[] => [
   onWord(SEL.transfer, 0, ArgsOp.IN, recipients),
   onWord(SEL.transferFrom, 1, ArgsOp.IN, recipients),
-  { selector: SEL.empty, target: ArgsTarget.CALL_TO, index: 0, op: ArgsOp.IN, values: recipients.map(word) },
+  { selector: SEL.any, target: ArgsTarget.VALUE_TO, index: 0, op: ArgsOp.IN, values: recipients.map(word) },
 ]
 /** App preset "Spenders": `approve` word 0 IN, word 1 LTE cap. */
 export const spendersPreset = (spenders: string[], cap: bigint): Constraint[] => [
@@ -498,6 +498,12 @@ export async function coApproveWithSig(
   const validUntil = BigInt(await time.latest()) + DAY
   const { chainId } = await ethers.provider.getNetwork()
   const useCount = await w.cosigner.useCount(w.engineAddress, w.safeAddress, txHash)
+  const revision = await w.cosigner.revision(
+    w.engineAddress,
+    w.safeAddress,
+    txHash,
+    await approver.getAddress(),
+  )
   const signature = await approver.signTypedData(
     { name: 'CoSignerPolicy', version: '1', chainId, verifyingContract: addrOf(w.cosigner) },
     {
@@ -505,11 +511,21 @@ export async function coApproveWithSig(
         { name: 'engine', type: 'address' },
         { name: 'safe', type: 'address' },
         { name: 'txHash', type: 'bytes32' },
+        { name: 'approver', type: 'address' },
         { name: 'useCount', type: 'uint256' },
+        { name: 'revision', type: 'uint256' },
         { name: 'validUntil', type: 'uint64' },
       ],
     },
-    { engine: w.engineAddress, safe: w.safeAddress, txHash, useCount, validUntil },
+    {
+      engine: w.engineAddress,
+      safe: w.safeAddress,
+      txHash,
+      approver: await approver.getAddress(),
+      useCount,
+      revision,
+      validUntil,
+    },
   )
   await w.cosigner
     .connect(relayer ?? w.stranger)
@@ -573,6 +589,27 @@ export async function expectPolicyDenied(
   const data = await dataOf(action)
   const outer = w.engine.interface.parseError(data)
   expect(outer?.name, `revert data ${data}`).to.equal('PolicyDenied')
+  expect(getAddress(outer!.args.policy)).to.equal(addrOf(policy))
+  const inner = policy.interface.parseError(outer!.args.reason)
+  expect(inner?.name, `reason ${outer!.args.reason}`).to.equal(name)
+  if (args) expect(norm([...inner!.args])).to.deep.equal(norm(args))
+  return data
+}
+
+/**
+ * Asserts `PolicyConfigurationFailed(policy, reason)` from the engine (a policy's `configure` or
+ * `validate` refused) with `reason` decoding to `name` in the policy's ABI (and its `args`).
+ */
+export async function expectConfigurationFailed(
+  action: Promise<unknown> | (() => Promise<unknown>),
+  w: World,
+  policy: BaseContract,
+  name: string,
+  args?: unknown[],
+) {
+  const data = await dataOf(action)
+  const outer = w.engine.interface.parseError(data)
+  expect(outer?.name, `revert data ${data}`).to.equal('PolicyConfigurationFailed')
   expect(getAddress(outer!.args.policy)).to.equal(addrOf(policy))
   const inner = policy.interface.parseError(outer!.args.reason)
   expect(inner?.name, `reason ${outer!.args.reason}`).to.equal(name)

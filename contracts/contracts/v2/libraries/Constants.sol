@@ -13,6 +13,14 @@ bytes4 constant MULTI_SEND_SELECTOR = 0x8d80ff0a;
 /// @dev ERC-1271 `isValidSignature(bytes32,bytes)` magic value.
 bytes4 constant ERC1271_MAGIC_VALUE = 0x1626ba7e;
 
+/// @dev Safe 1.5.0 administration selectors: the owner-path routes out of any policy, which a
+///      delayed owners' Timelock must cover at least as long (SPEC.md §5.1).
+bytes4 constant SAFE_SET_GUARD = 0xe19a9dd9; //             setGuard(address)
+bytes4 constant SAFE_SET_MODULE_GUARD = 0xe068df37; //      setModuleGuard(address)
+bytes4 constant SAFE_ENABLE_MODULE = 0x610b5925; //         enableModule(address)
+bytes4 constant SAFE_DISABLE_MODULE = 0xe009cfde; //        disableModule(address,address)
+bytes4 constant SAFE_SET_FALLBACK_HANDLER = 0xf08a0323; //  setFallbackHandler(address)
+
 /// @dev ArgsPolicy: a constraint whose `selector` is this applies to every call of the attachment.
 bytes4 constant ANY_SELECTOR = 0xffffffff;
 

@@ -15,7 +15,7 @@ import type { OwnerCall } from './changes'
 import { readSafeNonce, txHashOf } from './identity'
 import { POLICY_INFO, type PolicyName, type V2Deployment, policyNameOf, selectorName } from './policies'
 import { Kind, OPERATION_LABELS, OWNERS, Selectors, levelLabel } from './scopes'
-import { type LabelContext, addressLabel, amountLabel } from './settings'
+import { type LabelContext, addressLabel, amountLabel, durationLabel } from './settings'
 
 /**
  * Off-chain preview (SPEC.md §3.5): `engine.matches(...)` returns the calls, every matched
@@ -173,7 +173,7 @@ export function describeReason(
     case 'InvalidPolicy':
       return text(`${who(0)} is not a policy (ERC-165 IPolicy)`)
     case 'PolicyConfigurationFailed':
-      return text(`${who(0)} refused its settings: ${describeReason(a(1) as Hex, ctx).text}`)
+      return text(`${who(0)} refused this configuration: ${describeReason(a(1) as Hex, ctx).text}`)
     case 'TooManyAttachments':
       return text('At most 8 attachments per scope')
     case 'NotAttached':
@@ -201,10 +201,14 @@ export function describeReason(
       return text('safeTxGas and gasPrice must be 0')
     case 'StaleNonce':
       return text(`Nonce ${a(0)} already used (the Safe is at ${a(1)})`)
-    case 'TimelockNotCoveringConfiguration':
+    case 'TimelockNotCoveringConfiguration': {
+      // (to, selector, op, delay): the first route out of the owners' delays left faster than it.
+      const route = BigInt(a(0) as Address) === 0n ? 'Any DELEGATECALL' : `${who(0)}.${fn(1)}`
       return text(
-        "This Timelock needs one at least as long covering engine.configure (the owners' (Owners, *))",
+        `${route} must be delayed at least ${durationLabel(Number(a(3)))}, the owners' longest delay: otherwise ` +
+          'the owners could remove or bypass that delay faster than it delays (add the "Admin delay" template)',
       )
+    }
     case 'NotCanceller':
       return text(`${who(0)} may not cancel this schedule`)
     case 'NotOwnersQueue':

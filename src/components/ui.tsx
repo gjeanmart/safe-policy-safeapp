@@ -1,9 +1,11 @@
 import { type ButtonHTMLAttributes, type ReactNode, useState } from 'react'
+import type { Hash } from 'viem'
 import { EXPLORER } from '../config/contracts'
 import { describeError } from '../lib/errors'
 import { shortAddress } from '../lib/format'
 import type { SafeTx } from '../lib/safe'
 import { useAddressName } from '../hooks/useAddressName'
+import { CheckCircleIcon, ErrorIcon, InfoIcon, SpinnerIcon, WarningIcon } from './icons'
 import { InfoTip, Tooltip } from './Tooltip'
 
 export function Card({
@@ -57,9 +59,70 @@ export function Tag({
   return <span className={classes}>{children}</span>
 }
 
-export function Notice({ tone = 'info', children }: { tone?: 'info' | 'warn' | 'bad'; children: ReactNode }) {
-  return <div className={`notice notice-${tone}`}>{children}</div>
+export type NoticeTone = 'info' | 'ok' | 'warn' | 'bad'
+
+const NOTICE_ICONS: Record<NoticeTone, ReactNode> = {
+  info: <InfoIcon />,
+  ok: <CheckCircleIcon />,
+  warn: <WarningIcon />,
+  bad: <ErrorIcon />,
 }
+
+/**
+ * A callout: an icon per tone, an optional bold title, a short body, and long explanations behind
+ * "Learn more" (`more`) so the notice stays one or two lines.
+ */
+export function Notice({
+  tone = 'info',
+  title,
+  more,
+  children,
+}: {
+  tone?: NoticeTone
+  title?: ReactNode
+  /** Folded explanation under the body. */
+  more?: ReactNode
+  children?: ReactNode
+}) {
+  return (
+    <div className={`notice notice-${tone}`} role={tone === 'bad' ? 'alert' : undefined}>
+      <span className="notice-icon">{NOTICE_ICONS[tone]}</span>
+      <div className="notice-content">
+        {title && <div className="notice-title">{title}</div>}
+        {children && <div className="notice-body">{children}</div>}
+        {more && (
+          <details className="notice-more">
+            <summary>Learn more</summary>
+            {more}
+          </details>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** A failure on one line, with the full message folded under it when it is long. */
+export function ErrorLine({ message }: { message: string }) {
+  const first = message.split('\n')[0]!
+  const short = first.length > 140 ? `${first.slice(0, 137)}…` : first
+  if (short === message) return <span className="error-text">{message}</span>
+  return (
+    <span className="error-text error-line">
+      {short}
+      <details>
+        <summary>Details</summary>
+        <pre className="error-details">{message}</pre>
+      </details>
+    </span>
+  )
+}
+
+/** Inline progress: a spinner and what is happening ("Scheduling…"). */
+export const Pending = ({ children }: { children: ReactNode }) => (
+  <span className="pending-label">
+    <SpinnerIcon /> {children}
+  </span>
+)
 
 /**
  * Copies text to the clipboard. Inside the Safe{Wallet} iframe the async Clipboard API is denied
@@ -129,10 +192,29 @@ export const TxLink = ({ hash }: { hash: string }) => (
   </a>
 )
 
+/** A 32-byte hash shortened, with a copy button (Safe transaction hashes, attachment ids). */
+export const ShortHash = ({ hash, label }: { hash: string; label?: string }) => (
+  <span className="short-hash">
+    {label && <span className="muted">{label} </span>}
+    <span className="mono">{shortAddress(hash)}</span>
+    <CopyButton value={hash} />
+  </span>
+)
+
 type AsyncButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'onClick'> & {
   onClick: () => Promise<unknown> | unknown
   variant?: 'primary' | 'secondary' | 'danger'
+  /** Shown with a spinner while the handler runs ("Executing…"). */
+  busyLabel?: string
+  /**
+   * Replaces the button once the handler succeeds ("Executed"); when it resolved to a transaction
+   * hash, that links to the explorer.
+   */
+  doneLabel?: string
 }
+
+const isTxHash = (value: unknown): value is Hash =>
+  typeof value === 'string' && /^0x[0-9a-fA-F]{64}$/.test(value)
 
 /** Button that disables itself while its handler runs and shows the error it throws, if any. */
 export function AsyncButton({
@@ -141,21 +223,37 @@ export function AsyncButton({
   children,
   disabled,
   title,
+  busyLabel,
+  doneLabel,
   ...rest
 }: AsyncButtonProps) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
+  const [done, setDone] = useState<{ hash?: Hash }>()
   const handle = async () => {
     setBusy(true)
     setError(undefined)
     try {
-      await onClick()
+      const result = await onClick()
+      if (doneLabel) setDone({ hash: isTxHash(result) ? result : undefined })
     } catch (err) {
       setError(describeError(err))
     } finally {
       setBusy(false)
     }
   }
+  if (done)
+    return (
+      <span className="done-label">
+        <CheckCircleIcon /> {doneLabel}
+        {done.hash && (
+          <>
+            {' · '}
+            <TxLink hash={done.hash} />
+          </>
+        )}
+      </span>
+    )
   return (
     <span className="async-button">
       {/* The title becomes an instant tooltip rather than the delayed native one. */}
@@ -168,10 +266,10 @@ export function AsyncButton({
           aria-label={typeof children === 'string' ? undefined : title}
           {...rest}
         >
-          {busy ? '…' : children}
+          {busy ? busyLabel ? <Pending>{busyLabel}</Pending> : <SpinnerIcon /> : children}
         </button>
       </Tooltip>
-      {error && <span className="error-text">{error}</span>}
+      {error && <ErrorLine message={error} />}
     </span>
   )
 }

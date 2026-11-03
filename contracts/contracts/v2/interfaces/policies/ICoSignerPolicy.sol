@@ -82,20 +82,33 @@ interface ICoSignerPolicy is IPolicy {
         bytes calldata signature
     ) external;
 
-    /// @notice Removes `msg.sender`'s approval of the current use of `txHash`. Who: the approver.
+    /// @notice Removes `msg.sender`'s approval of the current use of `txHash` and bumps its
+    ///         {revision}, which voids its signatures not pushed yet. Who: the approver.
     function revoke(address engine, address safe, bytes32 txHash) external;
 
     /**
-     * @notice EIP-712 digest an approver signs: domain `("CoSignerPolicy", "1", chainid, this)`,
-     *         `Approval(address engine,address safe,bytes32 txHash,uint256 useCount,uint64 validUntil)`
-     *         with the current {useCount}.
+     * @notice EIP-712 digest `approver` signs: domain `("CoSignerPolicy", "1", chainid, this)`,
+     *         `Approval(address engine,address safe,bytes32 txHash,address approver,uint256 useCount,
+     *         uint256 revision,uint64 validUntil)` with the current {useCount} and the approver's
+     *         {revision}. The approver is bound: one signature never counts for another approver
+     *         (e.g. an ERC-1271 approver that accepts a listed EOA's signatures).
      */
     function approvalDigest(
         address engine,
         address safe,
         bytes32 txHash,
+        address approver,
         uint64 validUntil
     ) external view returns (bytes32);
+
+    /// @notice How many times `approver` revoked on `txHash`: part of its digest, so a revoke voids
+    ///         its signatures not pushed yet.
+    function revision(
+        address engine,
+        address safe,
+        bytes32 txHash,
+        address approver
+    ) external view returns (uint256);
 
     /// @notice How many times approvals of `txHash` were consumed.
     function useCount(address engine, address safe, bytes32 txHash) external view returns (uint256);

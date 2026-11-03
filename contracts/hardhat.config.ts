@@ -11,7 +11,7 @@ const config: HardhatUserConfig = {
   solidity: {
     // Same compiler settings as safe-research/policy-engine.
     version: '0.8.30',
-    settings: { evmVersion: 'cancun', optimizer: { enabled: true, runs: 10_000_000 }, viaIR: true },
+    settings: { evmVersion: 'cancun', optimizer: { enabled: true, runs: 10_000 }, viaIR: true },
   },
   networks: {
     sepolia: {

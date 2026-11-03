@@ -150,7 +150,9 @@ export function FreezeBadge({ a, now }: { a: Attachment; now: number }) {
   const phase = freezePhase(a.freeze, BigInt(now))
   if (phase === 'active' || !a.freeze) return null
   return phase === 'frozen' ? (
-    <Badge tone="bad">frozen · {formatDuration(Number(a.freeze.frozenUntil) - now)} left</Badge>
+    <span title="Stops new transactions of this actor. Allowances, operator rights and pre-signed orders stay usable: revoke them separately.">
+      <Badge tone="bad">frozen · {formatDuration(Number(a.freeze.frozenUntil) - now)} left</Badge>
+    </span>
   ) : (
     <Badge tone="warn">cooldown · {formatDuration(Number(a.freeze.cooldownUntil) - now)}</Badge>
   )

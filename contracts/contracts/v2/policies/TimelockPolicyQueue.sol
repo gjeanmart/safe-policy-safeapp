@@ -28,6 +28,8 @@ abstract contract TimelockPolicyStorage {
         uint64 configuredAt;
         uint64 frozenUntil;
         uint64 cooldownUntil;
+        /// @dev The scope's actor: freezes are bounded per actor (`_actorWindows`).
+        address actor;
         address[] guardians;
         address[] lifters;
         address[] cancellers;
@@ -48,19 +50,17 @@ abstract contract TimelockPolicyStorage {
     mapping(address engine => mapping(address safe => mapping(bytes32 txHash => ITimelockPolicy.Schedule)))
         internal _schedules;
 
-    /// @dev A guardian's freeze window in one Safe: every freeze it makes ends at `end`; it is
-    ///      cooling down until `end + COOLDOWN`. `frozen` counts the ids it froze in this window
-    ///      and has not seen lifted.
-    struct GuardianWindow {
+    /// @dev The freeze window of one actor's attachments in one Safe, whoever the guardian: the
+    ///      first freeze opens it (`MAX_FREEZE` long), every later freeze of that actor's ids ends
+    ///      with it (joins, never extends), and none starts between `end` and `end + COOLDOWN`.
+    ///      `frozen` counts the ids frozen in it and not lifted; a lift that leaves none closes it.
+    struct ActorWindow {
         uint64 end;
         uint32 frozen;
     }
 
-    mapping(address engine => mapping(address safe => mapping(address guardian => GuardianWindow)))
-        internal _windows;
-
-    /// @dev The window end of the guardian that froze the id (0 once lifted): `lift` releases it.
-    mapping(bytes32 settingsKey => mapping(address guardian => uint64 windowEnd)) internal _frozenBy;
+    mapping(address engine => mapping(address safe => mapping(address actor => ActorWindow)))
+        internal _actorWindows;
 
     /// @dev Owner-path hashes cancelled for good (they bind a nonce, so this never blocks a new transaction).
     mapping(address engine => mapping(address safe => mapping(bytes32 txHash => bool))) internal _cancelled;

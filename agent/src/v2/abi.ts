@@ -6,7 +6,7 @@
 export const POLICY_GUARD_INTERFACE_ID = '0x0f8d6033'
 
 /** `type(ITimelockPolicy).interfaceId`: the only policy that reports its own interface. */
-export const TIMELOCK_POLICY_INTERFACE_ID = '0xa46bc64f'
+export const TIMELOCK_POLICY_INTERFACE_ID = '0x01a547c8'
 
 /** IPolicyGuard: hooks, configure, matches, views. */
 export const policyGuardAbi = [
@@ -1084,6 +1084,18 @@ export const policyAbi = [
     stateMutability: 'view',
     type: 'function',
   },
+  {
+    inputs: [
+      {
+        name: 'safe',
+        type: 'address',
+      },
+    ],
+    name: 'validate',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
 ] as const
 
 /** ITimelockPolicy: schedule, cancel, freeze, lift, views. */
@@ -1245,7 +1257,24 @@ export const timelockPolicyAbi = [
     type: 'error',
   },
   {
-    inputs: [],
+    inputs: [
+      {
+        name: 'to',
+        type: 'address',
+      },
+      {
+        name: 'selector',
+        type: 'bytes4',
+      },
+      {
+        name: 'op',
+        type: 'uint8',
+      },
+      {
+        name: 'delay',
+        type: 'uint32',
+      },
+    ],
     name: 'TimelockNotCoveringConfiguration',
     type: 'error',
   },
@@ -1489,6 +1518,39 @@ export const timelockPolicyAbi = [
       {
         name: '',
         type: 'uint256',
+      },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      {
+        name: 'engine',
+        type: 'address',
+      },
+      {
+        name: 'safe',
+        type: 'address',
+      },
+      {
+        name: 'actor',
+        type: 'address',
+      },
+    ],
+    name: 'actorWindow',
+    outputs: [
+      {
+        name: 'end',
+        type: 'uint64',
+      },
+      {
+        name: 'cooldownUntil',
+        type: 'uint64',
+      },
+      {
+        name: 'frozen',
+        type: 'uint32',
       },
     ],
     stateMutability: 'view',
@@ -1894,39 +1956,6 @@ export const timelockPolicyAbi = [
         type: 'address',
       },
       {
-        name: 'guardian',
-        type: 'address',
-      },
-    ],
-    name: 'guardianWindow',
-    outputs: [
-      {
-        name: 'end',
-        type: 'uint64',
-      },
-      {
-        name: 'cooldownUntil',
-        type: 'uint64',
-      },
-      {
-        name: 'frozen',
-        type: 'uint32',
-      },
-    ],
-    stateMutability: 'view',
-    type: 'function',
-  },
-  {
-    inputs: [
-      {
-        name: 'engine',
-        type: 'address',
-      },
-      {
-        name: 'safe',
-        type: 'address',
-      },
-      {
         name: 'txHash',
         type: 'bytes32',
       },
@@ -2084,6 +2113,18 @@ export const timelockPolicyAbi = [
       },
     ],
     stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      {
+        name: 'safe',
+        type: 'address',
+      },
+    ],
+    name: 'validate',
+    outputs: [],
+    stateMutability: 'nonpayable',
     type: 'function',
   },
 ] as const
@@ -2418,6 +2459,18 @@ export const limitPolicyAbi = [
     stateMutability: 'view',
     type: 'function',
   },
+  {
+    inputs: [
+      {
+        name: 'safe',
+        type: 'address',
+      },
+    ],
+    name: 'validate',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
 ] as const
 
 /** IArgsPolicy: conditions. */
@@ -2717,6 +2770,18 @@ export const argsPolicyAbi = [
     stateMutability: 'view',
     type: 'function',
   },
+  {
+    inputs: [
+      {
+        name: 'safe',
+        type: 'address',
+      },
+    ],
+    name: 'validate',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
 ] as const
 
 /** ICoSignerPolicy: approvals. */
@@ -2873,6 +2938,10 @@ export const coSignerPolicyAbi = [
       {
         name: 'txHash',
         type: 'bytes32',
+      },
+      {
+        name: 'approver',
+        type: 'address',
       },
       {
         name: 'validUntil',
@@ -3167,6 +3236,35 @@ export const coSignerPolicyAbi = [
         name: 'txHash',
         type: 'bytes32',
       },
+      {
+        name: 'approver',
+        type: 'address',
+      },
+    ],
+    name: 'revision',
+    outputs: [
+      {
+        name: '',
+        type: 'uint256',
+      },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      {
+        name: 'engine',
+        type: 'address',
+      },
+      {
+        name: 'safe',
+        type: 'address',
+      },
+      {
+        name: 'txHash',
+        type: 'bytes32',
+      },
     ],
     name: 'revoke',
     outputs: [],
@@ -3213,6 +3311,18 @@ export const coSignerPolicyAbi = [
       },
     ],
     stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      {
+        name: 'safe',
+        type: 'address',
+      },
+    ],
+    name: 'validate',
+    outputs: [],
+    stateMutability: 'nonpayable',
     type: 'function',
   },
 ] as const
@@ -3707,7 +3817,24 @@ export const v2ErrorsAbi = [
     type: 'error',
   },
   {
-    inputs: [],
+    inputs: [
+      {
+        name: 'to',
+        type: 'address',
+      },
+      {
+        name: 'selector',
+        type: 'bytes4',
+      },
+      {
+        name: 'op',
+        type: 'uint8',
+      },
+      {
+        name: 'delay',
+        type: 'uint32',
+      },
+    ],
     name: 'TimelockNotCoveringConfiguration',
     type: 'error',
   },

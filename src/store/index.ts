@@ -81,20 +81,42 @@ export const pendingStore = persisted<PendingConfiguration[]>('pending', [])
 export const draftStore = persisted<Configuration[]>('draft', [])
 
 /** How an action was run; shown as a tag in the activity log. */
-export type ActivityMode = 'simulate' | 'execute' | 'force'
+export type ActivityMode = 'simulate' | 'execute' | 'force' | 'propose' | 'schedule' | 'cancel'
 
+export type ActivityStatus =
+  | 'allowed'
+  | 'denied'
+  | 'sent'
+  | 'confirmed'
+  | 'reverted'
+  | 'failed'
+  | 'info'
+  | 'proposed'
+  | 'scheduled'
+  | 'executed'
+
+/**
+ * One transaction the app sent, proposed or simulated. Every field added after the first version
+ * is optional, so entries saved earlier still read.
+ */
 export type Activity = {
   id: string
   at: number
+  /** Who acted: a role, or the Safe itself for owner transactions. */
   role: Address
   /** Optional: entries logged before this field existed carry the mode as a label prefix. */
   mode?: ActivityMode
   label: string
   /** failed: could not run at all (gas, RPC, CoW API…), as opposed to a policy decision (denied). */
-  status: 'allowed' | 'denied' | 'sent' | 'confirmed' | 'reverted' | 'failed' | 'info'
+  status: ActivityStatus
   detail?: string
   txHash?: Hash
   link?: string
+  /** Owner transactions: the Safe transaction hash and nonce they are bound to. */
+  safeTxHash?: Hex
+  nonce?: bigint
+  /** Decoded description: the configure changes, a transfer, each call of a batch. */
+  lines?: string[]
 }
 
 export const activityStore = persisted<Activity[]>('activity', [])
@@ -107,6 +129,19 @@ export const logActivity = (entry: Omit<Activity, 'id' | 'at'>): string => {
 
 export const updateActivity = (id: string, patch: Partial<Activity>) =>
   activityStore.set((list) => list.map((a) => (a.id === id ? { ...a, ...patch } : a)))
+
+/** Moves the "proposed" entry of an owner transaction along (scheduled, executed). */
+export const settleProposal = (safeTxHash: Hex, status: 'scheduled' | 'executed') =>
+  activityStore.set((list) =>
+    list.map((a) =>
+      a.mode === 'propose' && a.safeTxHash?.toLowerCase() === safeTxHash.toLowerCase() ? { ...a, status } : a,
+    ),
+  )
+
+/** View preferences that should survive a reload. */
+export type UiPrefs = { activityOpen: boolean }
+
+export const uiStore = persisted<UiPrefs>('ui', { activityOpen: true })
 
 /** Cached `PolicyConfirmed` history per `guard:safe`, with the last scanned block. */
 export type PolicyHistory = { events: ConfirmedPolicy[]; scannedTo: string }
@@ -135,25 +170,27 @@ export type V2OwnerTx = {
 export const v2OwnerTxStore = persisted<Record<string, V2OwnerTx>>('v2-owner-txs', {})
 
 /**
- * Owner transactions this app proposed in Safe{Wallet} (or that were added by hash), per Safe
+ * Owner transactions this app proposed in Safe{Wallet} or signed with local keys, per Safe
  * (lowercase address): the Queue follows each one from signatures to execution.
  */
 export type TrackedOwnerTx = {
   hash: Hex
   label?: string
   addedAt: number
+  /** The call it carries, so the playground can show its progress under the same action. */
+  call?: { to: Address; value: bigint; data: Hex }
   /** Executed by a relayer from this app (Safe{Wallet} reports it too, when the app runs inside it). */
   executed?: boolean
 }
 
 export const v2TrackedStore = persisted<Record<string, TrackedOwnerTx[]>>('v2-tracked', {})
 
-export const trackOwnerTx = (safe: Address, hash: Hex, label?: string) =>
+export const trackOwnerTx = (safe: Address, hash: Hex, label?: string, call?: TrackedOwnerTx['call']) =>
   v2TrackedStore.set((all) => {
     const key = safe.toLowerCase()
     const list = all[key] ?? []
     if (list.some((t) => t.hash.toLowerCase() === hash.toLowerCase())) return all
-    return { ...all, [key]: [{ hash, label, addedAt: Date.now() }, ...list] }
+    return { ...all, [key]: [{ hash, label, addedAt: Date.now(), call }, ...list] }
   })
 
 export const untrackOwnerTx = (safe: Address, hash: Hex) =>

@@ -2,7 +2,7 @@ import { artifacts, ethers } from 'hardhat'
 import type { IPolicyGuard } from '../../typechain-types'
 
 /**
- * What a Policy Engine V2 (rev 3) deployment is made of, and how to deploy it, shared by
+ * What a Policy Engine V2 (rev 4) deployment is made of, and how to deploy it, shared by
  * `scripts/deploy-v2.ts` and the tests (so the tests deploy exactly what the script deploys).
  *
  * Sepolia prices deployed code at ~1,542 gas per byte (plus ~210k per create) and caps a

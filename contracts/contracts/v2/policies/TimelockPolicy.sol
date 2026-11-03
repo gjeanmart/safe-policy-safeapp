@@ -3,11 +3,11 @@ pragma solidity =0.8.30;
 
 import {IERC165} from "../../vendor/policy-engine/interfaces/IERC165.sol";
 import {Operation} from "../../vendor/policy-engine/interfaces/Operation.sol";
-import {IPolicyGuard} from "../interfaces/IPolicyGuard.sol";
+import {IPolicy} from "../interfaces/IPolicy.sol";
 import {ITimelockPolicy} from "../interfaces/policies/ITimelockPolicy.sol";
 import {MAX_ROLE_MEMBERS} from "../libraries/Constants.sol";
 import {ScopeLib} from "../libraries/Scope.sol";
-import {AttachmentView, Call, CallMatch, Context, Kind, Match, Scope} from "../libraries/Types.sol";
+import {Call, Context, Match, Scope} from "../libraries/Types.sol";
 import {PolicyBase} from "./PolicyBase.sol";
 import {TimelockPolicyFreeze} from "./TimelockPolicyFreeze.sol";
 import {TimelockPolicyStorage} from "./TimelockPolicyQueue.sol";
@@ -27,7 +27,7 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
 
     /// @dev {TimelockPolicyQueue}: `schedule`, `scheduleModuleTx`, `cancel`, `cancelAsOwners`.
     address private immutable _QUEUE;
-    /// @dev {TimelockPolicyFreeze}: `freeze`, `lift`.
+    /// @dev {TimelockPolicyFreeze}: `freeze`, `lift`, `validate`.
     address private immutable _FREEZER;
 
     /// @param queue A deployed {TimelockPolicyQueue}, deployed on its own: a child create would
@@ -62,21 +62,19 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
         address safe,
         bytes32 attachmentId,
         Scope calldata scope,
-        uint8 opMask,
+        uint8,
         bytes calldata data
     ) internal override {
         Settings memory s = abi.decode(data, (Settings));
         address actor = scope.actor;
         // A guardian at actor ANY could freeze recovery too.
-        _validate(s.guardians, safe, actor == ScopeLib.ANY);
-        _validate(s.lifters, safe, actor == ScopeLib.ANY);
-        _validate(s.cancellers, safe, false);
-        if (s.delay != 0 && (actor == ScopeLib.ANY || actor == ScopeLib.OWNERS)) {
-            _requireCovered(engine, safe, attachmentId, actor, opMask, s.delay);
-        }
+        _validateRole(s.guardians, safe, actor == ScopeLib.ANY);
+        _validateRole(s.lifters, safe, actor == ScopeLib.ANY);
+        _validateRole(s.cancellers, safe, false);
+        // The covering rule needs the whole configuration: it runs in {validate}, after the batch.
         // The freeze state is kept: re-configuring never shortens a freeze or a cooldown.
         Attachment storage a = _attachments[_keyOf(engine, safe, attachmentId)];
-        (a.delay, a.window, a.configuredAt) = (s.delay, s.window, uint64(block.timestamp));
+        (a.delay, a.window, a.configuredAt, a.actor) = (s.delay, s.window, uint64(block.timestamp), actor);
         (a.guardians, a.lifters, a.cancellers) = (s.guardians, s.lifters, s.cancellers);
     }
 
@@ -167,6 +165,11 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
         _delegate(_FREEZER);
     }
 
+    /// @notice {IPolicy-validate}: the covering rule, run by {TimelockPolicyFreeze} on this storage.
+    function validate(address) external override(IPolicy, PolicyBase) {
+        _delegate(_FREEZER);
+    }
+
     // =============================================================================================
     // Views
     // =============================================================================================
@@ -198,12 +201,12 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
     }
 
     /// @inheritdoc ITimelockPolicy
-    function guardianWindow(
+    function actorWindow(
         address engine,
         address safe,
-        address guardian
+        address actor
     ) external view returns (uint64 end, uint64 cooldownUntil, uint32 frozen) {
-        GuardianWindow storage w = _windows[engine][safe][guardian];
+        ActorWindow storage w = _actorWindows[engine][safe][actor];
         return (w.end, w.end == 0 ? 0 : uint64(w.end + COOLDOWN), w.frozen);
     }
 
@@ -226,38 +229,8 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
     // Configuration checks
     // =============================================================================================
 
-    /**
-     * @dev `TimelockNotCoveringConfiguration` unless an attachment of this policy at `(actor, *)`
-     *      or `(ANY, *)`, with CALL in its mask and a delay of at least `delay`, is attached (or is
-     *      the new attachment itself). Only an actor-wide delay covers `engine.configure` and every
-     *      other way out (`setGuard`, `setModuleGuard`) alike.
-     */
-    function _requireCovered(
-        address engine,
-        address safe,
-        bytes32 attachmentId,
-        address actor,
-        uint8 opMask,
-        uint256 delay
-    ) private view {
-        for (address a = actor; ; a = ScopeLib.ANY) {
-            bytes32 id = ScopeLib.attachmentId(
-                ScopeLib.key(a, address(0), bytes4(0), CallMatch.ANY),
-                Kind.POLICY,
-                address(this)
-            );
-            if (id == attachmentId) {
-                if (opMask & ScopeLib.OP_CALL != 0) return;
-            } else if (_attachments[_keyOf(engine, safe, id)].delay >= delay) {
-                (bool attached, AttachmentView memory v) = IPolicyGuard(engine).getAttachment(safe, id);
-                if (attached && v.opMask & ScopeLib.OP_CALL != 0) return;
-            }
-            if (a == ScopeLib.ANY) revert TimelockNotCoveringConfiguration();
-        }
-    }
-
     /// @dev `InvalidSettings`: over the cap (0 with `empty`), a zero address, the Safe, a duplicate.
-    function _validate(address[] memory list, address safe, bool empty) private pure {
+    function _validateRole(address[] memory list, address safe, bool empty) private pure {
         require(list.length <= (empty ? 0 : MAX_ROLE_MEMBERS), InvalidSettings());
         for (uint256 i = 0; i < list.length; i++) {
             require(list[i] != address(0) && list[i] != safe, InvalidSettings());

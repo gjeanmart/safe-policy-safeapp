@@ -74,15 +74,27 @@ async function fixture() {
       { name: 'engine', type: 'address' },
       { name: 'safe', type: 'address' },
       { name: 'txHash', type: 'bytes32' },
+      { name: 'approver', type: 'address' },
       { name: 'useCount', type: 'uint256' },
+      { name: 'revision', type: 'uint256' },
       { name: 'validUntil', type: 'uint64' },
     ],
   }
-  const approval = (txHash: string, validUntil: bigint, useCount = 0n, eng = e, s = safe) => ({
+  const approval = (
+    txHash: string,
+    validUntil: bigint,
+    useCount = 0n,
+    eng = e,
+    s = safe,
+    revision = 0n,
+    approver = a1.address,
+  ) => ({
     engine: eng,
     safe: s,
     txHash,
+    approver,
     useCount,
+    revision,
     validUntil,
   })
   const sign = (
@@ -92,9 +104,23 @@ async function fixture() {
     useCount = 0n,
     eng = e,
     s = safe,
-  ) => signer.signTypedData(domain, types, approval(txHash, validUntil, useCount, eng, s))
-  const digest = (txHash: string, validUntil: bigint, useCount = 0n, eng = e, s = safe) =>
-    TypedDataEncoder.hash(domain, types, approval(txHash, validUntil, useCount, eng, s))
+    revision = 0n,
+  ) =>
+    signer.signTypedData(
+      domain,
+      types,
+      approval(txHash, validUntil, useCount, eng, s, revision, signer.address),
+    )
+  const digest = (
+    txHash: string,
+    validUntil: bigint,
+    useCount = 0n,
+    eng = e,
+    s = safe,
+    revision = 0n,
+    approver = a1.address,
+  ) =>
+    TypedDataEncoder.hash(domain, types, approval(txHash, validUntil, useCount, eng, s, revision, approver))
 
   return {
     policy,
@@ -118,7 +144,7 @@ async function fixture() {
   }
 }
 
-describe('CoSignerPolicy (rev 3)', () => {
+describe('CoSignerPolicy (rev 4)', () => {
   describe('configure', () => {
     it('stores the approvers and the required count per (engine, safe, attachment), overwriting', async () => {
       const { policy, e, safe, a1, a2, a3, configure } = await loadFixture(fixture)
@@ -195,10 +221,20 @@ describe('CoSignerPolicy (rev 3)', () => {
   })
 
   describe('approveWithSig', () => {
-    it('approvalDigest is the EIP-712 digest of Approval(engine, safe, txHash, useCount, validUntil)', async () => {
-      const { policy, e, safe, until, digest } = await loadFixture(fixture)
+    it('approvalDigest is the EIP-712 digest of Approval(engine, safe, txHash, approver, useCount, revision, validUntil)', async () => {
+      const { policy, e, safe, a1, a2, until, digest } = await loadFixture(fixture)
       const v = await until()
-      expect(await policy.approvalDigest(e, safe, SAFE_TX, v)).to.equal(digest(SAFE_TX, v))
+      expect(await policy.approvalDigest(e, safe, SAFE_TX, a1.address, v)).to.equal(digest(SAFE_TX, v))
+      // The revision is the approver's own: a revoke by a1 changes a1's digest only.
+      await policy.connect(a1).revoke(e, safe, SAFE_TX)
+      expect(await policy.revision(e, safe, SAFE_TX, a1.address)).to.equal(1n)
+      expect(await policy.revision(e, safe, SAFE_TX, a2.address)).to.equal(0n)
+      expect(await policy.approvalDigest(e, safe, SAFE_TX, a1.address, v)).to.equal(
+        digest(SAFE_TX, v, 0n, e, safe, 1n),
+      )
+      expect(await policy.approvalDigest(e, safe, SAFE_TX, a2.address, v)).to.equal(
+        digest(SAFE_TX, v, 0n, e, safe, 0n, a2.address),
+      )
     })
 
     it('records an ECDSA approval pushed by a relayer', async () => {
@@ -221,7 +257,7 @@ describe('CoSignerPolicy (rev 3)', () => {
         'InvalidSignature',
         [w],
       )
-      await wallet.setApproved(digest(SAFE_TX, v), true)
+      await wallet.setApproved(digest(SAFE_TX, v, 0n, e, safe, 0n, w), true)
       await policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, w, v, '0x')
       expect(await policy.approvedUntil(e, safe, SAFE_TX, w)).to.equal(v)
     })
@@ -300,7 +336,7 @@ describe('CoSignerPolicy (rev 3)', () => {
       )
     })
 
-    it('a digest is pushed once: replay and replay after a revoke revert SignatureAlreadyUsed', async () => {
+    it('a digest is pushed once (SignatureAlreadyUsed); after a revoke the old signature is void (InvalidSignature)', async () => {
       const { policy, e, safe, a1, relayer, until, sign, digest } = await loadFixture(fixture)
       const v = await until()
       const sig = await sign(a1, SAFE_TX, v)
@@ -315,15 +351,99 @@ describe('CoSignerPolicy (rev 3)', () => {
       await expectRevert(
         policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, a1.address, v, sig),
         policy,
-        'SignatureAlreadyUsed',
-        [digest(SAFE_TX, v)],
+        'InvalidSignature',
+        [a1.address],
       )
       expect(await policy.approvedUntil(e, safe, SAFE_TX, a1.address)).to.equal(0n)
-      // The approver can still approve again, with a fresh signature (another validUntil) or directly.
+      // The approver can still approve again, with a fresh signature over revision 1 or directly.
       await policy
         .connect(relayer)
-        .approveWithSig(e, safe, SAFE_TX, a1.address, v + 1n, await sign(a1, SAFE_TX, v + 1n))
-      expect(await policy.approvedUntil(e, safe, SAFE_TX, a1.address)).to.equal(v + 1n)
+        .approveWithSig(e, safe, SAFE_TX, a1.address, v, await sign(a1, SAFE_TX, v, 0n, e, safe, 1n))
+      expect(await policy.approvedUntil(e, safe, SAFE_TX, a1.address)).to.equal(v)
+    })
+  })
+
+  describe('revoke against signatures not pushed yet (review A2)', () => {
+    it('sign, revoke, push: InvalidSignature; push, revoke: the approval is gone', async () => {
+      const { policy, e, safe, a1, relayer, configure, check, until, sign } = await loadFixture(fixture)
+      await configure(ATT_A, [a1.address], 1)
+      const v = await until()
+      const push = (signature: string) =>
+        policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, a1.address, v, signature)
+      const early = await sign(a1, SAFE_TX, v)
+      await policy.connect(a1).revoke(e, safe, SAFE_TX)
+      await expectRevert(push(early), policy, 'InvalidSignature', [a1.address])
+      await push(await sign(a1, SAFE_TX, v, 0n, e, safe, 1n))
+      await policy.connect(a1).revoke(e, safe, SAFE_TX)
+      await expectRevert(check(SAFE_TX, [match(ATT_A)]), policy, 'MissingApprovals', [ATT_A, 1, 0])
+    })
+
+    it('sign, push, revoke, re-sign at revision 1, push: it counts', async () => {
+      const { policy, e, safe, a1, relayer, configure, check, until, sign } = await loadFixture(fixture)
+      await configure(ATT_A, [a1.address], 1)
+      const v = await until()
+      await policy
+        .connect(relayer)
+        .approveWithSig(e, safe, SAFE_TX, a1.address, v, await sign(a1, SAFE_TX, v))
+      await policy.connect(a1).revoke(e, safe, SAFE_TX)
+      const resigned = await sign(a1, SAFE_TX, v, 0n, e, safe, 1n)
+      await policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, a1.address, v, resigned)
+      await check(SAFE_TX, [match(ATT_A)])
+    })
+
+    it("one approver's revoke does not touch another approver's signature", async () => {
+      const { policy, e, safe, a1, a2, relayer, configure, check, until, sign } = await loadFixture(fixture)
+      await configure(ATT_A, [a1.address, a2.address], 1)
+      const v = await until()
+      const sig1 = await sign(a1, SAFE_TX, v)
+      const sig2 = await sign(a2, SAFE_TX, v)
+      await policy.connect(a1).revoke(e, safe, SAFE_TX)
+      await expectRevert(
+        policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, a1.address, v, sig1),
+        policy,
+        'InvalidSignature',
+        [a1.address],
+      )
+      await policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, a2.address, v, sig2)
+      await check(SAFE_TX, [match(ATT_A)])
+    })
+
+    it('the revision survives consumption: the next use is signed with useCount 1 and the same revision', async () => {
+      const { policy, e, safe, a1, relayer, configure, check, until, sign } = await loadFixture(fixture)
+      await configure(ATT_A, [a1.address], 1)
+      const v = await until()
+      await policy.connect(a1).revoke(e, safe, SAFE_TX)
+      await policy.connect(a1).approve(e, safe, SAFE_TX, v)
+      await check(SAFE_TX, [match(ATT_A)])
+      expect(await policy.revision(e, safe, SAFE_TX, a1.address)).to.equal(1n)
+      const push = (signature: string) =>
+        policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, a1.address, v, signature)
+      await expectRevert(push(await sign(a1, SAFE_TX, v, 1n)), policy, 'InvalidSignature', [a1.address])
+      await push(await sign(a1, SAFE_TX, v, 1n, e, safe, 1n))
+      await check(SAFE_TX, [match(ATT_A)])
+    })
+  })
+
+  describe('the digest binds the approver (review rev 4, fable P1)', () => {
+    it("an ERC-1271 approver that accepts another approver's digest gains nothing from it", async () => {
+      const { policy, wallet, e, safe, a1, relayer, configure, check, until, sign, digest } =
+        await loadFixture(fixture)
+      const w = await wallet.getAddress()
+      await configure(ATT_A, [a1.address, w], 2)
+      const v = await until()
+      await policy
+        .connect(relayer)
+        .approveWithSig(e, safe, SAFE_TX, a1.address, v, await sign(a1, SAFE_TX, v))
+      // The wallet vouches for a1's digest: that is not the wallet's own approval.
+      await wallet.setApproved(digest(SAFE_TX, v), true)
+      await expectRevert(
+        policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, w, v, '0x'),
+        policy,
+        'InvalidSignature',
+        [w],
+      )
+      await expectRevert(check(SAFE_TX, [match(ATT_A)]), policy, 'MissingApprovals', [ATT_A, 2, 1])
+      expect(digest(SAFE_TX, v)).to.not.equal(digest(SAFE_TX, v, 0n, e, safe, 0n, w))
     })
   })
 
@@ -362,7 +482,7 @@ describe('CoSignerPolicy (rev 3)', () => {
       await policy
         .connect(relayer)
         .approveWithSig(e, safe, SAFE_TX, a1.address, v, await sign(a1, SAFE_TX, v))
-      await wallet.setApproved(digest(SAFE_TX, v), true)
+      await wallet.setApproved(digest(SAFE_TX, v, 0n, e, safe, 0n, w), true)
       await policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, w, v, '0x')
       await check(SAFE_TX, [match(ATT_A)])
     })
@@ -412,13 +532,13 @@ describe('CoSignerPolicy (rev 3)', () => {
       const v = await until()
       const sig = await sign(a1, SAFE_TX, v)
       await policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, a1.address, v, sig)
-      await wallet.setApproved(digest(SAFE_TX, v), true)
+      await wallet.setApproved(digest(SAFE_TX, v, 0n, e, safe, 0n, w), true)
       await policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, w, v, '0x')
       await check(SAFE_TX, [match(ATT_A), match(ATT_B, 0, 4)])
 
       // The digest now carries useCount 1: the old ECDSA signature and the standing ERC-1271
       // approval of the old digest are both rejected.
-      expect(await policy.approvalDigest(e, safe, SAFE_TX, v)).to.equal(digest(SAFE_TX, v, 1n))
+      expect(await policy.approvalDigest(e, safe, SAFE_TX, a1.address, v)).to.equal(digest(SAFE_TX, v, 1n))
       await expectRevert(
         policy.connect(relayer).approveWithSig(e, safe, SAFE_TX, a1.address, v, sig),
         policy,

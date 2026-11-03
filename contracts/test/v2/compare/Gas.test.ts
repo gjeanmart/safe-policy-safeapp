@@ -19,6 +19,7 @@ import {
   attach,
   batchTx,
   coApprove,
+  configureCall,
   cosignerSettings,
   deployWorld,
   execModule,
@@ -103,7 +104,7 @@ const pay5 = (w: World) => batchTx(w, Array(5).fill(pay(w)))
 
 const fmt = (n: bigint | number) => n.toLocaleString('en-US')
 
-describe('Gas: plain Safe vs V1 vs V2 rev 3 (real Safe 1.5.0)', () => {
+describe('Gas: plain Safe vs V1 vs V2 rev 4 (real Safe 1.5.0)', () => {
   after(() => {
     console.log('\n    | Path | Scenario | Gas | vs plain | Rev 2 | Δ rev 2 |')
     console.log('    | --- | --- | ---: | ---: | ---: | ---: |')
@@ -174,6 +175,29 @@ describe('Gas: plain Safe vs V1 vs V2 rev 3 (real Safe 1.5.0)', () => {
     record('owner', 'V2, Allow + Timelock 24h with a guardian (execute)', g, REV2.ownerTimelock)
     record('owner', '↳ `TimelockPolicy.schedule` (its own transaction)', scheduleGas, REV2.schedule)
     expect(Number(g)).to.be.lessThan(REV2.ownerTimelock)
+  })
+
+  it('owner path, configure under the owners Timelock: with and without validate', async function () {
+    this.timeout(120_000)
+    const w = await fresh()
+    const owners = attach(
+      anyCall(OWNERS),
+      w.timelock,
+      timelockSettings({ delay: T, guardians: [w.guardian.address] }),
+    )
+    await install(w, [allow(anyCall(OWNERS)), owners])
+    // Scheduled, then executed after T; only the execution is measured.
+    const configure = (changes: Change[]) => async () => {
+      const tx = { ...configureCall(w, changes), nonce: await w.safe.nonce() }
+      await scheduleOwners(w, tx)
+      await time.increase(T)
+      return execOwners(w, tx)
+    }
+    const allowOnly = await steady(configure([allow(onFunction(OWNERS, w.tokenAddress, SEL.transfer))]))
+    const withValidate = await steady(configure([owners]))
+    record('config', 'configure (execute): one Allow, no policy touched', allowOnly)
+    record('config', 'configure (execute): the owners Timelock re-attached, `validate` runs', withValidate)
+    expect(Number(withValidate)).to.be.lessThan(250_000)
   })
 
   it('module path, one transfer: Allow only, ops payment, co-signer', async function () {

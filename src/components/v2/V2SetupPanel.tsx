@@ -15,7 +15,6 @@ import {
 import { SafeStatus } from '../setup/SafeStatus'
 import { Card, Notice } from '../ui'
 import { DraftPanel } from './DraftPanel'
-import { Erc1271Notice } from './Erc1271Notice'
 import { OrgChart, diffAttachments } from './OrgChart'
 import { Queue } from './Queue'
 import { ScopeBuilder } from './ScopeBuilder'
@@ -31,7 +30,11 @@ function V2Screens() {
   const handler = useAsync(() => readFallbackHandler(safe), `${safe}:handler`, 30_000)
 
   if (view.error !== undefined && !view.model)
-    return <Notice tone="bad">Could not read the V2 engine: {describeError(view.error)}</Notice>
+    return (
+      <Notice tone="bad" title="Could not read the V2 engine">
+        {describeError(view.error)}
+      </Notice>
+    )
   if (!view.model || !state) return <Card title="Policy Engine V2">Loading…</Card>
   const model = view.model
 
@@ -39,7 +42,7 @@ function V2Screens() {
   // Before install, the batch detaches leftovers the draft does not keep.
   const touched = new Set(draft.map(changeAttachmentId))
   const base = v2Installed ? model.attachments : model.attachments.filter((a) => touched.has(a.attachmentId))
-  const projected = projectAttachments(base, sortForApply(deployment, draft), deployment)
+  const projected = projectAttachments(base, sortForApply(draft), deployment)
   const previewed = preview ? projectAttachments([], preview, deployment) : []
   const items = diffAttachments(model.attachments, projected, previewed)
   const findings = lint({
@@ -54,12 +57,10 @@ function V2Screens() {
 
   return (
     <>
-      <Erc1271Notice handler={handler.data} installed={v2Installed} />
       {!v2Installed && (
-        <Notice>
-          V2 is not installed on this Safe yet, so nothing checks the owners or the modules. Build the rules
-          below (start with the template Delay + freeze on the Owners), then propose the install batch from
-          the draft.
+        <Notice title="V2 is not installed on this Safe yet">
+          Nothing checks the owners or the modules. Build the rules below (start with the Owners template),
+          then propose the install batch from the draft.
         </Notice>
       )}
       <OrgChart
@@ -107,10 +108,9 @@ export function V2SetupPanel() {
         <V2Screens />
       ) : (
         <Card title="Policy Engine V2">
-          <Notice tone="warn">
-            V2 not deployed on this chain: the rev 3 entry in src/config/contracts.ts still has placeholder
-            (zero) addresses. Run <code>pnpm deploy:v2:sepolia</code> in <code>contracts/</code> and paste the
-            printed entry there.
+          <Notice tone="warn" title="V2 is not deployed on this chain">
+            The rev 3 entry in src/config/contracts.ts still has placeholder (zero) addresses. Run{' '}
+            <code>pnpm deploy:v2:sepolia</code> in <code>contracts/</code> and paste the printed entry there.
           </Notice>
         </Card>
       )}

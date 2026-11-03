@@ -14,7 +14,8 @@ import {IPolicy} from "../IPolicy.sol";
  *      constraints and `strict` flag; all must pass (AND). Within one attachment, every constraint
  *      whose `selector` equals the call's selector, or is `ANY_SELECTOR`, must hold (AND). If none
  *      applies, the call passes unless `strict` (`NoConstraint`). Empty calldata has selector
- *      `bytes4(0)` (plain native transfers).
+ *      `bytes4(0)` (plain native transfers). A VALUE_TO constraint applies only to a call with
+ *      `value > 0`: on a zero-value call it is skipped (and does not count as applied).
  *
  *      Sees: the call's `to`, `value` and the 32-byte head words of its calldata. Cannot see:
  *      dynamic arguments (bytes, arrays, strings), nested calls, other calls of the batch, state.
@@ -23,12 +24,15 @@ interface IArgsPolicy is IPolicy {
     /**
      * @notice What a constraint reads, as one 32-byte word `w`.
      * @dev WORD: `data[4 + 32 * index : 36 + 32 * index]` (missing: `ArgumentMissing`).
-     *      CALL_TO: `uint256(uint160(call.to))`. VALUE: `call.value`. `index` must be 0 unless WORD.
+     *      CALL_TO: `uint256(uint160(call.to))`. VALUE: `call.value`. VALUE_TO: `call.to`, judged
+     *      only when `call.value > 0` (with `ANY_SELECTOR`: "ETH only to these destinations,
+     *      whatever the calldata"). `index` must be 0 unless WORD. Append-only (stored settings).
      */
     enum Target {
         WORD,
         CALL_TO,
-        VALUE
+        VALUE,
+        VALUE_TO
     }
 
     /**

@@ -29,13 +29,27 @@ contract PolicyGuardConfig is EngineStorage {
     /// @notice See {IPolicyGuard-configure}.
     function configure(Change[] calldata changes) external {
         _requireNotInCheck();
+        address[] memory touched = new address[](changes.length);
+        uint256 n;
         for (uint256 i = 0; i < changes.length; i++) {
-            _apply(msg.sender, changes[i]);
+            address policy = _apply(msg.sender, changes[i]);
+            if (policy == address(0)) continue;
+            bool seen;
+            for (uint256 j = 0; j < n && !seen; j++) seen = touched[j] == policy;
+            if (!seen) touched[n++] = policy;
+        }
+        // Every policy the batch touched checks its invariants over the final configuration
+        // (SPEC.md §3.2), unless the batch detached its last attachment.
+        for (uint256 i = 0; i < n; i++) {
+            address policy = touched[i];
+            if (_policyCounts[msg.sender][policy] == 0) continue;
+            (bool ok, ) = policy.staticcall(abi.encodeCall(IPolicy.validate, (msg.sender)));
+            if (!ok) revert IPolicyGuard.PolicyConfigurationFailed(policy, _boundedReturnData());
         }
     }
 
-    /// @dev SPEC.md §3.2.
-    function _apply(address safe, Change calldata change) private {
+    /// @dev SPEC.md §3.2. Returns the policy of a POLICY change (attach, update or detach), else 0.
+    function _apply(address safe, Change calldata change) private returns (address) {
         Scope memory scope = change.scope;
         require(ScopeLib.isNormalized(scope), IPolicyGuard.InvalidScope());
         bytes32 key = ScopeLib.key(scope);
@@ -45,8 +59,8 @@ contract PolicyGuardConfig is EngineStorage {
         bytes32 id = ScopeLib.attachmentId(key, kind, policy);
 
         if (change.detach) {
-            _detach(safe, key, lvl, id);
-            return;
+            _detach(safe, key, lvl, id, kind == Kind.POLICY ? policy : address(0));
+            return kind == Kind.POLICY ? policy : address(0);
         }
 
         require(change.opMask <= ScopeLib.OP_ALL, IPolicyGuard.InvalidOpMask(change.opMask));
@@ -72,6 +86,7 @@ contract PolicyGuardConfig is EngineStorage {
             list.push(word);
             (ref.scopeKey, ref.position) = (key, list.length);
             _levelCounts[safe] += uint256(1) << (32 * uint256(lvl));
+            if (kind == Kind.POLICY) _policyCounts[safe][policy]++;
             if (list.length == 1) {
                 _addScope(safe, key, scope);
             }
@@ -85,12 +100,14 @@ contract PolicyGuardConfig is EngineStorage {
             }
         }
         emit IPolicyGuard.Attached(safe, id, key, scope, kind, policy, opMask, change.settings);
+        return kind == Kind.POLICY ? policy : address(0);
     }
 
     /// @dev Never calls the policy (liveness): its stale settings are harmless.
-    function _detach(address safe, bytes32 key, uint8 lvl, bytes32 id) private {
+    function _detach(address safe, bytes32 key, uint8 lvl, bytes32 id, address policy) private {
         uint256 position = _refs[safe][id].position;
         require(position != 0, IPolicyGuard.NotAttached(id));
+        if (policy != address(0)) _policyCounts[safe][policy]--;
         uint256[] storage list = _attachments[safe][key];
         uint256 last = list.length - 1;
         if (position - 1 != last) {

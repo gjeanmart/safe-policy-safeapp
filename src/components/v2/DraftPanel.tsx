@@ -1,10 +1,13 @@
 import { useState } from 'react'
-import { type Address, isAddressEqual } from 'viem'
+import { type Address, getAddress, isAddressEqual } from 'viem'
 import { useSandbox } from '../../context'
 import { isModuleEnabled, safeTxs } from '../../lib/safe'
 import {
   type Attachment,
   type Change,
+  EVERYONE,
+  Operation,
+  actorLabel,
   type LabelContext,
   type LintFinding,
   OWNERS,
@@ -18,6 +21,7 @@ import {
   describeChange,
   durationLabel,
   installCalls,
+  projectAttachments,
   sortForApply,
   supportsV2,
   validateChanges,
@@ -25,6 +29,7 @@ import {
 import { rolesStore } from '../../store'
 import { ConfirmIconButton } from '../ConfirmIconButton'
 import { ProposeButton } from '../ProposeButton'
+import { Term } from '../Term'
 import { InfoTip } from '../Tooltip'
 import { Card, Notice, Tag } from '../ui'
 import { LintPanel, findingKey } from './LintPanel'
@@ -58,9 +63,8 @@ function InstallActions({
   if (!state) return null
   if (!supportsV2(state.version))
     return (
-      <Notice tone="bad">
-        Safe {state.version} cannot run V2: the module guard (the check of every module transaction) needs
-        Safe 1.5.0. Use a 1.5.0 Safe.
+      <Notice tone="bad" title={`Safe ${state.version} cannot run V2`}>
+        The module guard (the check of every module transaction) needs Safe 1.5.0.
       </Notice>
     )
   const [configure, ...admin] = installCalls(safe, deployment, draft, leftovers, {
@@ -74,16 +78,17 @@ function InstallActions({
   return (
     <div className="stack">
       {draft.length === 0 && (
-        <Notice tone="warn">
-          Installing with an empty configuration denies every owner and module transaction except
-          engine.configure (deny by default). Start from the Owners template.
+        <Notice tone="warn" title="Empty configuration">
+          Installing it denies every owner and module transaction except engine.configure. Start from the
+          Owners template.
         </Notice>
       )}
       {leftovers.length > 0 && (
-        <Notice tone="warn">
-          This Safe has {leftovers.length} attachment{leftovers.length === 1 ? '' : 's'} from an earlier
-          install (shown on the chart). The install batch detaches the ones the draft does not keep, in the
-          same configure.
+        <Notice
+          tone="warn"
+          title={`${leftovers.length} attachment${leftovers.length === 1 ? '' : 's'} from an earlier install`}
+        >
+          The install batch detaches the ones the draft does not keep (shown on the chart).
         </Notice>
       )}
       {disabledRoles.length > 0 && (
@@ -128,9 +133,8 @@ function InstallActions({
         </label>
       )}
       {keepHandler && !hasTokenHandler && (
-        <Notice tone="warn">
-          The fallback handler stays as it is: if it implements ERC-1271, off-chain owner signatures bypass
-          every policy.
+        <Notice tone="warn" title="The fallback handler stays as it is">
+          If it implements <Term k="erc1271">ERC-1271</Term>, off-chain owner signatures bypass every policy.
         </Notice>
       )}
       <ProposeButton
@@ -143,32 +147,71 @@ function InstallActions({
   )
 }
 
-/** Once installed: `engine.configure(draft)` as one owner transaction, judged like any other. */
+/**
+ * Once installed: `engine.configure(draft)` as one owner transaction, judged like any other. Actors
+ * the new rules cover that are not modules yet can be enabled too: as a second owner transaction
+ * right after it (engine.configure must be proposed alone), so a module never runs without its rules.
+ */
 function ConfigureActions({
   call,
   ownersDelay,
   blocked,
+  newActors,
+  ctx,
   onDone,
 }: {
   call: OwnerCall
   ownersDelay: number
   blocked: boolean
+  /** Actors with attachments after the draft that are not enabled modules. */
+  newActors: readonly Address[]
+  ctx: LabelContext
   onDone: () => void
 }) {
+  const { safe } = useSandbox()
+  const [skipped, setSkipped] = useState<readonly Address[]>([])
+  const enable = newActors.filter((a) => !skipped.includes(a))
+  const followUps: OwnerCall[] = enable.map((m) => ({
+    ...safeTxs.enableModule(safe, m),
+    value: 0n,
+    operation: Operation.CALL,
+  }))
   return (
     <div className="stack">
       <h3>Apply</h3>
       {ownersDelay === 0 && (
-        <Notice tone="warn">
-          No owners&apos; Timelock covers configuration changes: this one applies as soon as the signers
-          execute it.
+        <Notice tone="warn" title="Rule changes are not delayed">
+          No owners&apos; <Term k="timelock">Timelock</Term> covers them: this one applies as soon as the
+          signers execute it.
         </Notice>
+      )}
+      {newActors.length > 0 && (
+        <div className="checklist">
+          {newActors.map((a) => (
+            <label key={a} className="row">
+              <input
+                type="checkbox"
+                checked={!skipped.includes(a)}
+                onChange={(e) =>
+                  setSkipped((list) => (e.target.checked ? list.filter((x) => x !== a) : [...list, a]))
+                }
+              />
+              Also enable {actorLabel(a, ctx.nameOf)} as a module
+              <InfoTip>
+                A second owner transaction, right after the configure (next nonce): engine.configure must be
+                proposed alone. Both go through sign, schedule, wait and execute.
+              </InfoTip>
+            </label>
+          ))}
+        </div>
       )}
       {blocked ? (
         <p className="muted small">Fix or confirm the points above to apply the draft.</p>
       ) : (
         <OwnerAction
+          key={enable.join(',')}
           call={call}
+          followUps={followUps}
           delayLabel={ownersDelay > 0 ? durationLabel(ownersDelay) : undefined}
           onDone={onDone}
         />
@@ -199,9 +242,9 @@ export function DraftPanel({
   /** The Safe's current fallback handler, once read. */
   handler?: Address
 }) {
-  const { safe, v2Installed } = useSandbox()
+  const { safe, state, v2Installed } = useSandbox()
   const [confirmed, setConfirmed] = useState<ReadonlySet<string>>(new Set())
-  const ordered = sortForApply(deployment, draft)
+  const ordered = sortForApply(draft)
   // Before install, leftovers the draft does not touch are detached by the install batch.
   const touched = new Set(draft.map(changeAttachmentId))
   const base = v2Installed ? current : current.filter((a) => touched.has(a.attachmentId))
@@ -211,6 +254,16 @@ export function DraftPanel({
   const blocked = empty || problems.length > 0 || unconfirmed.length > 0
   const clear = () => setDraft([])
   const covers = new Set(configureCoverIds(deployment, OWNERS))
+  const newActors = empty
+    ? []
+    : [
+        ...new Set(projectAttachments(current, ordered, deployment).map((a) => getAddress(a.scope.actor))),
+      ].filter(
+        (actor) =>
+          !isAddressEqual(actor, OWNERS) &&
+          !isAddressEqual(actor, EVERYONE) &&
+          !(state?.modules ?? []).some((m) => isAddressEqual(m, actor)),
+      )
   const ownersDelay = Math.max(
     0,
     ...current
@@ -224,9 +277,9 @@ export function DraftPanel({
         <span className="row">
           Draft ({draft.length})
           <InfoTip>
-            The changes you are preparing, applied together in one owner transaction. They run in this order:
-            removals first, then Timelocks on any call before narrower rules, so a delay is always in place
-            before what it protects.
+            The changes you are preparing, applied together in one owner transaction, removals first. The
+            engine checks the result as a whole: every policy the draft touches validates the final
+            configuration, so the order of the changes does not matter.
           </InfoTip>
         </span>
       }
@@ -267,21 +320,37 @@ export function DraftPanel({
         </ol>
       )}
 
-      <LintPanel
-        findings={findings}
-        confirmed={confirmed}
-        onConfirm={(key, value) =>
-          setConfirmed((set) => {
-            const next = new Set(set)
-            if (value) next.add(key)
-            else next.delete(key)
-            return next
-          })
-        }
-      />
+      {empty && findings.length > 0 && (
+        <p className="muted small">The draft is empty: these checks are on the current rules.</p>
+      )}
+      {empty && findings.length === 0 ? (
+        <p className="muted small">Checks on the current rules: nothing to report.</p>
+      ) : (
+        <LintPanel
+          findings={findings}
+          confirmed={confirmed}
+          onConfirm={(key, value) =>
+            setConfirmed((set) => {
+              const next = new Set(set)
+              if (value) next.add(key)
+              else next.delete(key)
+              return next
+            })
+          }
+        />
+      )}
 
-      {problems.length > 0 && (
-        <Notice tone="bad">The engine would refuse this draft: fix the changes marked in red.</Notice>
+      {problems
+        .filter((p) => p.index < 0)
+        .map((p) => (
+          <Notice key={p.message} tone="bad">
+            {p.message}
+          </Notice>
+        ))}
+      {problems.some((p) => p.index >= 0) && (
+        <Notice tone="bad" title="The engine would refuse this draft">
+          Fix the changes marked in red.
+        </Notice>
       )}
 
       {v2Installed ? (
@@ -290,6 +359,8 @@ export function DraftPanel({
             call={configureCall(deployment.engine, ordered)}
             ownersDelay={ownersDelay}
             blocked={blocked}
+            newActors={newActors}
+            ctx={ctx}
             onDone={clear}
           />
         )

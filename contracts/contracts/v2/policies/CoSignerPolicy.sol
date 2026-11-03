@@ -13,7 +13,9 @@ import {PolicyBase} from "./PolicyBase.sol";
  * @dev Approvals are stored under `(engine, safe, txHash, useCount, approver)`. Consuming them is
  *      one write: bumping `useCount` makes every approval of the earlier use unreachable, without
  *      iterating over approvers. The same bump changes {approvalDigest}, so a signature (or a
- *      standing ERC-1271 approval) of a consumed use never counts again.
+ *      standing ERC-1271 approval) of a consumed use never counts again. A {revoke} bumps the
+ *      approver's own revision, also part of the digest: it voids that approver's signatures not
+ *      pushed yet, and nobody else's.
  */
 contract CoSignerPolicy is PolicyBase, ICoSignerPolicy {
     bytes32 private constant _DOMAIN_TYPEHASH =
@@ -21,7 +23,9 @@ contract CoSignerPolicy is PolicyBase, ICoSignerPolicy {
     bytes32 private constant _NAME_HASH = keccak256("CoSignerPolicy");
     bytes32 private constant _VERSION_HASH = keccak256("1");
     bytes32 private constant _APPROVAL_TYPEHASH =
-        keccak256("Approval(address engine,address safe,bytes32 txHash,uint256 useCount,uint64 validUntil)");
+        keccak256(
+            "Approval(address engine,address safe,bytes32 txHash,address approver,uint256 useCount,uint256 revision,uint64 validUntil)"
+        );
 
     /// @dev secp256k1 n / 2: higher `s` values are malleable twins and are rejected.
     uint256 private constant _HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
@@ -35,8 +39,12 @@ contract CoSignerPolicy is PolicyBase, ICoSignerPolicy {
     /// @dev `_approvalKey(useKey, use, approver)` => `validUntil` (0: none).
     mapping(bytes32 approvalKey => uint64) private _approvals;
 
-    /// @dev `keccak256(digest, approver)` => pushed. Per approver: every approver signs the same digest.
+    /// @dev `keccak256(digest, approver)` => pushed.
     mapping(bytes32 pushKey => bool) private _pushed;
+
+    /// @dev `_revisionKey(useKey, approver)` => revision, bumped by {revoke}: it is part of the
+    ///      digest, so a revoke also voids the approver's signatures not pushed yet.
+    mapping(bytes32 revisionKey => uint256) private _revisions;
 
     /// @inheritdoc ICoSignerPolicy
     function approve(address engine, address safe, bytes32 txHash, uint64 validUntil) external override {
@@ -54,8 +62,7 @@ contract CoSignerPolicy is PolicyBase, ICoSignerPolicy {
         bytes calldata signature
     ) external override {
         require(validUntil >= block.timestamp, ApprovalExpired(validUntil));
-        bytes32 useKey = _useKey(engine, safe, txHash);
-        bytes32 digest = _digest(engine, safe, txHash, _useCounts[useKey], validUntil);
+        bytes32 digest = _approvalDigest(engine, safe, txHash, approver, validUntil);
         require(_isValidSignature(approver, digest, signature), InvalidSignature(approver));
         bytes32 pushKey = keccak256(abi.encode(digest, approver));
         require(!_pushed[pushKey], SignatureAlreadyUsed(digest));
@@ -67,6 +74,7 @@ contract CoSignerPolicy is PolicyBase, ICoSignerPolicy {
     function revoke(address engine, address safe, bytes32 txHash) external override {
         bytes32 useKey = _useKey(engine, safe, txHash);
         delete _approvals[_approvalKey(useKey, _useCounts[useKey], msg.sender)];
+        _revisions[_revisionKey(useKey, msg.sender)]++;
         emit Revoked(engine, safe, txHash, msg.sender);
     }
 
@@ -75,9 +83,20 @@ contract CoSignerPolicy is PolicyBase, ICoSignerPolicy {
         address engine,
         address safe,
         bytes32 txHash,
+        address approver,
         uint64 validUntil
     ) external view override returns (bytes32) {
-        return _digest(engine, safe, txHash, _useCounts[_useKey(engine, safe, txHash)], validUntil);
+        return _approvalDigest(engine, safe, txHash, approver, validUntil);
+    }
+
+    /// @inheritdoc ICoSignerPolicy
+    function revision(
+        address engine,
+        address safe,
+        bytes32 txHash,
+        address approver
+    ) external view override returns (uint256) {
+        return _revisions[_revisionKey(_useKey(engine, safe, txHash), approver)];
     }
 
     /// @inheritdoc ICoSignerPolicy
@@ -164,17 +183,30 @@ contract CoSignerPolicy is PolicyBase, ICoSignerPolicy {
         emit Approved(engine, safe, txHash, approver, validUntil);
     }
 
-    function _digest(
+    /// @dev The digest `approver` signs now: the current use count and the approver's revision.
+    function _approvalDigest(
         address engine,
         address safe,
         bytes32 txHash,
-        uint256 use,
+        address approver,
         uint64 validUntil
     ) private view returns (bytes32) {
+        bytes32 useKey = _useKey(engine, safe, txHash);
         bytes32 domainSeparator = keccak256(
             abi.encode(_DOMAIN_TYPEHASH, _NAME_HASH, _VERSION_HASH, block.chainid, address(this))
         );
-        bytes32 structHash = keccak256(abi.encode(_APPROVAL_TYPEHASH, engine, safe, txHash, use, validUntil));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                _APPROVAL_TYPEHASH,
+                engine,
+                safe,
+                txHash,
+                approver,
+                _useCounts[useKey],
+                _revisions[_revisionKey(useKey, approver)],
+                validUntil
+            )
+        );
         return keccak256(abi.encodePacked(hex"1901", domainSeparator, structHash));
     }
 
@@ -201,5 +233,9 @@ contract CoSignerPolicy is PolicyBase, ICoSignerPolicy {
 
     function _approvalKey(bytes32 useKey, uint256 use, address approver) private pure returns (bytes32) {
         return keccak256(abi.encode(useKey, use, approver));
+    }
+
+    function _revisionKey(bytes32 useKey, address approver) private pure returns (bytes32) {
+        return keccak256(abi.encode(useKey, approver));
     }
 }

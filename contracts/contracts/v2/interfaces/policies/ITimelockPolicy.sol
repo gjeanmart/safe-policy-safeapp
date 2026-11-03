@@ -27,24 +27,32 @@ import {IPolicy} from "../IPolicy.sol";
  *      A cancelled owner-path hash can never be scheduled again (`CancelledTransaction`).
  *      On pass the schedule is deleted (consumed) and `Executed` is emitted.
  *
- *      Configuration invariant (`TimelockNotCoveringConfiguration`): an attachment with
- *      `delay > 0` whose actor is `ScopeLib.OWNERS` or `ScopeLib.ANY` needs an attached Timelock
- *      attachment of this policy at `(actor, *)` or `(ANY, *)`, with `delay >=` its delay and
- *      CALL in its op mask (the attachment itself qualifies when it is that one). Only an
- *      actor-wide delay also delays `setGuard(0)` and `setModuleGuard(0)`, so the owners can
- *      never remove a delay faster than the delay itself. Module-actor attachments are exempt:
- *      the owners remove them through their own delay.
+ *      Covering rule (`TimelockNotCoveringConfiguration`), checked by {IPolicy-validate} on the
+ *      final configuration of every `configure` touching this policy, whatever the order of its
+ *      changes: let D be the longest delay of this policy's attachments whose actor is
+ *      `ScopeLib.OWNERS` or `ScopeLib.ANY`. Each owner-path route out of a policy must be delayed
+ *      at least D by an attachment of this policy that matches it (any of its lookup scopes, the
+ *      route's operation in the op mask): CALLs to `engine.configure`, `Safe.setGuard`,
+ *      `Safe.setModuleGuard`, `Safe.enableModule`, `Safe.disableModule`,
+ *      `Safe.setFallbackHandler`, and any DELEGATECALL (only `(OWNERS, *)` or `(ANY, *)` with
+ *      DELEGATECALL in the mask covers that one). So the owners can never remove or bypass a delay
+ *      faster than the delay itself; lowering or detaching a cover under a longer delay is
+ *      refused. Module-actor attachments are exempt: the owners remove them through their own
+ *      delay. Owner management (`addOwnerWithThreshold`, ...) is not a route: new owners are
+ *      delayed the same.
  *
- *      Freeze state per attachment: `ACTIVE -> FROZEN (until the guardian's window end) -> COOLDOWN
+ *      Freeze state per attachment: `ACTIVE -> FROZEN (until the actor's window end) -> COOLDOWN
  *      (until frozenUntil + COOLDOWN) -> ACTIVE`; `lift` ends FROZEN at once and starts the cooldown.
  *      No extension: freezing a frozen or cooling attachment is skipped (`FreezeSkipped`).
- *      Freeze window per guardian and `(engine, safe)`: its first freeze opens a window ending
- *      MAX_FREEZE later; its later freezes end with the window (they join it, never extend it);
- *      when the window ends, or a lift leaves the guardian nothing frozen, the guardian cannot
- *      freeze anything in that Safe for COOLDOWN. So one guardian freezes any attachment at most
- *      F per F + C. Several colluding guardians can chain their windows (documented).
- *      Freeze state is keyed by attachment id and guardian: `configure`, detach and re-attach keep
- *      it (they never shorten a freeze or a cooldown).
+ *      Freeze window per scope actor and `(engine, safe)`, whoever the guardian: the first freeze
+ *      of any of the actor's attachments opens a window ending MAX_FREEZE later; later freezes of
+ *      its attachments end with the window (they join it, never extend it); when the window ends,
+ *      or a lift leaves none of them frozen, none can be frozen for COOLDOWN. So an actor's
+ *      transactions are frozen at most F per F + C, however many guardians collude, per
+ *      TimelockPolicy deployment: a second deployment attached at the same actor keeps its own
+ *      window (the app refuses policies outside its deployment).
+ *      Freeze state is keyed by attachment id: `configure`, detach and re-attach keep it (they
+ *      never shorten a freeze or a cooldown).
  */
 interface ITimelockPolicy is IPolicy {
     /**
@@ -151,8 +159,9 @@ interface ITimelockPolicy is IPolicy {
 
     // --- configure ---
     error InvalidSettings();
-    /// @notice See the configuration invariant above.
-    error TimelockNotCoveringConfiguration();
+    /// @notice The route `(to, selector)` with operation bit `op` (0 as `to`: any DELEGATECALL) is
+    ///         not delayed `delay`, the longest owner-path delay of this policy (invariant above).
+    error TimelockNotCoveringConfiguration(address to, bytes4 selector, uint8 op, uint32 delay);
 
     // --- schedule ---
     /// @notice No attachment of this policy matches the transaction for that actor.
@@ -233,26 +242,27 @@ interface ITimelockPolicy is IPolicy {
     function cancelAsOwners(address engine, address safe, bytes32 txHash, bytes calldata signatures) external;
 
     /**
-     * @notice Freezes each listed attachment until the end of the caller's freeze window (opened
-     *         by its first freeze, `MAX_FREEZE` long). Who: a guardian of every listed id
-     *         (`NotGuardian` otherwise). Ids already frozen or cooling down, and every id while the
-     *         guardian itself cools down, are skipped (`FreezeSkipped`), never extended. Emits
-     *         `Frozen` per frozen id.
+     * @notice Freezes each listed attachment until the end of its actor's freeze window (opened
+     *         by the first freeze of any of the actor's attachments, `MAX_FREEZE` long). Who: a
+     *         guardian of every listed id (`NotGuardian` otherwise). Ids already frozen or cooling
+     *         down, and every id whose actor cools down, are skipped (`FreezeSkipped`), never
+     *         extended. Emits `Frozen` per frozen id.
      */
     function freeze(address engine, address safe, bytes32[] calldata attachmentIds) external;
 
     /**
-     * @notice Ends a freeze early and starts its cooldown; the guardian that froze it, if left
-     *         with nothing frozen, starts its own cooldown too. Who: a guardian or lifter of the id
-     *         (`NotGuardianOrLifter`). Reverts `NotFrozen` when not frozen. Emits `Lifted`.
+     * @notice Ends a freeze early and starts its cooldown; if none of the actor's attachments is
+     *         left frozen, the actor's window closes and its cooldown starts. Who: a guardian or
+     *         lifter of the id, which must be attached (`NotGuardianOrLifter`). Reverts `NotFrozen`
+     *         when not frozen. Emits `Lifted`.
      */
     function lift(address engine, address safe, bytes32 attachmentId) external;
 
-    /// @notice F: the longest a guardian's freeze window lasts (immutable).
+    /// @notice F: the longest an actor's freeze window lasts (immutable).
     function MAX_FREEZE() external view returns (uint256);
 
-    /// @notice C: after a freeze ends, no new freeze of that attachment, nor by that guardian in
-    ///         that Safe, for this long (immutable).
+    /// @notice C: after a freeze ends, no new freeze of that attachment, nor of any attachment of
+    ///         that actor in that Safe once its window ends, for this long (immutable).
     function COOLDOWN() external view returns (uint256);
 
     function getSettings(address engine, address safe, bytes32 attachmentId) external view returns (Settings memory);
@@ -271,13 +281,13 @@ interface ITimelockPolicy is IPolicy {
     ) external view returns (uint64 frozenUntil, uint64 cooldownUntil);
 
     /**
-     * @notice A guardian's freeze window in `safe`: its freezes end at `end`; it cannot freeze
-     *         from `end` until `cooldownUntil`; `frozen` ids it froze in the window are not lifted.
+     * @notice The freeze window of `actor`'s attachments in `safe`: every freeze of them ends at
+     *         `end`; none can start from `end` until `cooldownUntil`; `frozen` ids are frozen in it.
      */
-    function guardianWindow(
+    function actorWindow(
         address engine,
         address safe,
-        address guardian
+        address actor
     ) external view returns (uint64 end, uint64 cooldownUntil, uint32 frozen);
 
     /// @notice True once an owner-path `txHash` was cancelled: it can never be scheduled again.

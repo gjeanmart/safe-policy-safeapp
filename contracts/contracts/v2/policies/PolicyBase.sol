@@ -44,6 +44,15 @@ abstract contract PolicyBase is IPolicy {
         return IPolicy.check.selector;
     }
 
+    /// @inheritdoc IPolicy
+    function validate(address safe) external virtual override {
+        _validate(msg.sender, safe);
+    }
+
+    /// @dev Invariants over the final configuration of `safe` (IPolicy.validate); none by default.
+    // solhint-disable-next-line no-empty-blocks
+    function _validate(address engine, address safe) internal view virtual {}
+
     /// @dev Validates and stores the settings of `(engine, safe, attachmentId)`, fully overwriting
     ///      earlier ones. Revert to reject.
     function _configure(

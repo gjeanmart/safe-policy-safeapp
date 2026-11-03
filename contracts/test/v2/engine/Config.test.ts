@@ -341,6 +341,105 @@ describe('V2 engine: configure', () => {
     })
   })
 
+  describe('validate hook (final configuration)', () => {
+    const VALIDATE = { PASS: 0, REJECT: 1, WRITE: 2 }
+    const rejected = (
+      p: { interface: { encodeErrorResult: (n: string, a: unknown[]) => string } },
+      own: number,
+      all: number,
+    ) => p.interface.encodeErrorResult('MockValidateRejected', [own, all])
+
+    /** STATICCALLs from the engine to `policy` with the `validate` selector in a mined transaction. */
+    async function validateCalls(txHash: string, policyAddr: string, selector: string): Promise<number> {
+      const trace = await ethers.provider.send('debug_traceTransaction', [txHash])
+      let n = 0
+      for (const log of trace.structLogs as { op: string; stack: string[]; memory?: string[] }[]) {
+        if (log.op !== 'STATICCALL') continue
+        const top = log.stack.length - 1
+        if (BigInt('0x' + log.stack[top - 1].replace(/^0x/, '')) !== BigInt(policyAddr)) continue
+        const offset = Number(BigInt('0x' + log.stack[top - 2].replace(/^0x/, '')))
+        const memory = (log.memory ?? []).map((w) => w.replace(/^0x/, '')).join('')
+        if ('0x' + memory.slice(offset * 2, offset * 2 + 8) === selector) n++
+      }
+      return n
+    }
+
+    it('runs after the whole batch, once per policy touched, on the final attachments', async () => {
+      const { engine, configure, p, pAddr, target } = await fresh()
+      const q = await ethers.deployContract('EngineMockPolicy')
+      const qAddr = await q.getAddress()
+      const selector = p.interface.getFunction('validate').selector
+      // Two attachments of P and one of Q in one batch: P once, Q once.
+      const tx = await configure([
+        policy(scope(OWNERS), pAddr),
+        allow(scope(OWNERS, CallMatch.CONTRACT, target)),
+        policy(scope(OWNERS, CallMatch.CONTRACT, target), pAddr),
+        policy(scope(ANY), qAddr),
+      ])
+      expect(await validateCalls(tx.hash, pAddr, selector)).to.equal(1)
+      expect(await validateCalls(tx.hash, qAddr, selector)).to.equal(1)
+      // It sees the final configuration: an attachment added after P's in the same batch.
+      await p.setValidateMode(VALIDATE.REJECT)
+      await expectRevert(
+        configure([policy(scope(OWNERS), pAddr), deny(scope(ANY, CallMatch.CONTRACT, target))]),
+        engine,
+        'PolicyConfigurationFailed',
+        [pAddr, rejected(p, 2, 5)],
+      )
+      // A failing validate of one policy reverts the batch, named by that policy.
+      await p.setValidateMode(VALIDATE.PASS)
+      await q.setValidateMode(VALIDATE.REJECT)
+      await expectRevert(
+        configure([policy(scope(OWNERS), pAddr), policy(scope(ANY), qAddr)]),
+        engine,
+        'PolicyConfigurationFailed',
+        [qAddr, rejected(q, 1, 4)],
+      )
+    })
+
+    it('is a STATICCALL: a validate that writes reverts PolicyConfigurationFailed', async () => {
+      const { engine, configure, p, pAddr } = await fresh()
+      await p.setValidateMode(VALIDATE.WRITE)
+      await expectRevert(configure([policy(scope(OWNERS), pAddr)]), engine, 'PolicyConfigurationFailed', [
+        pAddr,
+        '0x',
+      ])
+      expect(await p.validateWrites()).to.equal(0n)
+    })
+
+    it('tracks attachments per policy through attach, update, detach and re-attach; a fully detached policy is never called', async () => {
+      const { engine, configure, p, pAddr, target, safeAddr } = await fresh()
+      const s1 = scope(OWNERS)
+      const s2 = scope(OWNERS, CallMatch.CONTRACT, target)
+      await configure([policy(s1, pAddr), policy(s2, pAddr)])
+      await p.setValidateMode(VALIDATE.REJECT)
+      const fails = (own: number, all: number) => [pAddr, rejected(p, own, all)]
+      await expectRevert(configure([policy(s1, pAddr)]), engine, 'PolicyConfigurationFailed', fails(2, 2))
+      await expectRevert(
+        configure([detach(s2, Kind.POLICY, pAddr)]),
+        engine,
+        'PolicyConfigurationFailed',
+        fails(1, 1),
+      )
+      // Detaching the last attachment never calls the policy: the owners can always drop it.
+      await configure([detach(s1, Kind.POLICY, pAddr), detach(s2, Kind.POLICY, pAddr)])
+      await expectRevert(configure([policy(s1, pAddr)]), engine, 'PolicyConfigurationFailed', fails(1, 1))
+      await configure([policy(s1, pAddr), detach(s1, Kind.POLICY, pAddr)])
+      expect((await engine.getAttachments(safeAddr)).length).to.equal(0)
+    })
+
+    it('a batch of ALLOW and DENY changes calls no policy', async () => {
+      const { configure, p, pAddr, target } = await fresh()
+      await configure([policy(scope(OWNERS), pAddr)])
+      await p.setValidateMode(VALIDATE.REJECT)
+      await configure([
+        allow(scope(OWNERS, CallMatch.CONTRACT, target)),
+        deny(scope(ANY, CallMatch.CONTRACT, target)),
+        detach(scope(ANY, CallMatch.CONTRACT, target), Kind.DENY),
+      ])
+    })
+  })
+
   describe('pure views', () => {
     it('moduleCallHash matches ScopeLib', async () => {
       const { engine, safeAddr, module, target } = await fresh()

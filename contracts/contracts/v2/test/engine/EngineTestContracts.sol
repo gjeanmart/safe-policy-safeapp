@@ -54,6 +54,17 @@ contract EngineMockPolicy is IPolicy {
 
     error MockDenied(bytes32 attachmentId);
     error MockConfigRejected();
+    /// @notice `validate` in mode REJECT: what it saw of the final configuration.
+    error MockValidateRejected(uint256 ownAttachments, uint256 allAttachments);
+
+    /// @notice `validate`: 0 passes, 1 reverts `MockValidateRejected`, 2 writes (so reverts under
+    ///         the engine's STATICCALL).
+    uint8 public validateMode;
+    uint256 public validateWrites;
+
+    function setValidateMode(uint8 mode) external {
+        validateMode = mode;
+    }
 
     function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
         return interfaceId == type(IPolicy).interfaceId || interfaceId == type(IERC165).interfaceId;
@@ -79,6 +90,20 @@ contract EngineMockPolicy is IPolicy {
         behaviourOf[msg.sender][safe][attachmentId] = Behaviour(behaviour);
         callbackOf[msg.sender][safe][attachmentId] = callback;
         emit Configured(msg.sender, safe, attachmentId, scope, opMask);
+    }
+
+    function validate(address safe) external {
+        if (validateMode == 0) return;
+        if (validateMode == 2) {
+            validateWrites++;
+            return;
+        }
+        AttachmentView[] memory all = IPolicyGuard(msg.sender).getAttachments(safe);
+        uint256 own;
+        for (uint256 i = 0; i < all.length; i++) {
+            if (all[i].policy == address(this)) own++;
+        }
+        revert MockValidateRejected(own, all.length);
     }
 
     function check(Context calldata ctx, Call[] calldata calls, Match[] calldata matches) external returns (bytes4) {

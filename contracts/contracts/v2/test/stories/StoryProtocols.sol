@@ -228,6 +228,8 @@ contract StoryPassPolicy is IPolicy {
         return interfaceId == type(IPolicy).interfaceId || interfaceId == 0x01ffc9a7;
     }
 
+    function validate(address) external view {}
+
     function configure(address, bytes32, Scope calldata, uint8, bytes calldata) external {}
 
     function check(Context calldata, Call[] calldata, Match[] calldata) external pure returns (bytes4) {

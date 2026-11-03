@@ -36,6 +36,8 @@ abstract contract EngineStorage {
     mapping(address safe => mapping(bytes32 attachmentId => AttachmentRef)) internal _refs;
     mapping(address safe => bytes32[]) internal _scopeKeys;
     mapping(address safe => mapping(bytes32 scopeKey => ScopeRecord)) internal _scopes;
+    /// @dev Attachments per policy contract: `configure` validates a policy only while it has some.
+    mapping(address safe => mapping(address policy => uint256)) internal _policyCounts;
 
     /// @dev Transient re-entrancy flag, set while a hook evaluates.
     bytes32 private constant _LOCK_SLOT = keccak256("PolicyGuard.lock");

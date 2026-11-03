@@ -1,55 +1,80 @@
 import { type Address, isAddressEqual, zeroAddress } from 'viem'
-import { SAFE_HANDLERS } from '../../lib/v2'
-import { AddressView, Notice } from '../ui'
+import { useSandbox } from '../../context'
+import { SAFE_HANDLERS, safeCalls } from '../../lib/v2'
+import { ProposeButton } from '../ProposeButton'
+import { Term } from '../Term'
+import { AddressView, Badge, Notice } from '../ui'
+import { toSafeTxs } from './ownerCalls'
+
+export type HandlerKind = 'none' | 'tokenCallback' | 'compatibility' | 'unknown'
+
+export function handlerKind(handler: Address): HandlerKind {
+  if (isAddressEqual(handler, zeroAddress)) return 'none'
+  if (isAddressEqual(handler, SAFE_HANDLERS.tokenCallback)) return 'tokenCallback'
+  if (isAddressEqual(handler, SAFE_HANDLERS.compatibility)) return 'compatibility'
+  return 'unknown'
+}
+
+/** Only these two are known to have no ERC-1271: an unknown handler may well implement it. */
+export const acceptsOffchainSignatures = (handler: Address) =>
+  !['none', 'tokenCallback'].includes(handlerKind(handler))
+
+/** The Safe status value: the handler's name, a badge saying whether it has ERC-1271, its address. */
+export function FallbackHandlerValue({ handler }: { handler: Address }) {
+  const kind = handlerKind(handler)
+  if (kind === 'none') return <Badge>none</Badge>
+  return (
+    <>
+      {kind === 'tokenCallback' && <strong>TokenCallbackHandler</strong>}
+      {kind === 'compatibility' && <strong>CompatibilityFallbackHandler</strong>}
+      {kind === 'unknown' && <Badge tone="warn">unknown handler</Badge>}
+      <AddressView address={handler} name="" />
+      {kind === 'tokenCallback' ? <Badge tone="ok">no ERC-1271</Badge> : <Badge tone="warn">ERC-1271</Badge>}
+    </>
+  )
+}
 
 /**
  * The policies only see transactions. A fallback handler that implements ERC-1271 (Safe's
  * CompatibilityFallbackHandler, the Safe{Wallet} default) makes the owners' off-chain signatures
- * valid for the Safe: a Permit, Permit2 or CoW order signed in Safe{Wallet} then moves funds with no
- * policy running (SPEC.md §6, decision 12). The install batch switches to TokenCallbackHandler unless
- * the owners opt out; this notice says where the Safe stands.
+ * valid for the Safe: a Permit, Permit2 or CoW order then moves funds with no policy running
+ * (SPEC.md §6, decision 12). The V2 install batch switches to TokenCallbackHandler unless the
+ * owners opt out; this notice says where the Safe stands.
  */
-export function Erc1271Notice({ handler, installed }: { handler?: Address; installed: boolean }) {
-  const none = handler !== undefined && isAddressEqual(handler, zeroAddress)
-  const token = handler !== undefined && isAddressEqual(handler, SAFE_HANDLERS.tokenCallback)
-  if (none || token)
+export function Erc1271Notice({ handler }: { handler: Address }) {
+  const { safe, v2Installed } = useSandbox()
+  if (!acceptsOffchainSignatures(handler))
     return (
-      <Notice tone="info">
-        <strong>Off-chain owner signatures cannot bypass the policies.</strong>{' '}
-        {token ? (
-          <>
-            This Safe uses Safe&apos;s TokenCallbackHandler (receives ERC-721 / ERC-1155, no ERC-1271): a
-            Permit, Permit2 or CoW order the owners sign off-chain is not valid for it.
-          </>
-        ) : (
-          <>This Safe has no fallback handler: off-chain signatures are not valid for it.</>
-        )}
+      <Notice tone="ok" title="Off-chain owner signatures cannot bypass the policies">
+        The fallback handler has no <Term k="erc1271">ERC-1271</Term>.
       </Notice>
     )
   return (
-    <Notice tone="warn">
-      <strong>Off-chain owner signatures bypass the policies.</strong> The engine checks transactions only. If
-      this Safe&apos;s fallback handler implements ERC-1271 (CompatibilityFallbackHandler, the default), a
-      Permit, Permit2 or CoW order the owners sign off-chain is valid for the Safe and can move its funds
-      without any policy running: the owners&apos; Timelock, the guardians&apos; freeze and recovery do not
-      bound a key compromise.{' '}
-      {installed ? (
+    <Notice
+      tone="warn"
+      title="Off-chain owner signatures can bypass the policies"
+      more={
         <>
-          Switch to Safe&apos;s <strong>TokenCallbackHandler</strong> (receives ERC-721 / ERC-1155, no
-          ERC-1271) with an owner transaction to <code>setFallbackHandler</code> (it goes through the
-          owners&apos; Allow and Timelock like any other).
+          The policies check transactions only. With this handler, a Permit, Permit2 or CoW order the owners
+          sign off-chain is valid for the Safe and moves its funds with no policy running: the owners&apos;
+          Timelock, the guardians&apos; freeze and recovery do not bound a key compromise. Safe&apos;s
+          TokenCallbackHandler still receives ERC-721 and ERC-1155 tokens, without ERC-1271.
         </>
-      ) : (
-        <>
-          The install batch sets Safe&apos;s <strong>TokenCallbackHandler</strong> (receives ERC-721 /
-          ERC-1155, no ERC-1271) unless you opt out.
-        </>
-      )}{' '}
-      {handler !== undefined && (
-        <>
-          Current handler: <AddressView address={handler} />
-          {isAddressEqual(handler, SAFE_HANDLERS.compatibility) && ' (CompatibilityFallbackHandler 1.5.0)'}.
-        </>
+      }
+    >
+      The fallback handler {handlerKind(handler) === 'unknown' ? 'may implement' : 'implements'}{' '}
+      <Term k="erc1271">ERC-1271</Term>.{' '}
+      {v2Installed
+        ? 'Switch it to TokenCallbackHandler (an owner transaction).'
+        : 'The V2 install batch switches it to TokenCallbackHandler unless you opt out.'}
+      {v2Installed && (
+        <ProposeButton
+          label="Switch to TokenCallbackHandler"
+          variant="secondary"
+          preview={false}
+          title="Proposes setFallbackHandler(TokenCallbackHandler); it shows in the Queue"
+          txs={toSafeTxs([safeCalls.setFallbackHandler(safe, SAFE_HANDLERS.tokenCallback)])}
+        />
       )}
     </Notice>
   )

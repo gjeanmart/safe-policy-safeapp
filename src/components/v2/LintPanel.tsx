@@ -10,7 +10,7 @@ const TITLES: Record<LintRule, string> = {
   'no-owners-timelock': 'Owners can change the rules at once',
   'timelock-not-covering-configure': 'Rule changes are not delayed',
   'actor-no-guardian': 'Nobody can stop this actor',
-  'no-way-back': 'No way back if a co-signer disappears',
+  'no-way-back': 'No way back if a co-signer or Safenet disappears',
   'deny-covers-configure': 'A Deny blocks rule changes',
   'limit-unlisted-spend': 'Budget refuses other tokens',
   'limit-nft-actor': 'Budget cannot price NFTs',
@@ -18,6 +18,9 @@ const TITLES: Record<LintRule, string> = {
   'canceller-covers-owners': 'A canceller can veto every transaction',
   'delay-below-cooldown': 'Delay shorter than the freeze cooldown',
   'self-oversight': 'An actor oversees itself',
+  'narrow-delay-other-actor': 'Another actor skips the owners delay',
+  'narrow-delay-spend-shape': 'Other spend functions skip the delay',
+  'configure-cover-unguarded': 'Guardians cannot stop the removal of a delay',
 }
 
 export const findingKey = (f: LintFinding): string => `${f.rule}:${f.attachmentIds.join(',')}:${f.message}`

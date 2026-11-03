@@ -10,7 +10,9 @@
   --warn-bg: #fff4e0;
   --bad: #c31717;
   --bad-bg: #ffe6e6;
+  --info: #2a4f9e;
   --info-bg: #eaf2ff;
+  --ok-bg: #e3f9ec;
   --radius: 8px;
   font-family:
     ui-sans-serif,
@@ -245,19 +247,65 @@ select {
   color: var(--bad);
 }
 
+/* Callout: icon | title + body, with a left accent in the tone's colour. */
 .notice {
-  padding: 8px 12px;
+  --tone: var(--info);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
   border-radius: 6px;
+  border-left: 3px solid var(--tone);
   margin: 8px 0;
   background: var(--info-bg);
+  line-height: 1.45;
+}
+
+.notice-ok {
+  --tone: var(--accent-ink);
+  background: var(--ok-bg);
 }
 
 .notice-warn {
+  --tone: var(--warn);
   background: var(--warn-bg);
 }
 
 .notice-bad {
+  --tone: var(--bad);
   background: var(--bad-bg);
+}
+
+.notice-icon {
+  display: inline-flex;
+  color: var(--tone);
+  font-size: 16px;
+  padding-top: 1px;
+}
+
+.notice-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.notice-title {
+  font-weight: 600;
+}
+
+.notice-more {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.notice-more[open] summary {
+  margin-bottom: 4px;
+}
+
+.notice .propose {
+  display: inline-flex;
 }
 
 .tabs {
@@ -362,9 +410,42 @@ th {
   border-bottom: 1px solid var(--border);
 }
 
-.activity .detail {
-  color: var(--bad);
-  margin-top: 2px;
+/* The global Activity panel, at the bottom of every tab. */
+.activity-panel .card-header {
+  margin-bottom: 0;
+}
+
+.activity-panel .activity {
+  margin-top: 12px;
+}
+
+.activity-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.chevron {
+  display: inline-flex;
+  transform: rotate(-90deg);
+  transition: transform 0.15s;
+}
+
+.chevron.open {
+  transform: none;
+}
+
+.activity-details ul,
+.queue-lines ul {
+  margin: 4px 0;
+  padding-left: 18px;
+  white-space: pre-wrap;
 }
 
 details summary {
@@ -623,9 +704,12 @@ select:focus-visible {
   justify-self: end;
 }
 
-/* The decoded revert sits under the action column. */
-.activity-row .detail {
+/* The reason and the decoded details sit under the action column. */
+.activity-more {
   grid-column: 5 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 /* Tags: outlined and square-ish, to read differently from the filled status badges. */
@@ -1110,9 +1194,109 @@ select:focus-visible {
   outline-offset: 1px;
 }
 
+/* One Queue row: title + status | lines | timeline | next action | small meta. */
 .queue-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   border-top: 1px solid var(--border);
-  padding-top: 8px;
+  padding-top: 10px;
+}
+
+.queue-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.queue-title {
+  font-size: 14px;
+}
+
+.queue-end {
+  margin-left: auto;
+}
+
+.queue-actions:empty {
+  display: none;
+}
+
+.queue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* A Queue row shown under the action that started it (playground, draft). */
+.inline-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 12px 10px;
+}
+
+.inline-row .queue-entry {
+  border-top: none;
+}
+
+.stack-tight {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.short-hash {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.term {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Pending, done and failed states of an action button. */
+.spinner {
+  display: inline-flex;
+  animation: spin 0.8s linear infinite;
+}
+
+.pending-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.done-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.error-line {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.error-line details summary {
+  font-size: 12px;
+}
+
+.error-details {
+  margin: 4px 0 0;
+  max-width: 640px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
 }
 
 .draft-list {

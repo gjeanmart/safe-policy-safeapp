@@ -290,7 +290,7 @@ describe('Story: freeze timelines (T 24 h < R 72 h < F 7 d, C 12 h)', () => {
     await w.timelock.connect(w.guardian).freeze(w.engineAddress, w.safeAddress, [idB])
     expect((await w.timelock.freezeState(w.engineAddress, w.safeAddress, idB))[0]).to.equal(until)
     await time.increaseTo(until)
-    // G is now cooling down in this Safe: nothing it freezes sticks, and the owners get out.
+    // The owners' window is cooling down: nothing freezes, and the owners get out.
     const again = await w.timelock.connect(w.guardian).freeze(w.engineAddress, w.safeAddress, [idA, idB])
     expect(await eventsOf(again, w.timelock, 'Frozen')).to.have.length(0)
     await execOwners(w, out)
@@ -298,32 +298,130 @@ describe('Story: freeze timelines (T 24 h < R 72 h < F 7 d, C 12 h)', () => {
     expect(BigInt(await time.latest()) - until < C, 'out within F + C of the first freeze').to.equal(true)
   })
 
-  it('two colluding guardians can chain their windows: the owners wait up to 2F (documented)', async () => {
-    const w = await deployWorld()
-    const all = anyCall(OWNERS)
-    const cfg = onFunction(OWNERS, w.engineAddress, SEL.configure)
-    await install(w, [
-      allow(all),
-      attach(all, w.timelock, timelockSettings({ delay: T, guardians: [w.guardian.address] })),
-      attach(cfg, w.timelock, timelockSettings({ delay: T, guardians: [w.guardian2.address] })),
-    ])
-    const idA = attachmentId(all, Kind.POLICY, addrOf(w.timelock))
-    const idB = attachmentId(cfg, Kind.POLICY, addrOf(w.timelock))
-    await w.timelock.connect(w.guardian).freeze(w.engineAddress, w.safeAddress, [idA])
-    const out = configureCall(w, [
-      attach(all, w.timelock, timelockSettings({ delay: T })),
-      attach(cfg, w.timelock, timelockSettings({ delay: T })),
-    ])
-    await scheduleOwners(w, out)
-    const [untilA] = await w.timelock.freezeState(w.engineAddress, w.safeAddress, idA)
-    await time.increaseTo(untilA - 60n)
-    await w.timelock.connect(w.guardian2).freeze(w.engineAddress, w.safeAddress, [idB])
-    const [untilB] = await w.timelock.freezeState(w.engineAddress, w.safeAddress, idB)
-    await time.increaseTo(untilA)
-    await expectPolicyDenied(execOwners(w, out), w, w.timelock, 'AttachmentFrozen')
-    // G is cooling down; G2 cannot extend B; B thaws and the owners get out.
-    await time.increaseTo(untilB)
-    await execOwners(w, out)
+  describe('any number of guardians: the owners are frozen at most F per F + C (review A4)', () => {
+    /** Owners' `(Owners, *)` and `(Owners, engine.configure)` Timelocks, each with both guardians. */
+    async function twoGuardians() {
+      const w = await deployWorld()
+      const guardians = [w.guardian.address, w.guardian2.address]
+      const all = anyCall(OWNERS)
+      const cfg = onFunction(OWNERS, w.engineAddress, SEL.configure)
+      const settings = timelockSettings({ delay: T, guardians })
+      await install(w, [allow(all), attach(all, w.timelock, settings), attach(cfg, w.timelock, settings)])
+      const X = attachmentId(all, Kind.POLICY, addrOf(w.timelock))
+      const Y = attachmentId(cfg, Kind.POLICY, addrOf(w.timelock))
+      // The owners' way out: any configure (here: re-attach both as they are).
+      const fix = configureCall(w, [attach(all, w.timelock, settings), attach(cfg, w.timelock, settings)])
+      return { w, X, Y, fix }
+    }
+
+    it('the second guardian freeze joins the window: the owners configure runs at F, in the cooldown', async () => {
+      const { w, X, Y, fix } = await twoGuardians()
+      await scheduleOwners(w, fix)
+      const t0 = BigInt(await time.latest()) + 1n
+      await time.setNextBlockTimestamp(t0)
+      await w.timelock.connect(w.guardian).freeze(w.engineAddress, w.safeAddress, [X])
+      await time.increaseTo(t0 + F - HOUR)
+      const join = await w.timelock.connect(w.guardian2).freeze(w.engineAddress, w.safeAddress, [Y])
+      const [frozen] = await eventsOf(join, w.timelock, 'Frozen')
+      expect(frozen.args.until).to.equal(t0 + F)
+      await expectPolicyDenied(execOwners(w, fix), w, w.timelock, 'AttachmentFrozen')
+      await time.increaseTo(t0 + F)
+      // Cooling: neither guardian can freeze anything of the owners for C.
+      const again = await w.timelock.connect(w.guardian2).freeze(w.engineAddress, w.safeAddress, [X, Y])
+      expect(await eventsOf(again, w.timelock, 'FreezeSkipped')).to.have.length(2)
+      expect([...(await w.timelock.actorWindow(w.engineAddress, w.safeAddress, OWNERS))]).to.deep.equal([
+        t0 + F,
+        t0 + F + C,
+        2n,
+      ])
+      await execOwners(w, fix)
+    })
+
+    it('ten cycles of alternating guardians to day 60+: frozen F per F + C, a configure runs every cycle', async () => {
+      const { w, X, Y, fix } = await twoGuardians()
+      const start = BigInt(await time.latest())
+      let frozenTotal = 0n
+      let cycles = 0
+      while (BigInt(await time.latest()) - start < 60n * DAY) {
+        await scheduleOwners(w, fix)
+        const s = BigInt(await time.latest()) + 1n
+        await time.setNextBlockTimestamp(s)
+        const [first] = await eventsOf(
+          await w.timelock.connect(w.guardian).freeze(w.engineAddress, w.safeAddress, [X]),
+          w.timelock,
+          'Frozen',
+        )
+        const end = BigInt(first.args.until)
+        expect(end).to.equal(s + F)
+        // Just before the end, the other guardian freezes the other attachment: it joins.
+        await time.increaseTo(end - HOUR)
+        const [joined] = await eventsOf(
+          await w.timelock.connect(w.guardian2).freeze(w.engineAddress, w.safeAddress, [Y]),
+          w.timelock,
+          'Frozen',
+        )
+        expect(joined.args.until).to.equal(end)
+        await expectPolicyDenied(execOwners(w, fix), w, w.timelock, 'AttachmentFrozen')
+        // At the end both are skipped, whoever tries, and the configure runs in the gap.
+        await time.increaseTo(end)
+        for (const g of [w.guardian, w.guardian2]) {
+          const skipped = await w.timelock.connect(g).freeze(w.engineAddress, w.safeAddress, [X, Y])
+          expect(await eventsOf(skipped, w.timelock, 'Frozen')).to.have.length(0)
+        }
+        await execOwners(w, fix)
+        frozenTotal += end - s
+        cycles++
+        await time.increaseTo(end + C)
+      }
+      const elapsed = BigInt(await time.latest()) - start
+      expect(cycles).to.be.greaterThanOrEqual(8)
+      expect(elapsed >= 60n * DAY).to.equal(true)
+      // Frozen fraction <= F / (F + C), compared without division.
+      expect(frozenTotal * (F + C) <= F * elapsed).to.equal(true)
+    })
+
+    it('a lift that leaves nothing of the owners frozen closes their window; another actor keeps its own', async () => {
+      const w = await deployWorld()
+      await install(
+        w,
+        [
+          allow(anyCall(OWNERS)),
+          attach(
+            anyCall(OWNERS),
+            w.timelock,
+            timelockSettings({ delay: T, guardians: [w.guardian.address], lifters: [w.recovery.address] }),
+          ),
+          allow(onFunction(w.ops.address, w.tokenAddress, SEL.transfer)),
+          attach(
+            anyCall(w.ops.address),
+            w.timelock,
+            timelockSettings({ delay: 0, guardians: [w.guardian.address] }),
+          ),
+        ],
+        { modules: [w.ops.address] },
+      )
+      const X = attachmentId(anyCall(OWNERS), Kind.POLICY, addrOf(w.timelock))
+      const O = attachmentId(anyCall(w.ops.address), Kind.POLICY, addrOf(w.timelock))
+      await w.timelock.connect(w.guardian).freeze(w.engineAddress, w.safeAddress, [X, O])
+      await w.timelock.connect(w.recovery).lift(w.engineAddress, w.safeAddress, X)
+      const lifted = BigInt(await time.latest())
+      expect([...(await w.timelock.actorWindow(w.engineAddress, w.safeAddress, OWNERS))]).to.deep.equal([
+        lifted,
+        lifted + C,
+        0n,
+      ])
+      const [, , opsFrozen] = await w.timelock.actorWindow(w.engineAddress, w.safeAddress, w.ops.address)
+      expect(opsFrozen).to.equal(1n)
+      await expectPolicyDenied(
+        execModule(w, w.ops, transfer(w, w.vendorA.address, 1n)),
+        w,
+        w.timelock,
+        'AttachmentFrozen',
+      )
+      // The owners' window is closed: no re-freeze for C.
+      const skipped = await w.timelock.connect(w.guardian).freeze(w.engineAddress, w.safeAddress, [X])
+      expect(await eventsOf(skipped, w.timelock, 'FreezeSkipped')).to.have.length(1)
+    })
   })
 
   it('a detach and re-attach of the same id keeps its freeze state: it never shortens a freeze or a cooldown (rev 3 review fable P5, documented)', async () => {

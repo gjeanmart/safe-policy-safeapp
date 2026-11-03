@@ -272,8 +272,8 @@ async function expectPolicyError(
   if (args) expect(normalize([...inner!.args])).to.deep.equal(normalize(args))
 }
 
-const expectConfigError = (action: Promise<unknown>, fx: Fx, errorName: string) =>
-  expectPolicyError(action, fx, errorName, [], 'PolicyConfigurationFailed')
+const expectConfigError = (action: Promise<unknown>, fx: Fx, errorName: string, args: unknown[] = []) =>
+  expectPolicyError(action, fx, errorName, args, 'PolicyConfigurationFailed')
 
 /** The standard org: owners' Timelock T (guardian G, recovery as lifter), recovery R, recovery's swapOwner Allow. */
 async function org(fx: Fx) {
@@ -291,7 +291,7 @@ async function org(fx: Fx) {
 const swapOwnerCall = (fx: Fx, oldOwner: string, newOwner: string) =>
   call(fx.safeAddress, fx.safe.interface.encodeFunctionData('swapOwner', [ZeroAddress, oldOwner, newOwner]))
 
-describe('TimelockPolicy (rev 3, WP B)', () => {
+describe('TimelockPolicy (rev 4)', () => {
   describe('settings and configuration', () => {
     it('stores the settings and configuredAt per (engine, safe, attachment), and encodes like abi.encode', async () => {
       const fx = await loadFixture(deploy)
@@ -375,118 +375,196 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
       expect(fx.stub.interface.parseError(data!)?.name).to.equal('PolicyConfigurationFailed')
     })
 
-    describe('TimelockNotCoveringConfiguration', () => {
-      it('rejects a narrow owners delay with nothing covering engine.configure', async () => {
-        const fx = await loadFixture(deploy)
-        await expectConfigError(
-          fx.stub.configureFor(fx.safeAddress, [
-            change(scope(OWNERS, fx.target), Kind.POLICY, fx.policy, tl(T)),
-          ]),
-          fx,
-          'TimelockNotCoveringConfiguration',
-        )
-        // A kill switch (delay 0) and a module actor are exempt.
-        await attach(fx, scope(OWNERS, fx.target), tl(0))
-        await attach(fx, scope(fx.ops.address, fx.target), tl(T))
-      })
+    describe('covering rule (TimelockNotCoveringConfiguration, checked by validate on the final configuration)', () => {
+      const sel = (signature: string) => ethers.id(signature).slice(0, 10)
+      const SAFE_ADMIN = [
+        sel('setGuard(address)'),
+        sel('setModuleGuard(address)'),
+        sel('enableModule(address)'),
+        sel('disableModule(address,address)'),
+        sel('setFallbackHandler(address)'),
+      ]
+      const configureSel = (fx: Fx) => fx.stub.interface.getFunction('configure').selector
+      const policyChange = (fx: Fx, s: Scope, settings: string, opMask = 0) =>
+        change(s, Kind.POLICY, fx.policy, settings, opMask)
+      const detachChange = (fx: Fx, s: Scope) => change(s, Kind.POLICY, fx.policy, '0x', 0, true)
+      const configure = (fx: Fx, changes: ReturnType<typeof change>[]) =>
+        fx.stub.configureFor(fx.safeAddress, changes)
+      /** The three route covers of the "Admin delay" template, at delay `d`. */
+      const adminDelay = (fx: Fx, d: number) => [
+        policyChange(fx, scope(OWNERS, fx.safeAddress), tl(d)),
+        policyChange(fx, scope(OWNERS, fx.engine, configureSel(fx)), tl(d)),
+        policyChange(fx, scope(OWNERS), tl(d), OP_DELEGATECALL),
+      ]
+      /** The seven routes as exact covers, in the order the rule checks them. */
+      const exactRoutes = (fx: Fx, d: number) => [
+        policyChange(fx, scope(OWNERS), tl(d), OP_DELEGATECALL),
+        policyChange(fx, scope(OWNERS, fx.engine, configureSel(fx)), tl(d)),
+        ...SAFE_ADMIN.map((f) => policyChange(fx, scope(OWNERS, fx.safeAddress, f), tl(d))),
+      ]
+      const routeArgs = (fx: Fx, i: number, d: number) =>
+        i === 0
+          ? [ZeroAddress, '0x00000000', OP_DELEGATECALL, d]
+          : i === 1
+            ? [fx.engine, configureSel(fx), OP_CALL, d]
+            : [fx.safeAddress, SAFE_ADMIN[i - 2], OP_CALL, d]
 
-      it('accepts it under an actor-wide attachment at least as long: (Owners, *) or (ANY, *)', async () => {
+      it('names each of the seven routes left uncovered, with its operation and D', async () => {
         const fx = await loadFixture(deploy)
-        for (const cover of [scope(OWNERS), scope(ANY)]) {
-          await attach(fx, cover, tl(T))
-          await attach(fx, scope(OWNERS, fx.target), tl(T))
-          await fx.stub.configureFor(fx.safeAddress, [change(cover, Kind.POLICY, fx.policy, '0x', 0, true)])
+        const narrow = policyChange(fx, scope(OWNERS, fx.target), tl(T))
+        for (let i = 0; i < 7; i++) {
+          const routes = exactRoutes(fx, T).filter((_, j) => j !== i)
           await expectConfigError(
-            fx.stub.configureFor(fx.safeAddress, [
-              change(scope(OWNERS, fx.target), Kind.POLICY, fx.policy, tl(T)),
-            ]),
+            configure(fx, [narrow, ...routes]),
             fx,
             'TimelockNotCoveringConfiguration',
+            routeArgs(fx, i, T),
           )
         }
+        await configure(fx, [narrow, ...exactRoutes(fx, T)])
+        // Nothing covered at all: the first route checked is any DELEGATECALL.
+        const fx2 = await loadFixture(deploy)
+        await expectConfigError(
+          configure(fx2, [policyChange(fx2, scope(OWNERS, fx2.target), tl(T))]),
+          fx2,
+          'TimelockNotCoveringConfiguration',
+          routeArgs(fx2, 0, T),
+        )
       })
 
-      it('no longer accepts a cover at engine.* or engine.configure: it would not delay setGuard(0) (rev 3 review P2)', async () => {
-        const fx = await loadFixture(deploy)
-        const configureSel = fx.stub.interface.getFunction('configure').selector
-        // Such a cover is itself a narrow delay: it needs an actor-wide one, so it can never stand alone.
-        for (const cover of [
-          scope(OWNERS, fx.engine),
-          scope(OWNERS, fx.engine, configureSel),
-          scope(ANY, fx.engine),
-          scope(ANY, fx.engine, configureSel),
+      it('accepts (Owners, *), (ANY, *), (Owners, Safe.*) + (Owners, engine.*) + DELEGATECALL, and self-cover', async () => {
+        for (const covers of [
+          (fx: Fx) => [policyChange(fx, scope(OWNERS), tl(T))],
+          (fx: Fx) => [policyChange(fx, scope(ANY), tl(T))],
+          (fx: Fx) => adminDelay(fx, T),
+          (fx: Fx) => [
+            policyChange(fx, scope(ANY, fx.safeAddress), tl(T)),
+            policyChange(fx, scope(OWNERS, fx.engine), tl(T)),
+            policyChange(fx, scope(ANY), tl(T), OP_DELEGATECALL),
+          ],
         ]) {
-          await expectConfigError(
-            fx.stub.configureFor(fx.safeAddress, [change(cover, Kind.POLICY, fx.policy, tl(T))]),
-            fx,
-            'TimelockNotCoveringConfiguration',
-          )
+          const fx = await loadFixture(deploy)
+          await configure(fx, [
+            policyChange(fx, scope(OWNERS, fx.target, '0xabcdef01'), tl(T)),
+            ...covers(fx),
+          ])
         }
-        // Next to (Owners, *) T, an engine.configure delay is fine up to T: a longer one is not covered.
+        // An actor-wide delay covers itself: CALL and DELEGATECALL in one attachment.
+        const fx = await loadFixture(deploy)
         await attach(fx, scope(OWNERS), tl(T))
-        await attach(fx, scope(OWNERS, fx.engine, configureSel), tl(T))
+      })
+
+      it('a DELEGATECALL-only cover does not cover the CALL routes, nor a CALL-only one any DELEGATECALL', async () => {
+        const fx = await loadFixture(deploy)
         await expectConfigError(
-          fx.stub.configureFor(fx.safeAddress, [
-            change(scope(OWNERS, fx.engine, configureSel), Kind.POLICY, fx.policy, tl(2 * T)),
+          configure(fx, [policyChange(fx, scope(OWNERS), tl(T), OP_DELEGATECALL)]),
+          fx,
+          'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 1, T),
+        )
+        await expectConfigError(
+          configure(fx, [policyChange(fx, scope(OWNERS), tl(T), OP_CALL)]),
+          fx,
+          'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, T),
+        )
+        // A route-level DELEGATECALL cover (Safe.*) does not count for E7: only (*, *) does.
+        await expectConfigError(
+          configure(fx, [
+            policyChange(fx, scope(OWNERS, fx.safeAddress), tl(T), OP_CALL | OP_DELEGATECALL),
+            policyChange(fx, scope(OWNERS, fx.engine), tl(T)),
           ]),
           fx,
           'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, T),
         )
       })
 
-      it('rejects a shorter, DELEGATECALL-only or detached covering attachment', async () => {
+      it('needs every route delayed at least D, the longest owner-path delay (a shorter cover fails)', async () => {
         const fx = await loadFixture(deploy)
-        const narrow = change(scope(OWNERS, fx.target), Kind.POLICY, fx.policy, tl(T))
-        const detachAny = change(scope(ANY), Kind.POLICY, fx.policy, '0x', 0, true)
-        await attach(fx, scope(OWNERS), tl(T - 1))
         await expectConfigError(
-          fx.stub.configureFor(fx.safeAddress, [narrow]),
+          configure(fx, [policyChange(fx, scope(OWNERS, fx.target), tl(T)), ...adminDelay(fx, T - 1)]),
           fx,
           'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, T),
         )
-        // Covered while (ANY, *) is attached; its stale settings never cover once detached.
-        await attach(fx, scope(ANY), tl(T))
-        await fx.stub.configureFor(fx.safeAddress, [narrow])
-        await fx.stub.configureFor(fx.safeAddress, [detachAny])
+        // A route cover longer than the rest raises D for every other route.
         await expectConfigError(
-          fx.stub.configureFor(fx.safeAddress, [narrow]),
+          configure(fx, [...adminDelay(fx, T), policyChange(fx, scope(OWNERS, fx.engine), tl(2 * T))]),
           fx,
           'TimelockNotCoveringConfiguration',
-        )
-        // A DELEGATECALL-only attachment at (Owners, *) does not cover a CALL to configure.
-        await attach(fx, scope(ANY), tl(T))
-        await attach(fx, scope(OWNERS), tl(T), OP_DELEGATECALL)
-        await fx.stub.configureFor(fx.safeAddress, [detachAny])
-        await expectConfigError(
-          fx.stub.configureFor(fx.safeAddress, [narrow]),
-          fx,
-          'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, 2 * T),
         )
       })
 
-      it('lets an attachment cover itself only with CALL in its mask', async () => {
+      it('counts a delay at actor ANY toward D; covers at Owners or ANY both satisfy it', async () => {
         const fx = await loadFixture(deploy)
         await expectConfigError(
-          fx.stub.configureFor(fx.safeAddress, [
-            change(scope(OWNERS), Kind.POLICY, fx.policy, tl(T), OP_DELEGATECALL),
+          configure(fx, [policyChange(fx, scope(ANY, fx.target), tl(T))]),
+          fx,
+          'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, T),
+        )
+        await configure(fx, [policyChange(fx, scope(ANY, fx.target), tl(T)), ...adminDelay(fx, T)])
+      })
+
+      it('ignores a cover of another Timelock deployment, kill switches, and module actors', async () => {
+        const fx = await loadFixture(deploy)
+        const queue = await ethers.deployContract('TimelockPolicyQueue')
+        const freezer = await ethers.deployContract('TimelockPolicyFreeze', [F, C])
+        const other = await ethers.deployContract('TimelockPolicy', [
+          F,
+          C,
+          await queue.getAddress(),
+          await freezer.getAddress(),
+        ])
+        await configure(fx, [change(scope(OWNERS), Kind.POLICY, await other.getAddress(), tl(T))])
+        await expectConfigError(
+          configure(fx, [policyChange(fx, scope(OWNERS, fx.target), tl(T))]),
+          fx,
+          'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, T),
+        )
+        // D = 0: a kill switch needs no cover; a module actor's delay is not on the owner path.
+        await attach(fx, scope(OWNERS, fx.target), tl(0))
+        await attach(fx, scope(fx.ops.address), tl(R))
+      })
+
+      it('judges the final configuration: order is free, lowering or detaching a cover alone is refused', async () => {
+        const fx = await loadFixture(deploy)
+        const narrowScope = scope(OWNERS, fx.target)
+        // Review A3a: cover, narrow, detach the cover, in one batch.
+        await expectConfigError(
+          configure(fx, [
+            policyChange(fx, scope(OWNERS), tl(T)),
+            policyChange(fx, narrowScope, tl(T)),
+            detachChange(fx, scope(OWNERS)),
           ]),
           fx,
           'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, T),
         )
-        await attach(fx, scope(OWNERS), tl(T), OP_CALL)
-      })
-
-      it('needs a covering attachment at actor ANY for a delay at actor ANY (an owners one does not count)', async () => {
-        const fx = await loadFixture(deploy)
-        await attach(fx, scope(OWNERS), tl(T))
-        const anyNarrow = change(scope(ANY, fx.target), Kind.POLICY, fx.policy, tl(T))
+        // The narrow delay first, its cover second: fine.
+        await configure(fx, [policyChange(fx, narrowScope, tl(T)), policyChange(fx, scope(OWNERS), tl(T))])
+        // Review A3b: lowering the cover by an update, or detaching it, is refused.
         await expectConfigError(
-          fx.stub.configureFor(fx.safeAddress, [anyNarrow]),
+          configure(fx, [policyChange(fx, scope(OWNERS), tl(HOUR))]),
           fx,
           'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, T),
         )
-        await attach(fx, scope(ANY), tl(T))
-        await fx.stub.configureFor(fx.safeAddress, [anyNarrow])
+        await expectConfigError(
+          configure(fx, [detachChange(fx, scope(OWNERS))]),
+          fx,
+          'TimelockNotCoveringConfiguration',
+          routeArgs(fx, 0, T),
+        )
+        // Lowering both together, or detaching both, passes.
+        await configure(fx, [
+          policyChange(fx, scope(OWNERS), tl(HOUR)),
+          policyChange(fx, narrowScope, tl(HOUR)),
+        ])
+        await configure(fx, [detachChange(fx, narrowScope), detachChange(fx, scope(OWNERS))])
       })
     })
   })
@@ -928,86 +1006,100 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
       await fx.timelock.connect(fx.guardian).lift(fx.engine, fx.safeAddress, id)
     })
 
-    it('bounds one guardian per Safe: a second id joins its window and thaws with it, then the guardian cools down (rev 3 review P3)', async () => {
+    it('bounds one actor per Safe: its second id joins the window whoever freezes it, then the actor cools down (review A4)', async () => {
       const fx = await loadFixture(deploy)
-      const g = { guardians: [fx.guardian.address] }
-      const a = await attach(fx, scope(fx.ops.address), tl(0, g))
-      const b = await attach(fx, scope(fx.recovery.address, fx.target), tl(0, g))
-      const freeze = (ids: string[]) =>
-        fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, ids)
-      const window = async () =>
-        normalize([...(await fx.timelock.guardianWindow(fx.engine, fx.safeAddress, fx.guardian.address))])
+      const a = await attach(fx, scope(fx.ops.address), tl(0, { guardians: [fx.guardian.address] }))
+      const b = await attach(fx, scope(fx.ops.address, fx.target), tl(0, { guardians: [fx.n1.address] }))
+      const other = await attach(
+        fx,
+        scope(fx.recovery.address, fx.target),
+        tl(0, { guardians: [fx.n1.address] }),
+      )
+      const window = async (actor = fx.ops.address) =>
+        normalize([...(await fx.timelock.actorWindow(fx.engine, fx.safeAddress, actor))])
       expect(await window()).to.deep.equal(normalize([0, 0, 0]))
-      const t0 = await timestampOf(await freeze([a]))
+      const t0 = await timestampOf(
+        await fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, [a]),
+      )
       expect(await window()).to.deep.equal(normalize([t0 + F, t0 + F + C, 1]))
-      // Just before A thaws, B joins the window: it ends with A, it is not frozen for a fresh F.
+      // Just before A thaws, another guardian freezes B: it joins the actor's window, no fresh F.
       await at(t0 + F - 60)
-      await expectEvent(await freeze([b]), fx.timelock, 'Frozen', [
-        fx.engine,
-        fx.safeAddress,
-        b,
-        fx.guardian.address,
-        t0 + F,
-      ])
+      await expectEvent(
+        await fx.timelock.connect(fx.n1).freeze(fx.engine, fx.safeAddress, [b]),
+        fx.timelock,
+        'Frozen',
+        [fx.engine, fx.safeAddress, b, fx.n1.address, t0 + F],
+      )
       expect(await window()).to.deep.equal(normalize([t0 + F, t0 + F + C, 2]))
-      // At the window end both thaw, and the guardian freezes nothing in this Safe for C.
+      // At the window end both thaw, and nothing of the actor can be frozen for C, by anyone.
       await at(t0 + F)
-      const cooling = await freeze([a, b])
-      expect((await eventsOf(cooling, fx.timelock, 'Frozen')).length).to.equal(0)
+      const cooling = await fx.timelock.connect(fx.n1).freeze(fx.engine, fx.safeAddress, [b, other])
       expect(
         (await eventsOf(cooling, fx.timelock, 'FreezeSkipped')).map((l) => Number(l.args.until)),
-      ).to.deep.equal([t0 + F + C, t0 + F + C])
-      // After C, a new window.
-      await at(t0 + F + C)
-      await expectEvent(await freeze([b]), fx.timelock, 'Frozen', [
+      ).to.deep.equal([t0 + F + C])
+      // Another actor has its own window.
+      await expectEvent(cooling, fx.timelock, 'Frozen', [
         fx.engine,
         fx.safeAddress,
-        b,
-        fx.guardian.address,
-        t0 + 2 * F + C,
+        other,
+        fx.n1.address,
+        t0 + 2 * F,
       ])
+      expect(await window(fx.recovery.address)).to.deep.equal(normalize([t0 + 2 * F, t0 + 2 * F + C, 1]))
+      // After C, a new window.
+      await at(t0 + F + C)
+      await expectEvent(
+        await fx.timelock.connect(fx.n1).freeze(fx.engine, fx.safeAddress, [b]),
+        fx.timelock,
+        'Frozen',
+        [fx.engine, fx.safeAddress, b, fx.n1.address, t0 + 2 * F + C],
+      )
     })
 
-    it('a lift that leaves the guardian nothing frozen starts its cooldown; a lifted id cannot be re-frozen in its window', async () => {
+    it('a lift that leaves the actor nothing frozen closes its window; a lifted id cannot be re-frozen in it', async () => {
       const fx = await loadFixture(deploy)
       const roles = { guardians: [fx.guardian.address], lifters: [fx.lifter.address] }
       const a = await attach(fx, scope(fx.ops.address), tl(0, roles))
       const b = await attach(fx, scope(fx.recovery.address, fx.target), tl(0, roles))
       const c = await attach(fx, scope(fx.ops.address, fx.target), tl(0, roles))
+      const d = await attach(fx, scope(fx.ops.address, fx.target, '0xabcdef01'), tl(0, roles))
       const freeze = (ids: string[]) =>
         fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, ids)
       const lift = (id: string) => fx.timelock.connect(fx.lifter).lift(fx.engine, fx.safeAddress, id)
-      const window = async () =>
-        normalize([...(await fx.timelock.guardianWindow(fx.engine, fx.safeAddress, fx.guardian.address))])
-      const t0 = await timestampOf(await freeze([a, b]))
+      const window = async (actor = fx.ops.address) =>
+        normalize([...(await fx.timelock.actorWindow(fx.engine, fx.safeAddress, actor))])
+      const t0 = await timestampOf(await freeze([a, b, c]))
       const t1 = await timestampOf(await lift(a))
       expect(await window()).to.deep.equal(normalize([t0 + F, t0 + F + C, 1]))
-      // The lifted id cools down on its own; another id still joins the open window.
-      const tx = await freeze([a, c])
+      // The lifted id cools down on its own; another id of the actor still joins the open window.
+      const tx = await freeze([a, d])
       expect(
         (await eventsOf(tx, fx.timelock, 'FreezeSkipped')).map((l) => Number(l.args.until)),
       ).to.deep.equal([t1 + C])
       await expectEvent(tx, fx.timelock, 'Frozen', [
         fx.engine,
         fx.safeAddress,
-        c,
+        d,
         fx.guardian.address,
         t0 + F,
       ])
-      await lift(b)
-      const t3 = await timestampOf(await lift(c))
-      // Nothing frozen left: the guardian's cooldown starts now, not at t0 + F.
+      await lift(c)
+      const t3 = await timestampOf(await lift(d))
+      // Nothing of the actor frozen: its cooldown starts now, not at t0 + F.
       expect(await window()).to.deep.equal(normalize([t3, t3 + C, 0]))
-      await expectEvent(await freeze([b]), fx.timelock, 'FreezeSkipped', [
+      await expectEvent(await freeze([c]), fx.timelock, 'FreezeSkipped', [
         fx.engine,
         fx.safeAddress,
-        b,
+        c,
         fx.guardian.address,
         t3 + C,
       ])
+      // The other actor's freeze is untouched.
+      expect(await window(fx.recovery.address)).to.deep.equal(normalize([t0 + F, t0 + F + C, 1]))
+      expect((await fx.timelock.freezeState(fx.engine, fx.safeAddress, b))[0]).to.equal(BigInt(t0 + F))
     })
 
-    it('keeps guardians independent: one cooling does not stop another, which never extends a frozen id', async () => {
+    it('never extends a frozen id, whoever freezes it again; another actor opens its own window', async () => {
       const fx = await loadFixture(deploy)
       const a = await attach(
         fx,
@@ -1034,6 +1126,25 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
         fx.n1.address,
         t0 + DAY + F,
       ])
+    })
+
+    it('refuses a lift of a detached attachment (NotGuardianOrLifter): its stale roles count for nothing', async () => {
+      const fx = await loadFixture(deploy)
+      const roles = { guardians: [fx.guardian.address], lifters: [fx.lifter.address] }
+      const id = await attach(fx, scope(fx.ops.address), tl(0, roles))
+      await fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, [id])
+      await fx.stub.configureFor(fx.safeAddress, [
+        change(scope(fx.ops.address), Kind.POLICY, fx.policy, '0x', 0, true),
+      ])
+      for (const who of [fx.guardian, fx.lifter])
+        await expectRevert(
+          fx.timelock.connect(who).lift(fx.engine, fx.safeAddress, id),
+          fx.timelock,
+          'NotGuardianOrLifter',
+          [id],
+        )
+      // The actor's window is untouched.
+      expect((await fx.timelock.actorWindow(fx.engine, fx.safeAddress, fx.ops.address))[2]).to.equal(1n)
     })
 
     it('keeps the freeze state across detach and re-attach of the same id (rev 3 review fable P5, by design)', async () => {

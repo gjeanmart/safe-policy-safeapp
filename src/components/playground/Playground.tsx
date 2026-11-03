@@ -5,16 +5,17 @@ import { TOKENS, type Token } from '../../config/contracts'
 import { useSandbox } from '../../context'
 import { Operation } from '../../lib/configurations'
 import type { Step } from '../../lib/runner'
-import { isModuleEnabled } from '../../lib/safe'
+import { isModuleEnabled, safeTxs } from '../../lib/safe'
 import { fieldError, parseAddressInput, parseAmountInput, parseHexInput } from '../../lib/validation'
 import { type Role, canAct, rolesStore } from '../../store'
 import { Card, Field, Notice } from '../ui'
-import { ActivityLog } from './ActivityLog'
 import { CowSwap } from './CowSwap'
 import { ETH, SafeBalance } from './SafeBalance'
 import { StepRunner } from './StepRunner'
 import { OwnerAction } from '../v2/OwnerAction'
 import { AddressShortcuts } from '../AddressShortcuts'
+import { ProposeButton } from '../ProposeButton'
+import { Term } from '../Term'
 
 const ACTIONS = {
   erc20: 'ERC-20 transfer',
@@ -170,74 +171,85 @@ export function Playground() {
   const current = owners && action === 'cow' ? 'erc20' : action
 
   return (
-    <>
-      <Card title="Act as a role">
-        <div className="stack">
-          <div className="row wrap align-end">
-            <Field label="Role">
-              <select value={roleAddress} onChange={(e) => setRoleAddress(e.target.value)}>
-                <option value={OWNERS_PATH}>
-                  Owners (multisig){state ? ` · ${state.threshold}-of-${state.owners.length} signers` : ''}
+    <Card title="Act as a role">
+      <div className="stack">
+        <div className="row wrap align-end">
+          <Field label="Role">
+            <select value={roleAddress} onChange={(e) => setRoleAddress(e.target.value)}>
+              <option value={OWNERS_PATH}>
+                Owners (multisig){state ? ` · ${state.threshold}-of-${state.owners.length} signers` : ''}
+              </option>
+              {roles.map((r) => (
+                <option key={r.address} value={r.address}>
+                  {r.label} (module) · {r.address}
                 </option>
-                {roles.map((r) => (
-                  <option key={r.address} value={r.address}>
-                    {r.label} (module) · {r.address}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <div className="field action-picker">
-              <span className="field-label" id="action-label">
-                Action
-              </span>
-              <div className="tabs" role="group" aria-labelledby="action-label">
-                {actions.map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    className={key === current ? 'tab active' : 'tab'}
-                    onClick={() => setAction(key)}
-                  >
-                    {ACTIONS[key]}
-                  </button>
-                ))}
-              </div>
+              ))}
+            </select>
+          </Field>
+          <div className="field action-picker">
+            <span className="field-label" id="action-label">
+              Action
+            </span>
+            <div className="tabs" role="group" aria-labelledby="action-label">
+              {actions.map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={key === current ? 'tab active' : 'tab'}
+                  onClick={() => setAction(key)}
+                >
+                  {ACTIONS[key]}
+                </button>
+              ))}
             </div>
           </div>
-
-          {owners && (
-            <p className="muted small">
-              The multisig path: a Safe transaction signed by the signers (Roles → Signers). Local signer keys
-              sign here; otherwise it goes through Safe{'{Wallet}'}.
-            </p>
-          )}
-
-          {role && state && !isModuleEnabled(state, role.address) && (
-            <Notice tone="warn">
-              {role.label} is not an enabled module: the Safe itself rejects it (GS104) before any policy
-              runs. Enable it in the Roles tab.
-            </Notice>
-          )}
-
-          {current === 'cow' && v2Installed && (
-            <Notice tone="warn">
-              Policy Engine V2: setPreSignature carries only the order hash, so the budget cannot price the
-              order; the approval to the vault relayer is the spend (CoW swaps template: capped approval + a
-              budget with &quot;other calls pass&quot;). Off-chain order signatures by the owners bypass the
-              policies (see the ERC-1271 notice in the setup tab).
-            </Notice>
-          )}
-
-          {current === 'cow' && role ? (
-            <CowSwap key={role.address} role={role} />
-          ) : (
-            current !== 'cow' && (
-              <SimpleAction key={`${current}:${roleAddress}`} action={current} role={role} />
-            )
-          )}
         </div>
-      </Card>
-      <ActivityLog />
-    </>
+
+        {owners && (
+          <p className="muted small">
+            An owner transaction, signed by the <Term k="signer">signers</Term>: local signer keys sign here,
+            the others in Safe{'{Wallet}'}.
+          </p>
+        )}
+
+        {role && state && !isModuleEnabled(state, role.address) && (
+          <Notice tone="warn" title={`${role.label} is not a module yet`}>
+            <div className="row wrap notice-row">
+              <span>The Safe rejects its calls (GS104) before any policy runs.</span>
+              <ProposeButton
+                label="Enable as module"
+                variant="secondary"
+                preview={false}
+                title="Proposes enableModule as an owner transaction (it shows in the Queue)"
+                txs={[safeTxs.enableModule(state.address, role.address)]}
+              />
+            </div>
+          </Notice>
+        )}
+
+        {current === 'cow' && v2Installed && (
+          <Notice
+            tone="warn"
+            title="A budget cannot price a CoW order"
+            more={
+              <>
+                setPreSignature carries only the order hash, so the spend is the approval to the vault relayer
+                (CoW swaps template: a capped approval and a budget with &quot;other calls pass&quot;).
+                Off-chain order signatures by the owners bypass the policies when the fallback handler has
+                ERC-1271 (see Safe status).
+              </>
+            }
+          >
+            Cap the approval to the vault relayer instead.
+          </Notice>
+        )}
+
+        {current === 'cow' && role ? (
+          <CowSwap key={role.address} role={role} />
+        ) : (
+          current !== 'cow' && <SimpleAction key={`${current}:${roleAddress}`} action={current} role={role} />
+        )}
+      </div>
+    </Card>
   )
 }

@@ -261,6 +261,39 @@ export async function readFreezeState(
   return { frozenUntil: BigInt(frozenUntil), cooldownUntil: BigInt(cooldownUntil) }
 }
 
+/**
+ * An actor's freeze window (TimelockPolicy `actorWindow`): freezes of the actor's attachments, by any
+ * guardian, all end at `end`; none can start from `end` to `cooldownUntil`; `frozen` ids are frozen
+ * in it. All zero before the first freeze.
+ */
+export type ActorWindow = { end: bigint; cooldownUntil: bigint; frozen: number }
+
+export async function readActorWindow(
+  client: PublicClient,
+  deployment: V2Deployment,
+  safe: Address,
+  actor: Address,
+): Promise<ActorWindow> {
+  const [end, cooldownUntil, frozen] = await client.readContract({
+    address: deployment.policies.timelock,
+    abi: timelockPolicyAbi,
+    functionName: 'actorWindow',
+    args: [deployment.engine, safe, actor],
+  })
+  return { end: BigInt(end), cooldownUntil: BigInt(cooldownUntil), frozen: Number(frozen) }
+}
+
+/** What a freeze of one of the actor's attachments would do now. */
+export function actorWindowPhase(
+  w: ActorWindow | undefined,
+  now: bigint,
+): { phase: 'open' | 'cooling' | 'none'; until?: bigint } {
+  if (!w || w.end === 0n) return { phase: 'none' }
+  if (now < w.end) return { phase: 'open', until: w.end }
+  if (now < w.cooldownUntil) return { phase: 'cooling', until: w.cooldownUntil }
+  return { phase: 'none' }
+}
+
 /** TimelockPolicy `MAX_FREEZE` (F) and `COOLDOWN` (C). */
 export async function readFreezeLimits(
   client: PublicClient,

@@ -553,18 +553,36 @@ export async function readApprovedUntil(
   )
 }
 
+/** The digest `approver` signs now (its revision included: a revoke voids what it signed before). */
 export async function readApprovalDigest(
   coSigner: Address,
   engine: Address,
   safe: Address,
   txHash: Hex,
+  approver: Address,
   validUntil: bigint,
 ): Promise<Hex> {
   return client().readContract({
     address: coSigner,
     abi: coSignerPolicyAbi,
     functionName: 'approvalDigest',
-    args: [engine, safe, txHash, validUntil],
+    args: [engine, safe, txHash, approver, validUntil],
+  })
+}
+
+/** How many times `approver` revoked on `txHash` (part of its digest). */
+export async function readRevision(
+  coSigner: Address,
+  engine: Address,
+  safe: Address,
+  txHash: Hex,
+  approver: Address,
+): Promise<bigint> {
+  return client().readContract({
+    address: coSigner,
+    abi: coSignerPolicyAbi,
+    functionName: 'revision',
+    args: [engine, safe, txHash, approver],
   })
 }
 
