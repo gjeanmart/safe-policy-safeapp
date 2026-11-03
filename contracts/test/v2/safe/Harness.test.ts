@@ -44,7 +44,7 @@ import { eventsOf, expectAnyRevert, expectEvent, expectRevert } from '../helpers
 
 /**
  * Smoke tests of the Safe 1.5.0 harness: a real Safe proxy, a no-op guard installed as both the
- * transaction guard and the module guard, and the hook arguments the V2 engine relies on (SPEC §6.1).
+ * transaction guard and the module guard, and the hook arguments the V2 engine relies on (SPEC §3.1).
  */
 
 const coder = AbiCoder.defaultAbiCoder()
@@ -120,7 +120,7 @@ describe('Safe 1.5.0 harness', () => {
     })
   })
 
-  describe('hook interfaces (SPEC §6.1)', () => {
+  describe('hook interfaces (SPEC §3.1)', () => {
     it('the engine-side vendored guard interfaces have the same selectors and ids as Safe 1.5.0', async () => {
       const safeTx = ITransactionGuard__factory.createInterface()
       const safeModule = IModuleGuard__factory.createInterface()
@@ -384,7 +384,7 @@ describe('Safe 1.5.0 harness', () => {
       await execAsOwners(safe, await signHashOnchainTx(infra, hash), signers)
 
       expect(await isValidSignature(safe, hash, '0x')).to.equal(EIP1271_MAGIC_VALUE)
-      // signedMessages is slot 7 of Safe 1.5.0's storage (SPEC §10).
+      // signedMessages is slot 7 of Safe 1.5.0's storage (rev 2 SPEC §10).
       const msgHash = await safeMessageHash(safe, coder.encode(['bytes32'], [hash]))
       const slot = keccak256(coder.encode(['bytes32', 'uint256'], [msgHash, 7]))
       expect(BigInt(await safe.getStorageAt(slot, 1))).to.equal(1n)

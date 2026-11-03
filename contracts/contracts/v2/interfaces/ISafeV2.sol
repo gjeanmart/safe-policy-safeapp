@@ -21,7 +21,7 @@ interface ISafeV2 is ISafe {
         uint256 pageSize
     ) external view returns (address[] memory array, address next);
 
-    /// @notice Non-zero when the Safe approved `messageHash` on-chain (SignMessageLib / PolicySignLib).
+    /// @notice Non-zero when the Safe approved `messageHash` on-chain (SignMessageLib).
     function signedMessages(bytes32 messageHash) external view returns (uint256);
 
     function approvedHashes(address owner, bytes32 hash) external view returns (uint256);

@@ -11,7 +11,7 @@ Unmodified copies from [safe-research/policy-engine](https://github.com/safe-res
 | `FROST.sol`             | `contracts/libraries/FROST.sol`             | `e955b6cb2b4e842062a92cdc79077c01bc405e1fa84d5b33866cd44dd3925f89` |
 | `Secp256k1.sol`         | `contracts/libraries/Secp256k1.sol`         | `cb6ec29f589eae74f36438c48b7f56eb895375cbb725655c91732d33590b637c` |
 
-Used by `SafenetPolicyV2` (SPEC.md §8.7). They live here, not under `vendor/policy-engine` (vendored from the older
+Used by `SafenetPolicy` (SPEC.md §5.5). They live here, not under `vendor/policy-engine` (vendored from the older
 commit 71b9cb0, which does not have them), so that vendor tree stays a single-commit copy.
 
 Do not edit these files; re-vendor from a newer commit instead.

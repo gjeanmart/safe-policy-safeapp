@@ -2,7 +2,8 @@
 pragma solidity ^0.8.30;
 
 import {Operation} from "../../vendor/policy-engine/interfaces/Operation.sol";
-import {Scope} from "./Scope.sol";
+import {MULTI_SEND_SELECTOR} from "./Constants.sol";
+import {ScopeLib} from "./Scope.sol";
 import {Call} from "./Types.sol";
 
 /**
@@ -16,13 +17,10 @@ import {Call} from "./Types.sol";
  *      - each entry `uint8 op | address to | uint256 value | uint256 dataLength | bytes data`
  *        (packed, 85-byte header), fully inside the payload; `op` 0 or 1;
  *      - `to == address(0)` resolves to the Safe (MultiSend's `address()` under DELEGATECALL);
- *      - between 1 and `Scope.MAX_BATCH_CALLS` entries (`tooMany` reports the cap separately).
+ *      - between 1 and `ScopeLib.MAX_BATCH_CALLS` entries (`tooMany` reports the cap separately).
  *      Adapted from V1 `MultiSendPolicy` (safe-research/policy-engine 8ee68a8).
  */
 library MultiSendDecoder {
-    /// @notice `bytes4(keccak256("multiSend(bytes)"))`.
-    bytes4 internal constant MULTI_SEND_SELECTOR = 0x8d80ff0a;
-
     uint256 private constant _ENTRY_HEADER = 85;
 
     /**
@@ -30,7 +28,7 @@ library MultiSendDecoder {
      * @param data The full calldata of the DELEGATECALL to the batch contract.
      * @return ok Whether `data` is a well-formed, non-empty batch within the cap.
      * @return tooMany True when well-formed up to the cap but holding more than
-     *         `Scope.MAX_BATCH_CALLS` entries (then `ok` is false).
+     *         `ScopeLib.MAX_BATCH_CALLS` entries (then `ok` is false).
      * @return calls The decoded calls (empty unless `ok`).
      */
     function decode(
@@ -49,7 +47,7 @@ library MultiSendDecoder {
         }
         bytes calldata txs = data[68:68 + length];
 
-        Call[] memory buffer = new Call[](Scope.MAX_BATCH_CALLS);
+        Call[] memory buffer = new Call[](ScopeLib.MAX_BATCH_CALLS);
         uint256 count;
         uint256 i;
         while (i < txs.length) {
@@ -64,7 +62,7 @@ library MultiSendDecoder {
             if (dataLength > txs.length - i - _ENTRY_HEADER) {
                 return (false, false, calls);
             }
-            if (count == Scope.MAX_BATCH_CALLS) {
+            if (count == ScopeLib.MAX_BATCH_CALLS) {
                 return (false, true, calls);
             }
             address to = address(bytes20(txs[i + 1:i + 21]));

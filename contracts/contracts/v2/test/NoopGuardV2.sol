@@ -6,7 +6,7 @@ import {ISafe} from "../../vendor/policy-engine/interfaces/ISafe.sol";
 import {ISafeModuleGuard} from "../../vendor/policy-engine/interfaces/ISafeModuleGuard.sol";
 import {ISafeTransactionGuard} from "../../vendor/policy-engine/interfaces/ISafeTransactionGuard.sol";
 import {Operation} from "../../vendor/policy-engine/interfaces/Operation.sol";
-import {Scope} from "../libraries/Scope.sol";
+import {ScopeLib} from "../libraries/Scope.sol";
 
 /**
  * @title No-op guard V2 (test only)
@@ -14,12 +14,12 @@ import {Scope} from "../libraries/Scope.sol";
  *         interfaces the V2 engine uses, allows everything, and emits what each hook received, so
  *         tests on a real Safe can see the exact hook arguments (e.g. the module address).
  * @dev `setBlocked(true)` makes every pre-hook revert `Blocked()`, to show a hook revert reverts
- *      the Safe call. The module hook returns `Scope.moduleCallHash`, as the engine does (SPEC §6.1).
+ *      the Safe call. The module hook returns `ScopeLib.moduleCallHash`, as the engine does (SPEC §3.1).
  */
 contract NoopGuardV2 is ISafeTransactionGuard, ISafeModuleGuard {
     bool public blocked;
 
-    /// @notice Owner-path pre-hook ran. `txHash` is recomputed with `nonce() - 1` (SPEC §6.1).
+    /// @notice Owner-path pre-hook ran. `txHash` is recomputed with `nonce() - 1` (SPEC §3.1).
     event TransactionChecked(
         address indexed safe,
         address to,
@@ -110,7 +110,7 @@ contract NoopGuardV2 is ISafeTransactionGuard, ISafeModuleGuard {
         address module
     ) external returns (bytes32 moduleTxHash) {
         require(!blocked, Blocked());
-        moduleTxHash = Scope.moduleCallHash(msg.sender, module, to, value, data, operation);
+        moduleTxHash = ScopeLib.moduleCallHash(msg.sender, module, to, value, data, operation);
         emit ModuleTransactionChecked(msg.sender, to, value, data, operation, module, moduleTxHash);
     }
 

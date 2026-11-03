@@ -1,6 +1,7 @@
 import { expect } from 'chai'
 import {
   AbiCoder,
+  Wallet,
   ZeroAddress,
   concat,
   getAddress,
@@ -10,23 +11,47 @@ import {
   toBeHex,
   zeroPadValue,
 } from 'ethers'
+import { readFileSync } from 'fs'
 import { ethers } from 'hardhat'
-import type { V2Harness } from '../../typechain-types'
+import { join } from 'path'
+import { ModuleKind, transpileModule } from 'typescript'
+import { runInNewContext } from 'vm'
+import type * as Mirror from '../../../src/lib/v2/rev3/types'
+import type { ScopeHarness } from '../../typechain-types'
 
 /**
- * WP0 frozen definitions: scope keys, levels, ids, hashes and the MultiSend decoder, checked
- * against an independent ethers encoding. `src/lib/v2/scopes.ts` mirrors the same formulas.
+ * WP0 (rev 3) frozen definitions: scope keys, the 6 levels, attachment ids, op masks, caps, the
+ * module call hash and the batch cap, checked against an independent ethers encoding, and the TS
+ * mirror `src/lib/v2/rev3/types.ts` checked against the Solidity harness.
  */
 
+// The root package is ESM and this one CommonJS, so the mirror (import-free by design) is
+// transpiled and evaluated here instead of required.
+const MIRROR = join(__dirname, '../../../src/lib/v2/rev3/types.ts')
+const ts = (() => {
+  const { outputText } = transpileModule(readFileSync(MIRROR, 'utf8'), {
+    compilerOptions: { module: ModuleKind.CommonJS },
+  })
+  const exports = {}
+  runInNewContext(outputText, { exports })
+  return exports as typeof Mirror
+})()
+
 const coder = AbiCoder.defaultAbiCoder()
-const ANY = ZeroAddress
-const OWNERS = getAddress('0x0000000000000000000000000000000000000001')
-const CallMatch = { ANY: 0, TO: 1, SELECTOR: 2, TO_SELECTOR: 3 } as const
-const Kind = { ALLOW: 0, DENY: 1, POLICY: 2 } as const
+const { ANY, OWNERS, CallMatch, Kind } = ts
 const TRANSFER = id('transfer(address,uint256)').slice(0, 10)
+const NO_SELECTOR = '0x00000000'
 
 const scopeKey = (actor: string, to: string, selector: string, callMatch: number) =>
   keccak256(coder.encode(['address', 'address', 'bytes4', 'uint8'], [actor, to, selector, callMatch]))
+const attachmentId = (key: string, kind: number, policy: string) =>
+  keccak256(coder.encode(['bytes32', 'uint8', 'address'], [key, kind, policy]))
+const scope = (actor: string, to: string, selector: string, callMatch: number) => ({
+  actor,
+  to,
+  selector,
+  callMatch,
+})
 
 type Tx = { op: number; to: string; value: bigint; data: string }
 const multiSendData = (txs: Tx[]) =>
@@ -47,198 +72,232 @@ const multiSendData = (txs: Tx[]) =>
     ),
   ])
 
-describe('V2 scope library (WP0)', () => {
-  let harness: V2Harness
-  const safe = getAddress('0x00000000000000000000000000000000000005af')
-  const agent = getAddress('0x000000000000000000000000000000000000a6e7')
-  const usdc = getAddress('0x0000000000000000000000000000000000005dc0')
+describe('V2 rev 3 scope library (WP0)', () => {
+  let h: ScopeHarness
+  const module = getAddress(Wallet.createRandom().address)
+  const token = getAddress(Wallet.createRandom().address)
+  const safe = getAddress(Wallet.createRandom().address)
 
   before(async () => {
-    harness = await ethers.deployContract('V2Harness')
+    h = await ethers.deployContract('ScopeHarness')
   })
 
-  it('computes scope keys as keccak256(abi.encode(actor, to, selector, callMatch))', async () => {
-    const scope = { actor: agent, to: usdc, selector: TRANSFER, callMatch: CallMatch.TO_SELECTOR }
-    expect(await harness.key(scope)).to.equal(scopeKey(agent, usdc, TRANSFER, CallMatch.TO_SELECTOR))
-  })
-
-  it('looks up the 8 levels with the open parts zeroed', async () => {
-    const expected = [
-      scopeKey(ANY, ZeroAddress, '0x00000000', CallMatch.ANY),
-      scopeKey(ANY, usdc, '0x00000000', CallMatch.TO),
-      scopeKey(ANY, ZeroAddress, TRANSFER, CallMatch.SELECTOR),
-      scopeKey(ANY, usdc, TRANSFER, CallMatch.TO_SELECTOR),
-      scopeKey(agent, ZeroAddress, '0x00000000', CallMatch.ANY),
-      scopeKey(agent, usdc, '0x00000000', CallMatch.TO),
-      scopeKey(agent, ZeroAddress, TRANSFER, CallMatch.SELECTOR),
-      scopeKey(agent, usdc, TRANSFER, CallMatch.TO_SELECTOR),
-    ]
-    for (let level = 0; level < 8; level++) {
-      expect(await harness.keyAt(level, agent, usdc, TRANSFER)).to.equal(expected[level], `level ${level}`)
-    }
-  })
-
-  it('numbers levels (actor == ANY ? 0 : 4) + callMatch', async () => {
-    expect(await harness.level(ANY, CallMatch.ANY)).to.equal(0n)
-    expect(await harness.level(ANY, CallMatch.TO_SELECTOR)).to.equal(3n)
-    expect(await harness.level(OWNERS, CallMatch.ANY)).to.equal(4n)
-    expect(await harness.level(agent, CallMatch.TO_SELECTOR)).to.equal(7n)
-  })
-
-  it('accepts only scopes whose open parts are zero', async () => {
-    const s = (to: string, selector: string, callMatch: number) => ({ actor: agent, to, selector, callMatch })
-    expect(await harness.isNormalized(s(ZeroAddress, '0x00000000', CallMatch.ANY))).to.equal(true)
-    expect(await harness.isNormalized(s(usdc, '0x00000000', CallMatch.ANY))).to.equal(false)
-    expect(await harness.isNormalized(s(ZeroAddress, TRANSFER, CallMatch.TO))).to.equal(false)
-    expect(await harness.isNormalized(s(usdc, TRANSFER, CallMatch.TO))).to.equal(false)
-    expect(await harness.isNormalized(s(ZeroAddress, TRANSFER, CallMatch.SELECTOR))).to.equal(true)
-    expect(await harness.isNormalized(s(usdc, TRANSFER, CallMatch.TO_SELECTOR))).to.equal(true)
-    // Empty calldata has selector 0: an exact scope on it is valid and differs from the wildcard.
-    expect(await harness.isNormalized(s(usdc, '0x00000000', CallMatch.TO_SELECTOR))).to.equal(true)
-    expect(scopeKey(agent, usdc, '0x00000000', CallMatch.TO_SELECTOR)).to.not.equal(
-      scopeKey(agent, usdc, '0x00000000', CallMatch.TO),
-    )
-  })
-
-  it('computes attachment ids as keccak256(abi.encode(scopeKey, kind, policy))', async () => {
-    const key = scopeKey(agent, ZeroAddress, '0x00000000', CallMatch.ANY)
-    const policy = getAddress('0x00000000000000000000000000000000000000aa')
-    expect(await harness.attachmentId(key, Kind.POLICY, policy)).to.equal(
-      keccak256(coder.encode(['bytes32', 'uint8', 'address'], [key, Kind.POLICY, policy])),
-    )
-    expect(await harness.attachmentId(key, Kind.ALLOW, ZeroAddress)).to.equal(
-      keccak256(coder.encode(['bytes32', 'uint8', 'address'], [key, Kind.ALLOW, ZeroAddress])),
-    )
-  })
-
-  it('decodes selectors like V1 (empty = 0, 1..3 bytes invalid)', async () => {
-    expect(await harness.selectorOf('0x')).to.deep.equal([true, '0x00000000'])
-    expect(await harness.selectorOf('0xa9059cbb')).to.deep.equal([true, '0xa9059cbb'])
-    expect(await harness.selectorOf('0xa9059c')).to.deep.equal([false, '0x00000000'])
-  })
-
-  it('computes the module call hash as keccak256(abi.encode(safe, actor, to, value, data, op))', async () => {
-    const data = TRANSFER + coder.encode(['address', 'uint256'], [agent, 5n]).slice(2)
-    expect(await harness.moduleCallHash(safe, agent, usdc, 7n, data, 0)).to.equal(
-      keccak256(
-        coder.encode(
-          ['address', 'address', 'address', 'uint256', 'bytes', 'uint8'],
-          [safe, agent, usdc, 7n, data, 0],
-        ),
-      ),
-    )
-  })
-
-  it('derives the level bitmap from the packed counters', async () => {
-    const counts = (1n << (32n * 0n)) | (3n << (32n * 4n)) | (0xffffffffn << (32n * 7n))
-    expect(await harness.bitmap(counts)).to.equal(0b10010001n)
-    expect(await harness.bitmap(0n)).to.equal(0n)
-  })
-
-  it('hashes configuration roots as keccak256(abi.encode(changes, roles))', async () => {
-    const changes = [
-      {
-        changeType: 0,
-        scope: { actor: OWNERS, to: ZeroAddress, selector: '0x00000000', callMatch: CallMatch.ANY },
-        kind: Kind.ALLOW,
-        policy: ZeroAddress,
-        opMask: 1,
-        data: '0x',
-      },
-      {
-        changeType: 0,
-        scope: { actor: agent, to: usdc, selector: TRANSFER, callMatch: CallMatch.TO_SELECTOR },
-        kind: Kind.POLICY,
-        policy: usdc,
-        opMask: 0,
-        data: '0x1234',
-      },
-    ]
-    const roles = [{ role: 0, account: agent, enabled: true }]
-    const encoded = coder.encode(
-      [
-        'tuple(uint8 changeType, tuple(address actor, address to, bytes4 selector, uint8 callMatch) scope, uint8 kind, address policy, uint8 opMask, bytes data)[]',
-        'tuple(uint8 role, address account, bool enabled)[]',
-      ],
-      [
-        changes.map((c) => [
-          c.changeType,
-          [c.scope.actor, c.scope.to, c.scope.selector, c.scope.callMatch],
-          c.kind,
-          c.policy,
-          c.opMask,
-          c.data,
-        ]),
-        roles.map((r) => [r.role, r.account, r.enabled]),
-      ],
-    )
-    expect(await harness.configurationRoot(changes, roles)).to.equal(keccak256(encoded))
-  })
-
-  it('pins the context type hash, interface ids and sign-lib selectors', async () => {
-    expect(await harness.contextTypeHash()).to.equal(id('SafePolicyGuardV2.PolicyContext.v1'))
-    const [engineId, policyId] = await harness.interfaceIds()
-    // Mirrored in src/lib/v2/abi.ts and SPEC.md; update all three together.
-    expect({ engineId, policyId }).to.deep.equal({ engineId: '0xdc1727e9', policyId: '0x55872811' })
-    expect(await harness.signLibSelectors()).to.deep.equal([
-      id('signPermit(address,address,uint256,uint256,uint256)').slice(0, 10),
-      id(
-        'signCowOrder((address,address,address,uint256,uint256,uint32,bytes32,uint256,bytes32,bool,bytes32,bytes32))',
-      ).slice(0, 10),
-      id('signPermit2(address,address,uint160,uint48,uint48,uint256)').slice(0, 10),
-      id('signMessage(bytes32)').slice(0, 10),
-    ])
-  })
-
-  describe('MultiSendDecoder', () => {
-    const recipient = getAddress('0x000000000000000000000000000000000000beef')
-    const transfer = TRANSFER + coder.encode(['address', 'uint256'], [recipient, 1n]).slice(2)
-
-    it('decodes calls and resolves to == 0 to the Safe', async () => {
-      const data = multiSendData([
-        { op: 0, to: usdc, value: 0n, data: transfer },
-        { op: 0, to: ZeroAddress, value: 3n, data: '0x' },
-        { op: 1, to: recipient, value: 0n, data: '0x12345678' },
+  describe('keys', () => {
+    it('a scope key is keccak256(abi.encode(actor, to, selector, uint8(callMatch)))', async () => {
+      for (const s of [
+        scope(ANY, ZeroAddress, NO_SELECTOR, CallMatch.ANY),
+        scope(OWNERS, token, NO_SELECTOR, CallMatch.CONTRACT),
+        scope(module, token, TRANSFER, CallMatch.FUNCTION),
+        scope(module, token, NO_SELECTOR, CallMatch.FUNCTION),
       ])
-      const [ok, tooMany, calls] = await harness.decodeMultiSend(safe, data)
-      expect(ok).to.equal(true)
-      expect(tooMany).to.equal(false)
-      expect(calls.map((c) => [c.to, c.value, c.data, c.operation])).to.deep.equal([
-        [usdc, 0n, transfer, 0n],
-        [safe, 3n, '0x', 0n],
-        [recipient, 0n, '0x12345678', 1n],
-      ])
+        expect(await h.key(s)).to.equal(scopeKey(s.actor, s.to, s.selector, s.callMatch))
     })
 
-    it('accepts 8 calls and reports more as too many', async () => {
-      const tx = { op: 0, to: usdc, value: 0n, data: '0x' }
-      const [ok8] = await harness.decodeMultiSend(safe, multiSendData(Array(8).fill(tx)))
-      expect(ok8).to.equal(true)
-      const [ok9, tooMany9] = await harness.decodeMultiSend(safe, multiSendData(Array(9).fill(tx)))
-      expect([ok9, tooMany9]).to.deep.equal([false, true])
-    })
-
-    it('rejects malformed batches without reverting', async () => {
-      const good = multiSendData([{ op: 0, to: usdc, value: 0n, data: transfer }])
-      const bad = [
-        '0x', // empty
-        '0x12345678' + good.slice(10), // wrong selector
-        multiSendData([]), // no calls
-        multiSendData([{ op: 2, to: usdc, value: 0n, data: '0x' }]), // op > 1
-        good.slice(0, good.length - 64 - 2), // payload cut short
-        concat(['0x8d80ff0a', toBeHex(0x40, 32), zeroPadValue('0x', 32), '0x' + good.slice(10 + 64)]), // offset != 0x20
-      ]
-      for (const data of bad) {
-        const [ok, tooMany, calls] = await harness.decodeMultiSend(safe, data)
-        expect([ok, tooMany, calls.length]).to.deep.equal([false, false, 0], data.slice(0, 80))
-      }
-      // A data length running past the payload.
-      const header = solidityPacked(['uint8', 'address', 'uint256', 'uint256'], [0, usdc, 0n, 100n])
-      const [ok] = await harness.decodeMultiSend(
-        safe,
-        concat(['0x8d80ff0a', coder.encode(['bytes'], [header])]),
+    it('a FUNCTION scope on empty calldata never collides with the CONTRACT scope of the same target', async () => {
+      expect(await h.key(scope(module, token, NO_SELECTOR, CallMatch.FUNCTION))).to.not.equal(
+        await h.key(scope(module, token, NO_SELECTOR, CallMatch.CONTRACT)),
       )
-      expect(ok).to.equal(false)
+    })
+
+    it('keyAt(level) equals the key of the scope attached at that level, zeroing the open parts', async () => {
+      const expected = [
+        scopeKey(ANY, ZeroAddress, NO_SELECTOR, CallMatch.ANY),
+        scopeKey(ANY, token, NO_SELECTOR, CallMatch.CONTRACT),
+        scopeKey(ANY, token, TRANSFER, CallMatch.FUNCTION),
+        scopeKey(module, ZeroAddress, NO_SELECTOR, CallMatch.ANY),
+        scopeKey(module, token, NO_SELECTOR, CallMatch.CONTRACT),
+        scopeKey(module, token, TRANSFER, CallMatch.FUNCTION),
+      ]
+      for (let lvl = 0; lvl < ts.LEVEL_COUNT; lvl++)
+        expect(await h.keyAt(lvl, module, token, TRANSFER), `level ${lvl}`).to.equal(expected[lvl])
+      expect(new Set(expected).size).to.equal(6)
+    })
+  })
+
+  describe('levels', () => {
+    it('level = (actor == ANY ? 0 : 3) + callMatch, 0..5, exact level 5', async () => {
+      const cases: [string, number, number][] = [
+        [ANY, CallMatch.ANY, 0],
+        [ANY, CallMatch.CONTRACT, 1],
+        [ANY, CallMatch.FUNCTION, 2],
+        [OWNERS, CallMatch.ANY, 3],
+        [OWNERS, CallMatch.CONTRACT, 4],
+        [module, CallMatch.FUNCTION, 5],
+      ]
+      for (const [actor, callMatch, lvl] of cases) {
+        expect(Number(await h.level(actor, callMatch))).to.equal(lvl)
+        expect(ts.levelOf(actor, callMatch as Mirror.CallMatch)).to.equal(lvl)
+      }
+      expect(ts.EXACT_LEVEL).to.equal(ts.Level.ACTOR_FUNCTION)
+    })
+
+    it('there is no fourth call shape ("any contract, this selector")', async () => {
+      let reverted = false
+      try {
+        await h.level(module, 3)
+      } catch {
+        reverted = true
+      }
+      expect(reverted).to.equal(true)
+    })
+
+    it('isNormalized: to is zero iff ANY, selector zero unless FUNCTION', async () => {
+      const ok = [
+        scope(ANY, ZeroAddress, NO_SELECTOR, CallMatch.ANY),
+        scope(module, token, NO_SELECTOR, CallMatch.CONTRACT),
+        scope(module, token, TRANSFER, CallMatch.FUNCTION),
+        scope(OWNERS, token, NO_SELECTOR, CallMatch.FUNCTION),
+      ]
+      const bad = [
+        scope(ANY, token, NO_SELECTOR, CallMatch.ANY),
+        scope(ANY, ZeroAddress, TRANSFER, CallMatch.ANY),
+        scope(module, ZeroAddress, NO_SELECTOR, CallMatch.CONTRACT),
+        scope(module, token, TRANSFER, CallMatch.CONTRACT),
+        scope(module, ZeroAddress, TRANSFER, CallMatch.FUNCTION),
+      ]
+      for (const s of ok) expect(await h.isNormalized(s), JSON.stringify(s)).to.equal(true)
+      for (const s of bad) expect(await h.isNormalized(s), JSON.stringify(s)).to.equal(false)
+    })
+  })
+
+  describe('attachment ids and op masks', () => {
+    it('an attachment id is keccak256(abi.encode(scopeKey, uint8(kind), policy)), one per (scope, kind, policy)', async () => {
+      const key = scopeKey(module, token, TRANSFER, CallMatch.FUNCTION)
+      const policy = getAddress(Wallet.createRandom().address)
+      const ids = [
+        await h.attachmentId(key, Kind.ALLOW, ZeroAddress),
+        await h.attachmentId(key, Kind.DENY, ZeroAddress),
+        await h.attachmentId(key, Kind.POLICY, policy),
+      ]
+      expect(ids).to.deep.equal([
+        attachmentId(key, Kind.ALLOW, ZeroAddress),
+        attachmentId(key, Kind.DENY, ZeroAddress),
+        attachmentId(key, Kind.POLICY, policy),
+      ])
+      expect(new Set(ids).size).to.equal(3)
+    })
+
+    it('op bits are 1 << op; a zero mask defaults to CALL for ALLOW and both ops otherwise', async () => {
+      expect(Number(await h.opBit(ts.Operation.CALL))).to.equal(ts.OP_CALL)
+      expect(Number(await h.opBit(ts.Operation.DELEGATECALL))).to.equal(ts.OP_DELEGATECALL)
+      expect(Number(await h.normalizeOpMask(Kind.ALLOW, 0))).to.equal(ts.OP_CALL)
+      expect(Number(await h.normalizeOpMask(Kind.DENY, 0))).to.equal(ts.OP_ALL)
+      expect(Number(await h.normalizeOpMask(Kind.POLICY, 0))).to.equal(ts.OP_ALL)
+      expect(Number(await h.normalizeOpMask(Kind.ALLOW, ts.OP_DELEGATECALL))).to.equal(ts.OP_DELEGATECALL)
+      expect(Number(await h.normalizeOpMask(Kind.POLICY, ts.OP_CALL))).to.equal(ts.OP_CALL)
+    })
+  })
+
+  describe('calls', () => {
+    it('selectorOf: 4+ bytes give the selector, empty gives 0, 1..3 bytes are invalid', async () => {
+      expect(await h.selectorOf(concat([TRANSFER, zeroPadValue(token, 32)]))).to.deep.equal([true, TRANSFER])
+      expect(await h.selectorOf('0x')).to.deep.equal([true, NO_SELECTOR])
+      for (const data of ['0x01', '0x0102', '0x010203']) expect((await h.selectorOf(data))[0]).to.equal(false)
+    })
+
+    it('moduleCallHash = keccak256(abi.encode(safe, actor, to, value, data, uint8(op)))', async () => {
+      const data = concat([TRANSFER, zeroPadValue(module, 32), toBeHex(5n, 32)])
+      expect(await h.moduleCallHash(safe, module, token, 7n, data, 1)).to.equal(
+        keccak256(
+          coder.encode(
+            ['address', 'address', 'address', 'uint256', 'bytes', 'uint8'],
+            [safe, module, token, 7n, data, 1],
+          ),
+        ),
+      )
+    })
+  })
+
+  describe('caps', () => {
+    it('level counters: 6 packed uint32, bitmap of the populated levels', async () => {
+      const counts = (1n << 0n) | (3n << 64n) | (8n << 160n) // levels 0, 2, 5
+      expect(await h.countAt(counts, 0)).to.equal(1n)
+      expect(await h.countAt(counts, 1)).to.equal(0n)
+      expect(await h.countAt(counts, 2)).to.equal(3n)
+      expect(await h.countAt(counts, 5)).to.equal(8n)
+      expect(Number(await h.bitmap(counts))).to.equal(0b100101)
+      expect(Number(await h.bitmap(0n))).to.equal(0)
+    })
+
+    it('a trusted batch decodes up to MAX_BATCH_CALLS calls; one more is reported as too many', async () => {
+      const call = (i: number): Tx => ({ op: 0, to: token, value: BigInt(i), data: TRANSFER })
+      const max = Array.from({ length: ts.MAX_BATCH_CALLS }, (_, i) => call(i))
+      const [ok, tooMany, calls] = await h.decodeMultiSend(safe, multiSendData(max))
+      expect([ok, tooMany, calls.length]).to.deep.equal([true, false, ts.MAX_BATCH_CALLS])
+      const over = await h.decodeMultiSend(safe, multiSendData([...max, call(8)]))
+      expect([over[0], over[1], over[2].length]).to.deep.equal([false, true, 0])
+    })
+
+    it('a zero target in a batch resolves to the Safe', async () => {
+      const [ok, , calls] = await h.decodeMultiSend(
+        safe,
+        multiSendData([{ op: 0, to: ZeroAddress, value: 0n, data: '0x' }]),
+      )
+      expect(ok).to.equal(true)
+      expect(calls[0].to).to.equal(safe)
+    })
+  })
+
+  describe('TS mirror (src/lib/v2/rev3/types.ts)', () => {
+    it('sentinels and caps equal the Solidity constants', async () => {
+      const [actors, values] = await h.constants()
+      expect(actors).to.deep.equal([getAddress(ts.ANY), getAddress(ts.OWNERS)])
+      expect(values.map(Number)).to.deep.equal([
+        ts.OP_CALL,
+        ts.OP_DELEGATECALL,
+        ts.OP_ALL,
+        ts.LEVEL_COUNT,
+        ts.ACTOR_LEVEL_OFFSET,
+        ts.EXACT_LEVEL,
+        ts.MAX_ATTACHMENTS_PER_SCOPE,
+        ts.MAX_BATCH_CALLS,
+        ts.MAX_TRUSTED_BATCHES,
+        ts.MAX_REASON_LENGTH,
+        ts.MAX_ROLE_MEMBERS,
+        ts.MAX_ARGS_CONSTRAINTS,
+        ts.MAX_ARGS_VALUES,
+        ts.MAX_LIMIT_TOKENS,
+      ])
+    })
+
+    it('selectors and magic values equal the Solidity ones and their signatures', async () => {
+      const S = ts.Selectors
+      expect(await h.selectors()).to.deep.equal([
+        S.multiSend,
+        ts.ERC1271_MAGIC_VALUE,
+        ts.ANY_SELECTOR,
+        S.erc20Transfer,
+        S.erc20TransferFrom,
+        S.erc20Approve,
+        S.erc20IncreaseAllowance,
+        S.erc20DecreaseAllowance,
+        S.configure,
+        S.check,
+      ])
+      const sig = (s: string) => id(s).slice(0, 10)
+      expect(S.configure).to.equal(
+        sig('configure((bool,(address,address,bytes4,uint8),uint8,address,uint8,bytes)[])'),
+      )
+      expect(S.check).to.equal(
+        sig('check((address,address,bytes32),(address,uint256,bytes,uint8)[],(uint16,uint8,bytes32)[])'),
+      )
+      expect(S.multiSend).to.equal(sig('multiSend(bytes)'))
+      expect(S.erc20IncreaseAllowance).to.equal(sig('increaseAllowance(address,uint256)'))
+      expect(S.erc20DecreaseAllowance).to.equal(sig('decreaseAllowance(address,uint256)'))
+      expect(ts.ERC1271_MAGIC_VALUE).to.equal(sig('isValidSignature(bytes32,bytes)'))
+    })
+
+    it('interface ids equal type(I).interfaceId', async () => {
+      const I = ts.InterfaceIds
+      expect(await h.interfaceIds()).to.deep.equal([
+        I.IPolicyGuard,
+        I.IPolicy,
+        I.ITimelockPolicy,
+        I.IArgsPolicy,
+        I.ILimitPolicy,
+        I.ICoSignerPolicy,
+        I.ISafenetPolicy,
+      ])
     })
   })
 })
