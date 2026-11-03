@@ -248,7 +248,7 @@ const cancellableTimelock: Template<CancellableTimelockParams> = {
   title: 'Spark: Timelock cancellable by another Safe',
   summary:
     'Calls to one contract wait a delay; another Safe (or any listed address) can cancel the queued call. The Scheduled event carries the full call for alerts.',
-  source: 'Spark via Akshay (#proj-policies)',
+  source: 'Spark',
   build: (deployment, { actor = OWNERS, target, selector, delay = DAY, cancellers, allow = false }) => {
     const scope = selector ? exact(actor, target, selector) : onContract(actor, target)
     return {

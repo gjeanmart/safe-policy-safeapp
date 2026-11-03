@@ -5,7 +5,7 @@ import { Notice } from '../ui'
  * Where owners sign messages or permits: under V2 the PolicyFallbackHandler rejects every off-chain
  * owner signature (any non-empty signature), so only messages the Safe approved on-chain, through a
  * checked transaction, are valid. Without it, a Permit or CoW order signed off-chain bypasses every
- * policy (Tim's attack).
+ * policy (the off-chain permit attack).
  */
 export function Erc1271Notice({ handler, policyHandler }: { handler?: Address; policyHandler: Address }) {
   if (handler && !isAddressEqual(handler, policyHandler))

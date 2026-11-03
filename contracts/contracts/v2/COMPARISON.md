@@ -23,7 +23,7 @@ one; it behaves as the "fallback timelock" of WA-4014).
 | §1.6 limits only cover transfers                | 5,000 USDC/month transfer limit; `approve(attacker, 100,000)`                 | Executes; the attacker pulls 100,000                                             | `LimitExceeded` (approval priced as a reservation)                    | `approve(attacker, 100,000) under a 5,000 limit: V1 executes (unlimited allowance), V2 LimitExceeded`                     |
 | §1.6                                            | Same; send 10 ETH                                                             | Executes                                                                         | `LimitExceeded` (native value counted)                                | `10 ETH sent under a token limit: V1 executes, V2 LimitExceeded (native value counted)`                                   |
 | §4 batches                                      | Transfer limit + an Allow on MultiSend; a batch of two 50,000 transfers       | Executes: 71b9cb0 does not look inside a batch; the Safe is drained              | `LimitExceeded` at sub-call 0 (every sub-call is checked)             | `transfers inside a MultiSend: V1 (71b9cb0) lets an allowed batch through unchecked, V2 checks every sub-call`            |
-| §7 gap 1 ERC-1271 bypasses the guard            | Owners sign a USDC permit off-chain (Tim's attack)                            | `isValidSignature` valid → permit + `transferFrom` drain, no guard call          | `0xffffffff`: `PolicyFallbackHandler` accepts only on-chain approvals | `an off-chain owner signature on a permit (Tim's attack): V1 valid (drain), V2 INVALID`                                   |
+| §7 gap 1 ERC-1271 bypasses the guard            | Owners sign a USDC permit off-chain (off-chain permit attack)                 | `isValidSignature` valid → permit + `transferFrom` drain, no guard call          | `0xffffffff`: `PolicyFallbackHandler` accepts only on-chain approvals | `an off-chain owner signature on a permit (off-chain permit attack): V1 valid (drain), V2 INVALID`                        |
 
 Not testable on-chain: the §1.5 half about Safe's AllowanceModule (not vendored; approximated by a module with its own
 payee above), and the UI / indexer rows.
@@ -32,16 +32,16 @@ payee above), and the UI / indexer rows.
 
 `test/v2/e2e/*.test.ts` runs the stories on the real engine and a real Safe 1.5.0:
 
-| File                  | Story                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------- |
-| `OrgChart.test.ts`    | The §3 example organisation: Owners, Ops, Agent, Recovery, Guardian, happy and deny paths         |
-| `WA4014.test.ts`      | Owners cannot skip their timelock (guard, module guard, handler, owners, configuration path, F5)  |
-| `WA4016.test.ts`      | A payment allowlist (everyone / call-wide / one actor, strict) never blocks recovery              |
-| `Compromise.test.ts`  | Owner keys, guardian and recovery key compromised: T < R < F, guardian removed by configuration   |
-| `Spark.test.ts`       | Another Safe cancels a queued transaction (owners' and a module's); rising owner cancel threshold |
-| `Proofs.test.ts`      | Co-signer + Safenet (real FROST) on both paths; one proof per batch; consumed on the module path  |
-| `LimitBatch.test.ts`  | Limit across a MultiSend; approval reservation and give-back; the batch refill attack is denied   |
-| `TimPermit.test.ts`   | Tim's permit attack on V1 (drain) and V2 (denied); signing through PolicySignLib is priced        |
-| `Install.test.ts`     | The app's `installCalls` batch works on Safe 1.5.0 (order matters)                                |
-| `Preview.test.ts`     | `preview`'s deciding gate (app decoder `src/lib/v2/preview.ts`) equals the real check's revert    |
-| `QuorumTiers.test.ts` | Approval tiers: 3 of 3 signatures above 10,000 USDC, summed over a batch; owner path only         |
+| File                     | Story                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------- |
+| `OrgChart.test.ts`       | The §3 example organisation: Owners, Ops, Agent, Recovery, Guardian, happy and deny paths         |
+| `WA4014.test.ts`         | Owners cannot skip their timelock (guard, module guard, handler, owners, configuration path, F5)  |
+| `WA4016.test.ts`         | A payment allowlist (everyone / call-wide / one actor, strict) never blocks recovery              |
+| `Compromise.test.ts`     | Owner keys, guardian and recovery key compromised: T < R < F, guardian removed by configuration   |
+| `Spark.test.ts`          | Another Safe cancels a queued transaction (owners' and a module's); rising owner cancel threshold |
+| `Proofs.test.ts`         | Co-signer + Safenet (real FROST) on both paths; one proof per batch; consumed on the module path  |
+| `LimitBatch.test.ts`     | Limit across a MultiSend; approval reservation and give-back; the batch refill attack is denied   |
+| `OffchainPermit.test.ts` | Off-chain permit attack on V1 (drain) and V2 (denied); signing through PolicySignLib is priced    |
+| `Install.test.ts`        | The app's `installCalls` batch works on Safe 1.5.0 (order matters)                                |
+| `Preview.test.ts`        | `preview`'s deciding gate (app decoder `src/lib/v2/preview.ts`) equals the real check's revert    |
+| `QuorumTiers.test.ts`    | Approval tiers: 3 of 3 signatures above 10,000 USDC, summed over a batch; owner path only         |

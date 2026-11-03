@@ -42,7 +42,7 @@ import {
 } from './world'
 
 /**
- * Story: Tim's permit attack (design doc §7 gap 1). A USDC-style token validates a Safe's permit
+ * Story: the off-chain permit attack (design doc §7 gap 1). A USDC-style token validates a Safe's permit
  * through ERC-1271. With Safe's CompatibilityFallbackHandler, owner signatures made off-chain over
  * a `SafeMessage` are valid there, so the owners (or whoever holds a quorum of keys) approve a
  * spender for the full balance without any Safe transaction: the guard never runs, whatever cap
@@ -75,7 +75,7 @@ async function permitDigest(w: World, owner: string, spender: string, value: big
 const limitId = async (w: World) =>
   w.engine.attachmentId(await w.engine.scopeKey(scope(OWNERS)), 2, addr(w.limit))
 
-describe("E2E story: Tim's permit attack", () => {
+describe("E2E story: the off-chain permit attack", () => {
   describe('V1: CompatibilityFallbackHandler + SafePolicyGuard', () => {
     /** A Safe whose V1 guard only lets USDC go to vendor A (ERC20TransferPolicy, no fallback). */
     async function deployV1() {

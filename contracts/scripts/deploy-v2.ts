@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { ethers, network } from 'hardhat'
 import {
   DEPLOYED_V2_CONTRACTS,
@@ -28,6 +29,15 @@ const ENGINE_PIECES = new Set<string>([...ENGINE_MODULES, FQN.engine])
  *
  *   DRY_RUN=1 npx hardhat run scripts/deploy-v2.ts
  *
+ * Fees: Sepolia's base fee is a tiny fraction of a gwei, while ethers' default tip is 1 gwei (paying
+ * ~50 million times the base fee). Every transaction is therefore priced from the network: tip =
+ * max(eth_maxPriorityFeePerGas × 2, PRIORITY_FEE_GWEI, default 0.001), max fee = 2 × base fee + tip,
+ * and the script refuses to send above MAX_FEE_GWEI (default 1).
+ *
+ * Resuming: V2_REUSE=<file.json> maps a label as printed (e.g. "PolicySignLib",
+ * "SafePolicyGuardV2 (5 seconds)") to { "address": "0x…", "block": 123 }. Those contracts are not
+ * deployed again: the script checks they have code of the expected length and reuses them.
+ *
  * Sepolia charges ~1,542 gas per byte of deployed code plus ~210k per create, and caps a
  * transaction at 2^24 gas: before each create the script checks `210,000 + 1,542 × runtime bytes`
  * stays under 16,000,000 and aborts otherwise. Prints each contract's address, gas and block, then
@@ -39,7 +49,31 @@ const ENGINE_PIECES = new Set<string>([...ENGINE_MODULES, FQN.engine])
 
 const DRY_RUN = process.env.DRY_RUN === '1'
 const SEPOLIA_CHAIN_ID = 11155111n
-const MIN_BALANCE = ethers.parseEther('0.02')
+/** Fee parameters in gwei, as decimal strings (e.g. "0.001"). */
+const PRIORITY_FEE_FLOOR = ethers.parseUnits(process.env.PRIORITY_FEE_GWEI ?? '0.001', 'gwei')
+const MAX_FEE = ethers.parseUnits(process.env.MAX_FEE_GWEI ?? '1', 'gwei')
+
+/** Already-deployed contracts to reuse, by label (V2_REUSE). */
+type Reused = { address: string; block: number }
+const REUSE: Record<string, Reused> = process.env.V2_REUSE
+  ? (JSON.parse(readFileSync(process.env.V2_REUSE, 'utf8')) as Record<string, Reused>)
+  : {}
+
+/** EIP-1559 fee overrides from the network's own fee data (empty in a dry run: Hardhat's defaults). */
+async function feeOverrides(): Promise<{ maxFeePerGas?: bigint; maxPriorityFeePerGas?: bigint }> {
+  if (DRY_RUN) return {}
+  const block = await ethers.provider.getBlock('latest')
+  const base = block?.baseFeePerGas ?? 0n
+  const suggested = BigInt((await ethers.provider.send('eth_maxPriorityFeePerGas', [])) as string)
+  const tip = suggested * 2n > PRIORITY_FEE_FLOOR ? suggested * 2n : PRIORITY_FEE_FLOOR
+  const maxFeePerGas = base * 2n + tip
+  if (maxFeePerGas > MAX_FEE)
+    throw new Error(
+      `Fee ${ethers.formatUnits(maxFeePerGas, 'gwei')} gwei is above MAX_FEE_GWEI ` +
+        `(${ethers.formatUnits(MAX_FEE, 'gwei')}): wait for lower fees or raise it.`,
+    )
+  return { maxFeePerGas, maxPriorityFeePerGas: tip }
+}
 const CONFIRMATIONS = DRY_RUN ? 1 : 2
 
 const HOUR = 3600n
@@ -104,7 +138,21 @@ async function checkedCreateGas(label: string, fqn: string): Promise<{ size: num
 /** Checks the Sepolia create budget, deploys, waits, and prints address, gas and block. */
 const deploy: Deploy = async (label, fqn, args) => {
   const { size, estimate } = await checkedCreateGas(label, fqn)
-  const contract = await ethers.deployContract(fqn, args)
+  const reused = REUSE[label]
+  if (reused) {
+    const address = ethers.getAddress(reused.address)
+    const code = await ethers.provider.getCode(address)
+    if ((code.length - 2) / 2 !== size)
+      throw new Error(
+        `${label}: V2_REUSE ${address} has ${(code.length - 2) / 2} bytes of code, expected ${size}`,
+      )
+    blocks.set(label, reused.block)
+    console.log(
+      `${label.padEnd(36)} ${address}  runtime ${String(size).padStart(5)} B  reused  block ${reused.block}`,
+    )
+    return address
+  }
+  const contract = await ethers.deployContract(fqn, args, await feeOverrides())
   const receipt = await contract.deploymentTransaction()?.wait(CONFIRMATIONS)
   if (!receipt) throw new Error(`${label}: no receipt`)
   const address = await contract.getAddress()
@@ -146,8 +194,6 @@ async function main() {
   const balance = await ethers.provider.getBalance(deployer.address)
   console.log(`Network ${network.name} (chain ${chainId})${DRY_RUN ? ', DRY RUN' : ''}`)
   console.log(`Deployer ${deployer.address}, balance ${ethers.formatEther(balance)} ETH`)
-  if (balance < MIN_BALANCE)
-    throw new Error(`Balance below ${ethers.formatEther(MIN_BALANCE)} ETH: fund the deployer first.`)
 
   // Every create must fit on its own (checked again right before each one), and the whole plan must
   // be affordable at today's fee: check both before the first transaction, so nothing is half-deployed.
@@ -159,12 +205,17 @@ async function main() {
   ].filter((fqn) => safenet || fqn !== FQN.safenet)
   let planned = 0
   for (const fqn of plan) planned += (await checkedCreateGas(fqn.split(':')[1], fqn)).estimate
-  const { maxFeePerGas, gasPrice } = await ethers.provider.getFeeData()
-  const fee = maxFeePerGas ?? gasPrice ?? 0n
+  const reusedCount = Object.keys(REUSE).length
+  const overrides = await feeOverrides()
+  const fee = overrides.maxFeePerGas ?? (await ethers.provider.getFeeData()).maxFeePerGas ?? 0n
+  // Upper bound: reused contracts are still counted, and the max fee is ~2x what is actually paid.
   const needed = BigInt(planned) * fee
   console.log(
-    `Plan: ${plan.length} creates, ~${planned.toLocaleString('en-US')} gas at Sepolia's code pricing, ` +
-      `~${ethers.formatEther(needed)} ETH at ${ethers.formatUnits(fee, 'gwei')} gwei`,
+    `Plan: ${plan.length} creates (${reusedCount} reused), ~${planned.toLocaleString('en-US')} gas at ` +
+      `Sepolia's code pricing, at most ~${ethers.formatEther(needed)} ETH at ${ethers.formatUnits(fee, 'gwei')} gwei max fee` +
+      (overrides.maxPriorityFeePerGas !== undefined
+        ? ` (tip ${ethers.formatUnits(overrides.maxPriorityFeePerGas, 'gwei')} gwei)`
+        : ''),
   )
   if (balance < needed)
     throw new Error(

@@ -27,7 +27,7 @@ import {
 } from './world'
 
 /**
- * Story: Spark's request (via Akshay). A timelocked transaction can be cancelled by another Safe
+ * Story: Spark's request. A timelocked transaction can be cancelled by another Safe
  * (a security council) from its own Safe transaction. The cancellers are a Timelock setting,
  * snapshotted when the transaction is scheduled, next to the owners' rising-threshold cancel.
  */

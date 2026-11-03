@@ -531,8 +531,7 @@ Per call, the "party" checked against **every** matched attachment (the Safe its
 | `SIGN_LIB.signCowOrder`                              | `receiver` ∈ recipients (`0` = the Safe)                               |
 | anything else                                        | pass, or `UnclassifiedCall(selector)` if any attachment is `strict`    |
 
-Lists ≤ 64 entries each. Native-value check works next to `Allow (Owners, *)` because every matching scope runs (Akshay's
-case). Malformed calldata for a known selector → deny with the contract-level error `MalformedCall(selector)` (also in
+Lists ≤ 64 entries each. Native-value check works next to `Allow (Owners, *)` because every matching scope runs. Malformed calldata for a known selector → deny with the contract-level error `MalformedCall(selector)` (also in
 LimitPolicy; not in the frozen interfaces, so the app's error ABI declares it). Inside a batch, `increaseAllowance` is
 checked against the allowance expected after the earlier `approve` / `increaseAllowance` of the same pair (transient
 storage, keyed by the Safe transaction `ctx.txHash`) when there is one, else the on-chain one: `[approve(x, 0),

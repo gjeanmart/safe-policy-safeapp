@@ -472,7 +472,7 @@ describe('V1 vs V2 (design doc §1, on real Safes 1.5.0)', () => {
   })
 
   describe('§7 gap 1 — ERC-1271 signatures bypass the guard', () => {
-    it("an off-chain owner signature on a permit (Tim's attack): V1 valid (drain), V2 INVALID", async () => {
+    it("an off-chain owner signature on a permit (off-chain permit attack): V1 valid (drain), V2 INVALID", async () => {
       const w = await loadFixture(deploy)
       const v1 = await deployV1(w, [
         v1Rule(w.tokenAddress, SEL.transfer, addr(w.v1p.transfer), recipientList([w.vendorA.address])),

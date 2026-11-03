@@ -167,7 +167,7 @@ describe('V2 RecipientsPolicy', () => {
       await check(call(safe, '0x', 1n))
     })
 
-    it("works next to an Allow fallback: zero-value calls pass, value only to listed targets (Akshay's case)", async () => {
+    it("works next to an Allow fallback: zero-value calls pass, value only to listed targets", async () => {
       await check(call(bob, erc20.encodeFunctionData('deposit')))
       await check(call(bob))
       await expectRevert(check(call(bob, '0x', 1n)), policy, 'RecipientNotAllowed', [bob])

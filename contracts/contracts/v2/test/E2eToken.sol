@@ -5,7 +5,7 @@ pragma solidity =0.8.30;
  * @title USDC-style token for the V2 end-to-end tests
  * @notice ERC-20 with `increaseAllowance` / `decreaseAllowance` and FiatToken v2.2's EIP-2612
  *         `permit(owner, spender, value, deadline, bytes signature)`, which validates a contract owner
- *         (a Safe) through ERC-1271 `isValidSignature`: the path Tim's permit attack uses.
+ *         (a Safe) through ERC-1271 `isValidSignature`: the path the off-chain permit attack uses.
  */
 contract E2eToken {
     string public constant name = "USD Coin";

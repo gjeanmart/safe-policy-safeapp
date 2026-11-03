@@ -91,7 +91,7 @@ const STORIES: { problem: string; scenario: string; v1: string; v2: string; v2Wi
   },
   {
     problem: 'ERC-1271 bypasses the guard',
-    scenario: "Owners sign a USDC permit off-chain (Tim's attack)",
+    scenario: 'Owners sign a USDC permit off-chain (off-chain permit attack)',
     v1: 'isValidSignature valid: permit + transferFrom drain, no guard call',
     v2: 'Invalid (0xffffffff): PolicyFallbackHandler only accepts on-chain approvals',
     v2Wins: true,
@@ -122,8 +122,8 @@ const E2E: { file: string; story: string }[] = [
     story: 'Limit across a MultiSend; approval reservation and give-back; batch refill denied',
   },
   {
-    file: 'TimPermit',
-    story: "Tim's permit attack: V1 drained, V2 denied; signing through PolicySignLib is priced",
+    file: 'OffchainPermit',
+    story: 'Off-chain permit attack: V1 drained, V2 denied; signing through PolicySignLib is priced',
   },
   { file: 'QuorumTiers', story: 'Approval tiers: 3 of 3 signatures above 10,000 USDC, summed over a batch' },
 ]
