@@ -165,13 +165,14 @@ Windows are a fixed grid anchored at configure; configure resets spending. Who: 
 
 | Call | Counts |
 | --- | --- |
-| any call with `value > 0` | `value` of native, always (unlisted native: unpriced) |
+| any call with `value > 0` | `value` of native, always, checked first (unlisted native: `Unpriced`, even with `passUnpriced`) |
 | `transfer(to, a)` | `a` of `call.to` |
 | `transferFrom(from, to, a)` | `a` if `from == safe`, else 0 |
 | `approve(s, a)`, `a > 0`; `increaseAllowance(s, a)` | `a` in full: no reservation, no give-back |
 | `approve(s, 0)`, `decreaseAllowance` | 0 (revocations are free) |
 | empty calldata, zero value | 0 |
-| a spend of an unlisted token, any other selector | unpriced: `Unpriced` unless `passUnpriced` |
+| a spend above of an unlisted token | `Unpriced`, even with `passUnpriced`: list the token |
+| any other selector, any DELEGATECALL | unpriced: `Unpriced` unless `passUnpriced` |
 
 Merge rule: each attachment prices the calls it matched, summed over the batch; all must fit (`LimitExceeded` names
 the call). Out of scope: swap outputs and slippage, USD caps (no oracle), pulls through allowances given before the
@@ -220,6 +221,7 @@ the deadline). Merge rule: one credit per transaction, consumed by the check. Ep
 | One check per transaction | A policy that forgets some matches | `PolicyBase._forEachMatch`; batch tests for every policy |
 | Approvals pushed early | An approval sits until used | `validUntil`, `revoke`, consumed on pass; a digest is usable once |
 | Full-amount approvals | Re-approvals over-count | Accepted: removes the reservation and refill bug class (rev 2 D-4, D-17) |
+| `passUnpriced` for protocol calls | It could hide an unbounded spend | It passes only selectors that are not a spend shape; a spend of an unlisted token (native included) always denies |
 | CoW pre-sign | Receiver and amounts unseen | Budget-bounded by the approval; a `CowOrderHelper` is a later add-on |
 | Preview off-chain | TS drifts from the engine; RPC refuses `eth_call` from a contract | The app never matches in TS (`matches` view); state-override call as fallback |
 | Quorum dropped | Same-Safe tiers by amount | Committee Safe as a module actor with its own Limit, or CoSigner with owners as approvers |

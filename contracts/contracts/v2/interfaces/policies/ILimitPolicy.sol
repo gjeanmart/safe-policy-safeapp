@@ -11,14 +11,16 @@ import {IPolicy} from "../IPolicy.sol";
  *      the spent amounts and anchors every window at the configure time.
  *
  *      Pricing of one call (no reservation, no give-back):
- *      - `value > 0`: `value` of the native token (`address(0)`), on any call;
+ *      - `value > 0`: `value` of the native token (`address(0)`), on any call, checked first;
  *      - ERC-20 `transfer(to, a)`: `a` of token `call.to`;
  *      - `transferFrom(from, to, a)`: `a` if `from == safe`, else free;
  *      - `approve(s, a)` with `a > 0`, `increaseAllowance(s, a)`: `a`, in full;
  *      - `approve(s, 0)`, `decreaseAllowance`: free (revocations);
  *      - empty calldata with zero value: free;
- *      - anything else, and a spend of a token the attachment does not list: unpriced.
- *      An unpriced call denies (`Unpriced`) unless the attachment has `passUnpriced`.
+ *      - a spend (native value or a shape above) of a token the attachment does not list:
+ *        `Unpriced`, always, even with `passUnpriced` (list the token to allow it);
+ *      - any other selector, and any DELEGATECALL: unpriced, `Unpriced` unless `passUnpriced`.
+ *      Zero amounts are free.
  *
  *      Merge rule: each matched attachment keeps its own budgets and prices only the calls it
  *      matched, in call order, summed over the batch; all must fit (AND). `passUnpriced` applies
@@ -44,7 +46,9 @@ interface ILimitPolicy is IPolicy {
 
     /**
      * @custom:member limits 1 to `MAX_LIMIT_TOKENS`, no duplicate token (`InvalidSettings`).
-     * @custom:member passUnpriced Let calls this attachment cannot price pass (default: deny).
+     * @custom:member passUnpriced Let calls whose selector is not a known spend shape pass
+     *                (protocol calls, DELEGATECALLs; default: deny). Never lets a spend of an
+     *                unlisted token, or native value with native unlisted, pass.
      */
     struct Settings {
         TokenLimit[] limits;
