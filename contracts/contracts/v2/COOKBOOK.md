@@ -13,7 +13,7 @@ real Safe 1.5.0 (`test/v2/stories/`). Research prototype, unaudited.
   uses the default unless it says otherwise.
 - Times: T = 24 h (owners), R = 72 h (recovery), F = 7 d (max freeze), C = 12 h (cooldown). G is a guardian key.
 - The install is one owners' batch: `[configure(changes), enableModule(m)..., setFallbackHandler(TokenCallbackHandler),
-  setModuleGuard(engine), setGuard(engine)]`. Safe's `TokenCallbackHandler` has no ERC-1271: with the default
+setModuleGuard(engine), setGuard(engine)]`. Safe's `TokenCallbackHandler` has no ERC-1271: with the default
   `CompatibilityFallbackHandler` the owners' off-chain signatures (permits, Permit2, CoW orders) move funds around
   every policy below, the Timelock and the freeze included (SPEC §6).
 - An Allow grants; a policy only passes or denies; any Deny or failing policy wins; every matching scope runs. Policies
@@ -24,9 +24,9 @@ Per-policy reference: [`docs/Timelock.md`](docs/Timelock.md), [`docs/Args.md`](d
 
 ## 1. Owners' everyday: everything waits T, a guardian can stop it
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Owners, *)` | Allow | |
+| Scope         | Kind     | Settings                                             |
+| ------------- | -------- | ---------------------------------------------------- |
+| `(Owners, *)` | Allow    |                                                      |
 | `(Owners, *)` | Timelock | delay T, window 0, guardians [G], lifters [Recovery] |
 
 The owners `schedule` each transaction with their signatures (anyone relays), wait T, then execute. `configure` itself
@@ -41,14 +41,14 @@ Timelock longer than the covering one is rejected".
 
 ## 2. ERC-20 payments by an ops actor within a monthly budget
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Ops, USDC.transfer)` | Allow | |
-| `(Ops, USDC.transfer)` | Args | Recipients preset: `transfer` word 0 IN [vendorA, vendorB]; `transferFrom` word 1 IN [same]; empty calldata `CALL_TO` IN [same]; strict |
-| `(Ops, USDC.approve)` | Allow | |
-| `(Ops, USDC.approve)` | Args | Spenders preset: `approve` word 0 IN [processor]; `approve` word 1 LTE 10,000 USDC; strict |
-| `(Ops, *)` | Limit | USDC 10,000 per 30 days; passUnpriced false |
-| `(Ops, *)` | Timelock | delay 0 (kill switch), guardians [G] |
+| Scope                  | Kind     | Settings                                                                                                                                |
+| ---------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `(Ops, USDC.transfer)` | Allow    |                                                                                                                                         |
+| `(Ops, USDC.transfer)` | Args     | Recipients preset: `transfer` word 0 IN [vendorA, vendorB]; `transferFrom` word 1 IN [same]; empty calldata `CALL_TO` IN [same]; strict |
+| `(Ops, USDC.approve)`  | Allow    |                                                                                                                                         |
+| `(Ops, USDC.approve)`  | Args     | Spenders preset: `approve` word 0 IN [processor]; `approve` word 1 LTE 10,000 USDC; strict                                              |
+| `(Ops, *)`             | Limit    | USDC 10,000 per 30 days; passUnpriced false                                                                                             |
+| `(Ops, *)`             | Timelock | delay 0 (kill switch), guardians [G]                                                                                                    |
 
 A batch is summed; approvals count in full; a revocation is free and gives nothing back, so approve, revoke, approve
 again cannot refill the budget.
@@ -61,14 +61,14 @@ once (Timelock delay 0 is a kill switch); the owners are unaffected".
 
 ## 3. ERC-721 transfers to listed recipients
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Ops, NFT.transferFrom)` | Allow | |
-| `(Ops, NFT.transferFrom)` | Args | word 1 (to) IN [vendorA]; strict |
-| `(Ops, NFT.safeTransferFrom(address,address,uint256))` | Allow + Args | same, word 1 |
-| `(Ops, NFT.safeTransferFrom(address,address,uint256,bytes))` | Allow + Args | same, word 1 |
-| `(ANY, NFT.setApprovalForAll)` | Deny | (stops everyone, owners included) |
-| `(Ops, USDC.*)` | Limit | USDC budget, placed per token contract, not at `(Ops, *)` |
+| Scope                                                        | Kind         | Settings                                                  |
+| ------------------------------------------------------------ | ------------ | --------------------------------------------------------- |
+| `(Ops, NFT.transferFrom)`                                    | Allow        |                                                           |
+| `(Ops, NFT.transferFrom)`                                    | Args         | word 1 (to) IN [vendorA]; strict                          |
+| `(Ops, NFT.safeTransferFrom(address,address,uint256))`       | Allow + Args | same, word 1                                              |
+| `(Ops, NFT.safeTransferFrom(address,address,uint256,bytes))` | Allow + Args | same, word 1                                              |
+| `(ANY, NFT.setApprovalForAll)`                               | Deny         | (stops everyone, owners included)                         |
+| `(Ops, USDC.*)`                                              | Limit        | USDC budget, placed per token contract, not at `(Ops, *)` |
 
 ERC-721 shares `transferFrom` and `approve` with ERC-20: a Limit at `(Ops, *)` would read an NFT transfer as a spend of
 an unlisted token and deny it (`Unpriced`, even with passUnpriced).
@@ -80,14 +80,14 @@ at (Ops, *) reads the NFT transfer as an ERC-20 spend of an unlisted token: Unpr
 
 ## 4. CoW Protocol agent with a co-signer and a kill switch
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Agent, *)` | Timelock | delay 0, guardians [G] |
-| `(Agent, *)` | Limit | USDC 50,000 per week; passUnpriced true |
-| `(Agent, *)` | CoSigner | approvers [co-signer service], required 1 |
-| `(Agent, USDC.approve)` | Allow | |
-| `(Agent, USDC.approve)` | Args | `approve` word 0 EQ vault relayer; word 1 LTE 20,000 USDC; strict |
-| `(Agent, GPv2Settlement.setPreSignature)` | Allow | |
+| Scope                                     | Kind     | Settings                                                          |
+| ----------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `(Agent, *)`                              | Timelock | delay 0, guardians [G]                                            |
+| `(Agent, *)`                              | Limit    | USDC 50,000 per week; passUnpriced true                           |
+| `(Agent, *)`                              | CoSigner | approvers [co-signer service], required 1                         |
+| `(Agent, USDC.approve)`                   | Allow    |                                                                   |
+| `(Agent, USDC.approve)`                   | Args     | `approve` word 0 EQ vault relayer; word 1 LTE 20,000 USDC; strict |
+| `(Agent, GPv2Settlement.setPreSignature)` | Allow    |                                                                   |
 
 Every agent transaction needs the co-signer's approval of its module call hash (`approve`, or `approveWithSig` pushed by
 anyone), consumed on use. What the policies cannot see: the order inside the `orderUid` (sell token, amounts,
@@ -106,13 +106,13 @@ gave it: the owners' own approval is in the agent's reach".
 
 ## 5. Aave v3 supply and withdraw
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Ops, *)` | Limit | USDC 50,000 per 30 days; passUnpriced true |
-| `(Ops, USDC.approve)` | Allow + Args | `approve` word 0 EQ Pool |
-| `(Ops, Pool.supply)` | Allow + Args | word 2 (onBehalfOf) EQ_SAFE |
-| `(Ops, Pool.withdraw)` | Allow + Args | word 2 (to) EQ_SAFE |
-| `(Ops, Pool.repay)` | Allow + Args | word 3 (onBehalfOf) EQ_SAFE |
+| Scope                  | Kind         | Settings                                   |
+| ---------------------- | ------------ | ------------------------------------------ |
+| `(Ops, *)`             | Limit        | USDC 50,000 per 30 days; passUnpriced true |
+| `(Ops, USDC.approve)`  | Allow + Args | `approve` word 0 EQ Pool                   |
+| `(Ops, Pool.supply)`   | Allow + Args | word 2 (onBehalfOf) EQ_SAFE                |
+| `(Ops, Pool.withdraw)` | Allow + Args | word 2 (to) EQ_SAFE                        |
+| `(Ops, Pool.repay)`    | Allow + Args | word 3 (onBehalfOf) EQ_SAFE                |
 
 No Allow for `borrow`. Proven by `Aave.test.ts`: "approves the Pool, supplies on behalf of the Safe, withdraws to the
 Safe", "denies supply on behalf of the attacker (Args EQ_SAFE on onBehalfOf)", "denies withdraw to the attacker (Args
@@ -120,12 +120,12 @@ EQ_SAFE on to)".
 
 ## 6. Morpho Blue supply and withdraw
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Ops, *)` | Limit | USDC 50,000 per 30 days; passUnpriced true |
-| `(Ops, USDC.approve)` | Allow + Args | `approve` word 0 EQ Morpho |
-| `(Ops, Morpho.supply)` | Allow + Args | words 0 to 4 EQ the market (loanToken USDC, collateralToken, oracle, irm, lltv); word 7 (onBehalf) EQ_SAFE |
-| `(Ops, Morpho.withdraw)` | Allow + Args | words 0 to 4 EQ the market; word 8 (receiver) EQ_SAFE |
+| Scope                    | Kind         | Settings                                                                                                   |
+| ------------------------ | ------------ | ---------------------------------------------------------------------------------------------------------- |
+| `(Ops, *)`               | Limit        | USDC 50,000 per 30 days; passUnpriced true                                                                 |
+| `(Ops, USDC.approve)`    | Allow + Args | `approve` word 0 EQ Morpho                                                                                 |
+| `(Ops, Morpho.supply)`   | Allow + Args | words 0 to 4 EQ the market (loanToken USDC, collateralToken, oracle, irm, lltv); word 7 (onBehalf) EQ_SAFE |
+| `(Ops, Morpho.withdraw)` | Allow + Args | words 0 to 4 EQ the market; word 8 (receiver) EQ_SAFE                                                      |
 
 `MarketParams` is five static words, so the arguments after it start at word 5. Pin the whole market, not only the
 receiver: Morpho markets are permissionless, so with the loan token alone a compromised key creates a market with its
@@ -138,10 +138,10 @@ collateral, oracle, IRM, LLTV) is pinned".
 
 ## 7. Uniswap swap
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Ops, *)` | Limit | USDC 20,000 per 30 days; passUnpriced true |
-| `(Ops, USDC.approve)` | Allow + Args | `approve` word 0 EQ router |
+| Scope                            | Kind         | Settings                                                                                                       |
+| -------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------- |
+| `(Ops, *)`                       | Limit        | USDC 20,000 per 30 days; passUnpriced true                                                                     |
+| `(Ops, USDC.approve)`            | Allow + Args | `approve` word 0 EQ router                                                                                     |
 | `(Ops, Router.exactInputSingle)` | Allow + Args | word 0 (tokenIn) EQ USDC; word 1 (tokenOut) IN [WETH]; word 2 (fee) IN [500, 3000]; word 3 (recipient) EQ_SAFE |
 
 Pin the pool, not only the recipient: with the recipient alone a compromised key swaps the budget into its own pool of
@@ -154,11 +154,11 @@ pool): tokenOut and fee are pinned".
 
 ## 8. ENS registration paid in ETH
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Ops, *)` | Limit | native 0.02 ETH and USDC 1,000 per 30 days; passUnpriced true |
-| `(Ops, Controller.register)` | Allow + Args | word 1 (owner) EQ_SAFE |
-| `(Ops, Controller.renew)` | Allow | |
+| Scope                        | Kind         | Settings                                                      |
+| ---------------------------- | ------------ | ------------------------------------------------------------- |
+| `(Ops, *)`                   | Limit        | native 0.02 ETH and USDC 1,000 per 30 days; passUnpriced true |
+| `(Ops, Controller.register)` | Allow + Args | word 1 (owner) EQ_SAFE                                        |
+| `(Ops, Controller.renew)`    | Allow        |                                                               |
 
 Native value is always priced: list native, even with passUnpriced. Proven by `Ens.test.ts`: "registers a name for the
 Safe and renews it; the native value is debited", "denies a registration owned by the attacker (Args EQ_SAFE on word
@@ -167,11 +167,11 @@ unpriced: with native unlisted, even passUnpriced denies (Unpriced)".
 
 ## 9. Recovery
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Recovery, Safe.swapOwner)` | Allow | |
-| `(Recovery, *)` | Timelock | delay R, window 7 d, no guardians (nothing can freeze it) |
-| `(Owners, *)` | Timelock | (from section 1) lifters [Recovery] |
+| Scope                        | Kind     | Settings                                                  |
+| ---------------------------- | -------- | --------------------------------------------------------- |
+| `(Recovery, Safe.swapOwner)` | Allow    |                                                           |
+| `(Recovery, *)`              | Timelock | delay R, window 7 d, no guardians (nothing can freeze it) |
+| `(Owners, *)`                | Timelock | (from section 1) lifters [Recovery]                       |
 
 Recovery schedules `swapOwner` (a batch of swaps is one schedule) and executes after R. The owners cannot cancel it
 with their signatures; they detach it with a configure, which waits T < R. A payment allowlist never blocks it unless
@@ -186,24 +186,24 @@ recovery included (NoConstraint)".
 
 Configuration of sections 1 and 9. Proven by `Freeze.test.ts`:
 
-| Compromise | Test |
-| --- | --- |
-| Owner keys | "owner keys compromised: G freezes, recovery replaces the owners within R < F, the new owners cancel the attacker configuration, the attacker queue is void" |
-| Guardian | "guardian compromised: the owners replace G with a configure scheduled during the freeze, executed in the cooldown; G cannot re-freeze", and "... with recovery as lifter: the owners get out after T instead of F" |
-| Recovery key | "recovery key compromised: it must wait R in the open; the owners detach it after T < R" |
-| Two colluding | "two colluding (guardian + recovery key): lost, as documented ..." |
-| Voiding | "the owners' queue is void after a freeze, but a scheduled configure is exempt" |
-| Cooldown | "a lift starts the cooldown at once; a freeze during C is skipped; after C the guardian can freeze again" |
+| Compromise    | Test                                                                                                                                                                                                                |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Owner keys    | "owner keys compromised: G freezes, recovery replaces the owners within R < F, the new owners cancel the attacker configuration, the attacker queue is void"                                                        |
+| Guardian      | "guardian compromised: the owners replace G with a configure scheduled during the freeze, executed in the cooldown; G cannot re-freeze", and "... with recovery as lifter: the owners get out after T instead of F" |
+| Recovery key  | "recovery key compromised: it must wait R in the open; the owners detach it after T < R"                                                                                                                            |
+| Two colluding | "two colluding (guardian + recovery key): lost, as documented ..."                                                                                                                                                  |
+| Voiding       | "the owners' queue is void after a freeze, but a scheduled configure is exempt"                                                                                                                                     |
+| Cooldown      | "a lift starts the cooldown at once; a freeze during C is skipped; after C the guardian can freeze again"                                                                                                           |
 
 ## 11. Spark: another Safe as a canceller
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Owners, *)` | Allow | |
-| `(Owners, *)` | Timelock | delay T, guardians [G] (covers configure) |
-| `(Owners, USDC.*)` | Timelock | delay T, cancellers [spark Safe] |
-| `(Ops, USDC.transfer)` | Allow | |
-| `(Ops, USDC.*)` | Timelock | delay 1 h, cancellers [spark Safe] |
+| Scope                  | Kind     | Settings                                  |
+| ---------------------- | -------- | ----------------------------------------- |
+| `(Owners, *)`          | Allow    |                                           |
+| `(Owners, *)`          | Timelock | delay T, guardians [G] (covers configure) |
+| `(Owners, USDC.*)`     | Timelock | delay T, cancellers [spark Safe]          |
+| `(Ops, USDC.transfer)` | Allow    |                                           |
+| `(Ops, USDC.*)`        | Timelock | delay 1 h, cancellers [spark Safe]        |
 
 The narrow owners' Timelock needs the covering `(Owners, *)` one at least as long, or `configure` reverts
 `TimelockNotCoveringConfiguration`. Proven by `Spark.test.ts`: "the spark Safe cancels the owners' queued token
@@ -212,12 +212,12 @@ did not match (NotCanceller)".
 
 ## 12. Committee: approval tiers without Quorum
 
-| Scope | Kind | Settings |
-| --- | --- | --- |
-| `(Ops, USDC.transfer)` | Allow + Args | Recipients [vendorA, vendorB] |
-| `(Ops, *)` | Limit | USDC 10,000 per 30 days |
+| Scope                        | Kind         | Settings                      |
+| ---------------------------- | ------------ | ----------------------------- |
+| `(Ops, USDC.transfer)`       | Allow + Args | Recipients [vendorA, vendorB] |
+| `(Ops, *)`                   | Limit        | USDC 10,000 per 30 days       |
 | `(Committee, USDC.transfer)` | Allow + Args | Recipients [vendorA, vendorB] |
-| `(Committee, *)` | Limit | USDC 50,000 per 30 days |
+| `(Committee, *)`             | Limit        | USDC 50,000 per 30 days       |
 
 The committee is a 2-of-3 Safe enabled as a module of the main Safe; it executes `main.execTransactionFromModule(...)`
 from its own `execTransaction`. Larger amounts go through the main Safe's owners. Proven by `Committee.test.ts`: "the
@@ -236,12 +236,12 @@ schedule per batch: the owners schedule the batch once and execute it after T".
 
 ## 14. Configuration
 
-| Path | Rule |
-| --- | --- |
-| Owners | `configure` is granted without an Allow; Denys and policies still apply, except Limit and Args, which never judge a call to the engine (it moves nothing), so neither can lock the owners out |
-| A module | needs the exact Allow `(module, engine.configure)`; `(module, *)` is not enough |
-| Anywhere | never in a batch, never with value, never as DELEGATECALL; other engine functions are denied (`GuardTargetDenied`) |
-| Install | leftovers of an earlier install stay attached: detach them first in the install batch |
+| Path     | Rule                                                                                                                                                                                          |
+| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Owners   | `configure` is granted without an Allow; Denys and policies still apply, except Limit and Args, which never judge a call to the engine (it moves nothing), so neither can lock the owners out |
+| A module | needs the exact Allow `(module, engine.configure)`; `(module, *)` is not enough                                                                                                               |
+| Anywhere | never in a batch, never with value, never as DELEGATECALL; other engine functions are denied (`GuardTargetDenied`)                                                                            |
+| Install  | leftovers of an earlier install stay attached: detach them first in the install batch                                                                                                         |
 
 Proven by `Configure.test.ts`: "the owners configure without any Allow (implicit grant on the owner path); nothing else
 is granted", "a module with (Ops, *) cannot configure: calls to the engine need the exact Allow (F5, NotGranted)", "a

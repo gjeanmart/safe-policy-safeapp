@@ -12,24 +12,24 @@ A transaction matched by a Timelock attachment runs only if it was scheduled on-
 same attachment can be frozen by its guardians, each guardian for at most F per F + C, lifted early by its guardians
 or lifters, and a schedule can be cancelled by its cancellers, by the module that made it, or by the owners. One policy, three jobs:
 
-| Settings | Use |
-| --- | --- |
-| `delay > 0`, guardians | The owners' timelock T with a guardian (template "Owners") |
-| `delay = 0`, guardians | A kill switch: nothing waits, the guardian can stop the actor at once (Ops, Agent) |
-| `delay = R`, no guardians, a window | Recovery's delay: nobody can freeze it |
-| narrow scope, cancellers | Spark: another Safe can cancel queued calls to one contract |
+| Settings                            | Use                                                                                |
+| ----------------------------------- | ---------------------------------------------------------------------------------- |
+| `delay > 0`, guardians              | The owners' timelock T with a guardian (template "Owners")                         |
+| `delay = 0`, guardians              | A kill switch: nothing waits, the guardian can stop the actor at once (Ops, Agent) |
+| `delay = R`, no guardians, a window | Recovery's delay: nobody can freeze it                                             |
+| narrow scope, cancellers            | Spark: another Safe can cancel queued calls to one contract                        |
 
 ## Settings
 
 `abi.encode(Settings)`, one per attachment, fully replaced by each `configure`.
 
-| Field | Meaning | Rule |
-| --- | --- | --- |
-| `delay` (uint32, s) | Wait between schedule and execution; 0 = kill switch only | |
-| `window` (uint32, s) | How long a matured schedule stays executable; 0 = forever | ignored at `delay = 0` |
-| `guardians` | May freeze and lift this attachment | at most 8, none at actor `ANY` |
-| `lifters` | May lift only (for example the recovery module) | at most 8, none at actor `ANY` |
-| `cancellers` | May cancel a schedule this attachment matched | at most 8 |
+| Field                | Meaning                                                   | Rule                           |
+| -------------------- | --------------------------------------------------------- | ------------------------------ |
+| `delay` (uint32, s)  | Wait between schedule and execution; 0 = kill switch only |                                |
+| `window` (uint32, s) | How long a matured schedule stays executable; 0 = forever | ignored at `delay = 0`         |
+| `guardians`          | May freeze and lift this attachment                       | at most 8, none at actor `ANY` |
+| `lifters`            | May lift only (for example the recovery module)           | at most 8, none at actor `ANY` |
+| `cancellers`         | May cancel a schedule this attachment matched             | at most 8                      |
 
 No zero address, no duplicate, never the Safe itself (`InvalidSettings`). Immutables of the deployment: `MAX_FREEZE`
 (F, 7 days) and `COOLDOWN` (C, 12 hours).
@@ -44,15 +44,15 @@ attach the `(actor, *)` cover before the narrow one.
 
 ## Who calls what, and when
 
-| Function | Who | When |
-| --- | --- | --- |
-| `schedule(engine, safe, safeTx, signatures)` | anyone relaying the owners' threshold signatures over the Safe transaction | before an owner transaction; the nonce is part of the hash, so schedule at a future nonce when other transactions come first |
-| `scheduleModuleTx(engine, safe, to, value, data, op)` | the module itself | before its own call |
-| `cancel(engine, safe, txHash)` | a canceller of a matched attachment (never on a configuration change), or the module that scheduled it | any time before execution |
-| `cancelAsOwners(engine, safe, txHash, signatures)` | anyone relaying `threshold` owner signatures over `cancelDigest` | owner-path schedules only (`NotOwnersQueue` for a module's) |
-| `freeze(engine, safe, ids[])` | a guardian of every listed id | frozen until the end of the guardian's window (F from its first freeze); frozen or cooling ids, and every id while the guardian cools down, are skipped (`FreezeSkipped`), never extended |
-| `lift(engine, safe, id)` | a guardian or lifter of the id | ends the freeze, starts the id's cooldown C; the guardian that froze it, if left with nothing frozen, starts its own cooldown |
-| `check` | the engine | during the guarded transaction; consumes the schedule |
+| Function                                              | Who                                                                                                    | When                                                                                                                                                                                      |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schedule(engine, safe, safeTx, signatures)`          | anyone relaying the owners' threshold signatures over the Safe transaction                             | before an owner transaction; the nonce is part of the hash, so schedule at a future nonce when other transactions come first                                                              |
+| `scheduleModuleTx(engine, safe, to, value, data, op)` | the module itself                                                                                      | before its own call                                                                                                                                                                       |
+| `cancel(engine, safe, txHash)`                        | a canceller of a matched attachment (never on a configuration change), or the module that scheduled it | any time before execution                                                                                                                                                                 |
+| `cancelAsOwners(engine, safe, txHash, signatures)`    | anyone relaying `threshold` owner signatures over `cancelDigest`                                       | owner-path schedules only (`NotOwnersQueue` for a module's)                                                                                                                               |
+| `freeze(engine, safe, ids[])`                         | a guardian of every listed id                                                                          | frozen until the end of the guardian's window (F from its first freeze); frozen or cooling ids, and every id while the guardian cools down, are skipped (`FreezeSkipped`), never extended |
+| `lift(engine, safe, id)`                              | a guardian or lifter of the id                                                                         | ends the freeze, starts the id's cooldown C; the guardian that froze it, if left with nothing frozen, starts its own cooldown                                                             |
+| `check`                                               | the engine                                                                                             | during the guarded transaction; consumes the schedule                                                                                                                                     |
 
 ## The check (merge over every matched attachment)
 
@@ -101,22 +101,22 @@ freeze, and a fresh attachment that inherits a freeze can still be detached by t
 
 ## What it sees and cannot see
 
-| Sees | Cannot see |
-| --- | --- |
+| Sees                                                                                                        | Cannot see                                                                                                  |
+| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | The transaction hash (`ctx.txHash`), the matched attachment ids, the calls (to tell a configuration change) | Anything off-chain; whether the scheduled call is still a good idea; who signed beyond the Safe's own check |
 
 ## Errors
 
-| Error | When |
-| --- | --- |
-| `InvalidSettings` | a list rule above is broken |
-| `TimelockNotCoveringConfiguration` | the configuration invariant |
-| `NoTimelock(txHash)` | `schedule`: no attachment of this policy matches the call for that actor |
-| `CancelledTransaction(txHash)` | `schedule`: this owner-path transaction was cancelled |
-| `AlreadyScheduled(txHash)` | a live schedule exists (expired or void ones are replaced) |
-| `GasFieldsNotZero`, `StaleNonce(nonce, current)` | owner schedule with gas fields, or a used nonce |
-| `AttachmentFrozen(id, until)`, `NotScheduled`, `NotReady(txHash, readyAt)`, `ScheduleExpired`, `VoidedByFreeze` | the check |
-| `NotCanceller`, `NotOwnersQueue`, `NotGuardian`, `NotGuardianOrLifter`, `NotFrozen` | cancel, freeze, lift |
+| Error                                                                                                           | When                                                                     |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `InvalidSettings`                                                                                               | a list rule above is broken                                              |
+| `TimelockNotCoveringConfiguration`                                                                              | the configuration invariant                                              |
+| `NoTimelock(txHash)`                                                                                            | `schedule`: no attachment of this policy matches the call for that actor |
+| `CancelledTransaction(txHash)`                                                                                  | `schedule`: this owner-path transaction was cancelled                    |
+| `AlreadyScheduled(txHash)`                                                                                      | a live schedule exists (expired or void ones are replaced)               |
+| `GasFieldsNotZero`, `StaleNonce(nonce, current)`                                                                | owner schedule with gas fields, or a used nonce                          |
+| `AttachmentFrozen(id, until)`, `NotScheduled`, `NotReady(txHash, readyAt)`, `ScheduleExpired`, `VoidedByFreeze` | the check                                                                |
+| `NotCanceller`, `NotOwnersQueue`, `NotGuardian`, `NotGuardianOrLifter`, `NotFrozen`                             | cancel, freeze, lift                                                     |
 
 ## Example: owners T = 24 h with a guardian, recovery R = 72 h as a lifter
 

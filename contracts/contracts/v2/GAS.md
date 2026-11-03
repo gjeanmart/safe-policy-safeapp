@@ -67,14 +67,14 @@ at every level of every call, 8 attachments, each a distinct policy contract exc
 calls are the same call (47 distinct policies, each receiving every call's match); "distinct" calls each go to their own
 target and selector, so only `(ANY, *)` and `(Ops, *)` are shared: 264 distinct policies, 384 matches.
 
-| Shape                                           |       Gas | Before the fix (fa5a7ad) | Rev 2 (8 levels × 6) |
-| ----------------------------------------------- | --------: | -----------------------: | -------------------: |
-| 1 call, 48 matches (1 ALLOW + 47 policy runs)   |   504,455 |                  958,882 |   497,545 to 567,432 |
-| 2 identical calls                               |   832,576 |                2,338,322 |                      |
-| 3 identical calls                               | 1,184,043 |                4,134,941 |                      |
-| 4 identical calls                               | 1,478,268 |                6,198,618 |                      |
-| 8 identical calls                               | 2,782,344 |    does not fit 2^24 gas |            1,584,433 |
-| 8 distinct calls (the most work the caps allow) | **7,461,069** | does not fit 2^24 gas |        5,512,367 |
+| Shape                                           |           Gas | Before the fix (fa5a7ad) | Rev 2 (8 levels × 6) |
+| ----------------------------------------------- | ------------: | -----------------------: | -------------------: |
+| 1 call, 48 matches (1 ALLOW + 47 policy runs)   |       504,455 |                  958,882 |   497,545 to 567,432 |
+| 2 identical calls                               |       832,576 |                2,338,322 |                      |
+| 3 identical calls                               |     1,184,043 |                4,134,941 |                      |
+| 4 identical calls                               |     1,478,268 |                6,198,618 |                      |
+| 8 identical calls                               |     2,782,344 |    does not fit 2^24 gas |            1,584,433 |
+| 8 distinct calls (the most work the caps allow) | **7,461,069** |    does not fit 2^24 gas |            5,512,367 |
 
 **Bug found and fixed in WP E1.** On fa5a7ad the worst case did not fit in one transaction: `PolicyGuard._dispatch`
 allocated a new zero-filled `Match[](n − s)` and ABI-encoded a new `check` payload (all the calls again) for every
@@ -107,7 +107,7 @@ the other policies.
 | `LimitPolicy`         |       6,544 |                10,300,848 |
 | `CoSignerPolicy`      |       5,803 |                 9,158,226 |
 | `SafenetPolicy`       |       5,998 |                 9,458,916 |
-| **All 8**             |  **61,679** |          **≈ 96.8M gas** |
+| **All 8**             |  **61,679** |           **≈ 96.8M gas** |
 
 Rev 2 needed 17 contracts and ≈ 274M gas for two engines plus the shared contracts; rev 3 deploys one engine (two
 contracts) and six policy contracts.

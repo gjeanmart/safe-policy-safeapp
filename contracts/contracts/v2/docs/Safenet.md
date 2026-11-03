@@ -16,11 +16,11 @@ with `updateEpoch` and a rollover signed by a trusted group, as in V1.
 
 ## Who calls what, and when
 
-| Function | Who | When |
-| --- | --- | --- |
-| `submitAttestation(engine, safe, txHash, deadline, attestation)` | anyone (the FROST signature authorises it) | before execution |
-| `updateEpoch(...)` | anyone | when Safenet rolls its group key over |
-| `check` | the engine | consumes one credit |
+| Function                                                         | Who                                        | When                                  |
+| ---------------------------------------------------------------- | ------------------------------------------ | ------------------------------------- |
+| `submitAttestation(engine, safe, txHash, deadline, attestation)` | anyone (the FROST signature authorises it) | before execution                      |
+| `updateEpoch(...)`                                               | anyone                                     | when Safenet rolls its group key over |
+| `check`                                                          | the engine                                 | consumes one credit                   |
 
 `deadline = 0`: owner path, the attestation is over the Safe transaction hash itself (nonce-bound), no expiry.
 `deadline > 0`: module path, the attestation is over `attestationDigest(engine, safe, txHash, deadline)` and the credit
@@ -43,20 +43,20 @@ One credit of `ctx.txHash` per Safe transaction, however many attachments matche
 
 ## What it sees and cannot see
 
-| Sees | Cannot see |
-| --- | --- |
+| Sees         | Cannot see                                                          |
+| ------------ | ------------------------------------------------------------------- |
 | `ctx.txHash` | What Safenet checked: the policy trusts the attestation of the hash |
 
 ## Errors
 
-| Error | When |
-| --- | --- |
-| `InvalidSettings` | non-empty settings |
-| `InvalidAddress` | constructor: zero Consensus address |
-| `MalformedAttestation`, `UntrustedAttestationKey` | `submitAttestation` |
-| `AttestationAlreadySpent` | `submitAttestation` of an attestation already submitted for this engine and Safe |
-| `AttestationExpired(deadline)` | submitted or consumed after the deadline |
-| `MissingAttestation` | the check finds no credit |
+| Error                                             | When                                                                             |
+| ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `InvalidSettings`                                 | non-empty settings                                                               |
+| `InvalidAddress`                                  | constructor: zero Consensus address                                              |
+| `MalformedAttestation`, `UntrustedAttestationKey` | `submitAttestation`                                                              |
+| `AttestationAlreadySpent`                         | `submitAttestation` of an attestation already submitted for this engine and Safe |
+| `AttestationExpired(deadline)`                    | submitted or consumed after the deadline                                         |
+| `MissingAttestation`                              | the check finds no credit                                                        |
 
 ## Example: every transaction attested
 

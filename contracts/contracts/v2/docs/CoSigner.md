@@ -17,12 +17,12 @@ duplicate, never the Safe; `required` from 1 to the number of approvers. Approve
 
 ## Who calls what, and when
 
-| Function | Who | When |
-| --- | --- | --- |
-| `approve(engine, safe, txHash, validUntil)` | the approver (anyone may call, only listed approvers count) | after reviewing the transaction, before it executes |
-| `approveWithSig(engine, safe, txHash, approver, validUntil, sig)` | anyone, relaying the approver's EIP-712 signature (so the co-signer service pays no gas) | same |
-| `revoke(engine, safe, txHash)` | the approver | before execution |
-| `check` | the engine | consumes every approval of the hash on pass |
+| Function                                                          | Who                                                                                      | When                                                |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `approve(engine, safe, txHash, validUntil)`                       | the approver (anyone may call, only listed approvers count)                              | after reviewing the transaction, before it executes |
+| `approveWithSig(engine, safe, txHash, approver, validUntil, sig)` | anyone, relaying the approver's EIP-712 signature (so the co-signer service pays no gas) | same                                                |
+| `revoke(engine, safe, txHash)`                                    | the approver                                                                             | before execution                                    |
+| `check`                                                           | the engine                                                                               | consumes every approval of the hash on pass         |
 
 `txHash` is the Safe transaction hash on the owner path and the module call hash
 `keccak256(abi.encode(safe, module, to, value, data, op))` on the module path. The signed digest is
@@ -37,19 +37,19 @@ and the next execution of the same module call needs new ones.
 
 ## What it sees and cannot see
 
-| Sees | Cannot see |
-| --- | --- |
+| Sees              | Cannot see                                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `ctx.txHash` only | What the approver reviewed beyond the hash: the approver must decode the call itself; the policy stores nothing but (hash, approver, validUntil) |
 
 ## Errors
 
-| Error | When |
-| --- | --- |
-| `InvalidSettings` | a rule above |
-| `ApprovalExpired(validUntil)` | approving with a `validUntil` in the past |
-| `InvalidSignature(approver)` | `approveWithSig`: not the approver's ECDSA or ERC-1271 signature |
-| `SignatureAlreadyUsed(digest)` | the digest was already pushed |
-| `MissingApprovals(attachmentId, required, have)` | the check |
+| Error                                            | When                                                             |
+| ------------------------------------------------ | ---------------------------------------------------------------- |
+| `InvalidSettings`                                | a rule above                                                     |
+| `ApprovalExpired(validUntil)`                    | approving with a `validUntil` in the past                        |
+| `InvalidSignature(approver)`                     | `approveWithSig`: not the approver's ECDSA or ERC-1271 signature |
+| `SignatureAlreadyUsed(digest)`                   | the digest was already pushed                                    |
+| `MissingApprovals(attachmentId, required, have)` | the check                                                        |
 
 ## Example: an agent with a co-signer service
 
