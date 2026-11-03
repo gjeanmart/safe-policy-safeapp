@@ -92,20 +92,25 @@ export type V2Engine = { label: string; deployment: V2Deployment }
 
 export const V2_ENGINES: readonly V2Engine[] = [
   {
+    // Sepolia, deployed 2026-11-03 by contracts/scripts/deploy-v2.ts (Safenet skipped: no SAFENET_* variables).
     label: 'rev 3',
     deployment: parseV2Deployment({
-      engine: V2_ZERO,
-      engineConfig: V2_ZERO,
-      trustedBatches: [],
+      engine: '0x0d08b0B71dF73F454c5c2DA2bbC4Ee82D20DdF1E',
+      engineConfig: '0x647D108A63ab9050e2c1BC89e0Ac68598E452F8C',
+      trustedBatches: [
+        '0x9641d764fc13c8B624c04430C7356C1C7C8102e2',
+        '0xA83c336B20401Af773B6219BA5027174338D1836',
+      ],
       policies: {
-        timelock: V2_ZERO,
-        timelockQueue: V2_ZERO,
-        timelockFreeze: V2_ZERO,
-        args: V2_ZERO,
-        limit: V2_ZERO,
-        coSigner: V2_ZERO,
+        timelock: '0xBdA4e7B19545E61ffedf82Ac113b6d72ED1727fA',
+        timelockQueue: '0xd40e50E87749Bcd9e127B6746bb1961f55812325',
+        timelockFreeze: '0x4eB88b1721EcECf34537Aa29F0A10E9e10976F17',
+        args: '0x5B72C80b5bA4903D0eAb3491e9dc0AF35B3317f3',
+        limit: '0x814733ee7867Cf6bC521A10BaF784e1552D6d007',
+        coSigner: '0x0482F1081C459D75a5c3DaF3C07D68f1c63aEa04',
         safenet: V2_ZERO,
       },
+      fromBlock: 12054999,
     }),
   },
 ]
