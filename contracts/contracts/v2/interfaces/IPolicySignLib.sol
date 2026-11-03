@@ -29,8 +29,9 @@ struct GPv2Order {
  *         EIP-712 digest itself, so the engine and the policies see decoded fields (SPEC.md §10).
  *         Pair it with `PolicyFallbackHandler`, which accepts only on-chain approved messages.
  * @dev The engine matches a DELEGATECALL to `SIGN_LIB` with a typed selector (`signPermit`,
- *      `signCowOrder`, `signPermit2`) as if it were a CALL; `signMessage` and any other selector
- *      stay DELEGATECALL and need an exact-scope ALLOW covering DELEGATECALL.
+ *      `signCowOrder`, `signPermit2`) or `signMessage` as if it were a CALL (the library is pinned
+ *      and only writes `signedMessages`, SPEC.md §14 D-22); any other selector stays DELEGATECALL
+ *      and needs an exact-scope ALLOW covering DELEGATECALL.
  *      `msgHash = getMessageHashForSafe(safe, abi.encode(digest))` as in `CompatibilityFallbackHandler`.
  */
 interface IPolicySignLib {
@@ -67,6 +68,7 @@ interface IPolicySignLib {
         uint256 sigDeadline
     ) external;
 
-    /// @notice Raw approval of `digest` (logins, unknown typed data). Never matched as a CALL.
+    /// @notice Raw approval of `digest` (another Safe this one owns, logins, unknown typed data).
+    ///         Matched as a CALL like the typed entries (SPEC.md §14 D-22), but no policy can price it.
     function signMessage(bytes32 digest) external;
 }

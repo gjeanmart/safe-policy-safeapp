@@ -1,8 +1,9 @@
-import { setBalance } from '@nomicfoundation/hardhat-network-helpers'
+import { setBalance, time } from '@nomicfoundation/hardhat-network-helpers'
 import {
   AbiCoder,
   type BytesLike,
   type ContractTransactionResponse,
+  type Signer,
   ZeroAddress,
   concat,
   getAddress,
@@ -176,6 +177,23 @@ export async function deployEngine(
 }
 
 /** A MockSafeV2 with the impersonated signer that acts as the Safe itself (for direct config calls). */
+/**
+ * Changes the configuration of a Safe that already has one, before its guard is installed:
+ * `configureImmediately` only takes an empty configuration (SPEC.md §14 D-25), so this requests,
+ * waits the engine's DELAY and applies. Resolves to the apply transaction (or its revert).
+ */
+export async function configureLater(
+  engine: ISafePolicyGuardV2,
+  asSafe: Signer,
+  changes: Change[],
+  roles: RoleChange[] = [],
+  overrides: { gasLimit?: number } = {},
+): Promise<ContractTransactionResponse> {
+  await engine.connect(asSafe).requestConfiguration(await engine.configurationRoot(changes, roles))
+  await time.increase(await engine.DELAY())
+  return engine.connect(asSafe).applyConfiguration(changes, roles, overrides)
+}
+
 export async function deploySafe() {
   const safe = (await ethers.deployContract('MockSafeV2')) as unknown as MockSafeV2
   const address = await safe.getAddress()
@@ -233,11 +251,14 @@ export async function setup(
       ? changesOrFn({ targetAddr: await target.getAddress(), module: module.address })
       : changesOrFn
   // Chunked: the per-transaction gas cap (16.7M) is below what the worst-case gas fixture needs.
+  // Only the first chunk can be immediate (an empty configuration, D-25); the rest wait DELAY.
   for (let i = 0; i < Math.max(changes.length, 1); i += 24) {
     const chunk = changes.slice(i, i + 24)
     const chunkRoles = i === 0 ? roles : []
-    if (chunk.length || chunkRoles.length) {
+    if (i === 0 && (chunk.length || chunkRoles.length)) {
       await engine.connect(asSafe).configureImmediately(chunk, chunkRoles, { gasLimit: 16_000_000 })
+    } else if (chunk.length) {
+      await configureLater(engine, asSafe, chunk, [], { gasLimit: 16_000_000 })
     }
   }
   await execOwner(safe, safeAddr, safe.interface.encodeFunctionData('enableModule', [module.address]))

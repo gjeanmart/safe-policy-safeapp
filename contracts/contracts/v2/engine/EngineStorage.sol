@@ -182,8 +182,11 @@ abstract contract EngineStorage {
     }
 
     /**
-     * @dev The attachments of the 8 lookup scopes of `(actor, to, sel)` covering `effOp`, in level
-     *      order then storage order; levels with a zero per-Safe counter are skipped. Each match is
+     * @dev The attachments of the 8 lookup scopes of `(actor, to, sel)`, in level order then
+     *      storage order; levels with a zero per-Safe counter are skipped (`mode`: {_matchMode}).
+     *      An ALLOW matches if its op mask covers the effective op; a DENY or a POLICY if it covers
+     *      the effective or the raw op (SPEC.md §6.3, §14 D-23). On the configuration path (§5.1)
+     *      only the POLICY attachments of the exact scopes (levels 3 and 7) match (§14 D-19). Each match is
      *      its attachment's storage word (`policy | kind << 160 | opMask << 168 | policyLevel << 176`)
      *      with its level at bit `_MATCH_LEVEL_SHIFT`; `keys[level]` is the scope key of each
      *      populated level (`Scope.keyAt`). Assembly: one pass over raw slots, no per-match structs.
@@ -193,7 +196,7 @@ abstract contract EngineStorage {
         address actor,
         address to,
         bytes4 sel,
-        Operation effOp
+        uint256 mode
     ) internal view returns (uint256[] memory matches, bytes32[8] memory keys) {
         uint256 levelCounts = _levelCounts[safe];
         if (levelCounts == 0) {
@@ -207,7 +210,14 @@ abstract contract EngineStorage {
             mstore(0, and(safe, addressMask))
             mstore(0x20, _attachments.slot)
             let perSafe := keccak256(0, 0x40)
-            let bit := shl(add(168, effOp), 1)
+            // `mode`: the op bits `1 << (168 + op)` of the effective op (bits 168-169) and of the
+            // raw op (bits 170-171, shifted down), and bit 0: the configuration path.
+            let effBit := and(mode, shl(168, 3))
+            let bits := or(effBit, and(shr(2, mode), shl(168, 3)))
+            let configPath := and(mode, 1)
+            // Per-kind rules only when the ops differ (typed sign-lib entries) or on the
+            // configuration path: the hot path tests one mask per attachment.
+            let special := or(configPath, iszero(eq(effBit, bits)))
             matches := mload(0x40)
             let n := 0
             for {
@@ -239,12 +249,32 @@ abstract contract EngineStorage {
                         j := add(j, 1)
                     } {
                         let word := sload(add(data, j))
-                        if and(word, bit) {
+                        if and(word, bits) {
                             n := add(n, 1)
                             mstore(add(matches, shl(5, n)), or(word, tag))
                         }
                     }
                 }
+            }
+            if special {
+                // Drops, in place: an ALLOW (kind 0) matched by the raw op only (it counts the
+                // effective op); on the configuration path anything but a POLICY (kind 2) at an
+                // exact level (3 or 7).
+                let kept := 0
+                for {
+                    let k := 1
+                } lt(k, add(n, 1)) {
+                    k := add(k, 1)
+                } {
+                    let word := mload(add(matches, shl(5, k)))
+                    let kind := and(shr(160, word), 0xff)
+                    let exactPolicy := and(eq(kind, 2), eq(and(shr(_MATCH_LEVEL_SHIFT, word), 3), 3))
+                    if and(iszero(iszero(or(kind, and(word, effBit)))), or(iszero(configPath), exactPolicy)) {
+                        kept := add(kept, 1)
+                        mstore(add(matches, shl(5, kept)), word)
+                    }
+                }
+                n := kept
             }
             mstore(matches, n)
             mstore(0x40, add(matches, shl(5, add(n, 1))))
@@ -253,6 +283,14 @@ abstract contract EngineStorage {
 
     /// @dev Bit position of the scope level in a match word of {_match}.
     uint256 internal constant _MATCH_LEVEL_SHIFT = 184;
+
+    /// @dev {_match} `mode` of a call: its effective and raw op bits, and the configuration flag.
+    function _matchMode(Operation operation, Operation effOp, bool configPath) internal pure returns (uint256 mode) {
+        assembly ("memory-safe") {
+            mode := or(or(shl(add(168, effOp), 1), shl(add(170, operation), 1)), configPath)
+        }
+    }
+
 
     /// @dev `Scope.attachmentId` hashing in scratch memory (no `abi.encode` allocation).
     function _attachmentId(bytes32 scopeKey, uint256 kind, address policy) internal pure returns (bytes32 id) {
@@ -265,22 +303,36 @@ abstract contract EngineStorage {
         }
     }
 
-    /// @dev Typed PolicySignLib approvals are matched as CALL (SPEC.md §6.3, §10).
+    /// @dev PolicySignLib approvals, typed and `signMessage`, are matched as CALL (SPEC.md §6.3,
+    ///      §10, §14 D-22): `SIGN_LIB` is pinned and only writes `signedMessages`.
     function _effectiveOperation(address to, Operation operation, bytes4 sel) internal view returns (Operation) {
-        (address signLib, bytes4 permit, bytes4 cowOrder, bytes4 permit2) = (
+        (address signLib, bytes4 permit, bytes4 cowOrder, bytes4 permit2, bytes4 message) = (
             _SIGN_LIB,
             IPolicySignLib.signPermit.selector,
             IPolicySignLib.signCowOrder.selector,
-            IPolicySignLib.signPermit2.selector
+            IPolicySignLib.signPermit2.selector,
+            IPolicySignLib.signMessage.selector
         );
-        bool typed;
+        bool signing;
         assembly ("memory-safe") {
-            typed := and(
+            signing := and(
                 and(eq(operation, 1), eq(to, signLib)),
-                or(or(eq(sel, permit), eq(sel, cowOrder)), eq(sel, permit2))
+                or(or(eq(sel, permit), eq(sel, cowOrder)), or(eq(sel, permit2), eq(sel, message)))
             )
         }
-        return typed ? Operation.CALL : operation;
+        return signing ? Operation.CALL : operation;
+    }
+
+    /// @dev `requestConfiguration`, `invalidateRoot` or `applyConfiguration` (SPEC.md §5.1).
+    function _isConfigSelector(bytes4 sel) internal pure returns (bool config) {
+        (bytes4 request, bytes4 invalidate, bytes4 apply_) = (
+            IPolicyEngineV2.requestConfiguration.selector,
+            IPolicyEngineV2.invalidateRoot.selector,
+            IPolicyEngineV2.applyConfiguration.selector
+        );
+        assembly ("memory-safe") {
+            config := or(or(eq(sel, request), eq(sel, invalidate)), eq(sel, apply_))
+        }
     }
 
     function _calldataSelector(bytes calldata data) internal pure returns (bool ok, bytes4 sel) {

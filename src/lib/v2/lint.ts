@@ -1,10 +1,13 @@
 import { type Address, type Hex, isAddressEqual } from 'viem'
 import type { Attachment, Roles } from './attachments'
 import {
+  AUTHORITY_TARGETS,
+  CONFIG_SELECTORS,
   OWNER_MANAGEMENT_SELECTORS,
   POLICY_INFO,
   PRICED_SIGN_LIB_SELECTORS,
   PRICED_TOKEN_SELECTORS,
+  SELECTORS,
   type V2Deployment,
 } from './policies'
 import {
@@ -55,6 +58,11 @@ export type LintRule =
   | 'fallback-handler'
   | 'unknown-policy'
   | 'actor-not-module'
+  | 'config-path-unprotected'
+  | 'config-path-freeze'
+  | 'config-path-deny'
+  | 'raw-message-approval'
+  | 'authority-target-allow'
 
 export type LintFinding = { rule: LintRule; severity: LintSeverity; message: string; attachmentIds: Hex[] }
 
@@ -115,6 +123,28 @@ function isPriceable(scope: Attachment['scope'], signLib: Address): boolean {
   )
 }
 
+/** Can an ALLOW at this scope grant `PolicySignLib.signMessage` (matched as a CALL, SPEC §14 D-22)? */
+function grantsRawMessage(scope: Attachment['scope'], signLib: Address): boolean {
+  const message = scope.selector.toLowerCase() === SELECTORS.signMessage.toLowerCase()
+  switch (scope.callMatch) {
+    case CallMatch.ANY:
+      return true
+    case CallMatch.TO:
+      return same(scope.to, signLib)
+    case CallMatch.SELECTOR:
+      return message
+    default:
+      return message && same(scope.to, signLib)
+  }
+}
+
+/** An exact scope `(Owners | Everyone, engine.<configuration selector>)`: the configuration path. */
+const isConfigScope = (scope: Attachment['scope'], engine: Address): boolean =>
+  (isOwners(scope.actor) || isAny(scope.actor)) &&
+  scope.callMatch === CallMatch.TO_SELECTOR &&
+  same(scope.to, engine) &&
+  CONFIG_SELECTORS.includes(scope.selector.toLowerCase() as Hex)
+
 /** Runs every rule; `block` findings first. */
 export function lint(input: LintInput): LintFinding[] {
   const { safe, deployment, attachments, roles, owners, modules, engine, ctx = {} } = input
@@ -165,8 +195,99 @@ export function lint(input: LintInput): LintFinding[] {
       )
   }
 
+  // --- Raw message approvals (PolicySignLib.signMessage, a CALL since D-22) ---
+  const ownerSide = (p: Attachment) => isOwners(p.scope.actor) || isAny(p.scope.actor)
+  for (const a of allows.filter((a) => grantsRawMessage(a.scope, deployment.signLib))) {
+    const { actor, callMatch } = a.scope
+    if (isOwners(actor)) continue
+    // A module's (X, *) is already blocked as a wildcard.
+    if (callMatch === CallMatch.ANY) continue
+    add(
+      'raw-message-approval',
+      'block',
+      `${isAny(actor) ? 'Every module' : who(actor)} may approve any message as the Safe (PolicySignLib.signMessage): a permit for any token, an order, another Safe's transaction, which no budget or recipients list can see. Grant the typed entries (signPermit, signCowOrder) instead`,
+      [a.attachmentId],
+    )
+  }
+  const ownersRawMessage = allows.filter(
+    (a) => isOwners(a.scope.actor) && grantsRawMessage(a.scope, deployment.signLib),
+  )
+  const ownersPricing = policies.filter(
+    (p) => ownerSide(p) && (p.policyName === 'limit' || p.policyName === 'recipients'),
+  )
+  if (ownersRawMessage.length > 0 && ownersPricing.length > 0)
+    add(
+      'raw-message-approval',
+      'warn',
+      "The owners can approve raw messages (PolicySignLib.signMessage: nested-Safe signatures, logins). Their budget and recipients list cannot see what a message approves: only the owners' Timelock, Co-signer, Safenet and Quorum apply to it",
+      [...ownersRawMessage, ...ownersPricing].map((a) => a.attachmentId),
+    )
+
+  // --- Contracts that trust the Safe (review L-6): F5 only protects the Safe and the engine ---
+  for (const a of allows) {
+    const { actor, callMatch } = a.scope
+    if (isOwners(actor) || callMatch !== CallMatch.TO) continue
+    const target = AUTHORITY_TARGETS.find((t) => same(t.address, a.scope.to))
+    const module = modules.find((m) => same(m, a.scope.to) && !same(m, actor))
+    if (!target && !module) continue
+    add(
+      'authority-target-allow',
+      'warn',
+      target
+        ? `${isAny(actor) ? 'Every module' : who(actor)} may call any function of ${target.name}, which ${target.risk}: allow the functions it needs, one by one, with Recipients / Limit / Args`
+        : `${isAny(actor) ? 'Every module' : who(actor)} may call any function of the module ${who(module!)}, including its admin functions (they trust calls from the Safe): allow the functions it needs, one by one`,
+      [a.attachmentId],
+    )
+  }
+
+  // --- Configuration path (SPEC §5.1, §14 D-19): only exact-scope policies run there ---
+  const configAttachments = attachments.filter((a) => isConfigScope(a.scope, deployment.engine))
+  for (const p of policies.filter(
+    (p) =>
+      ownerSide(p) &&
+      p.scope.callMatch === CallMatch.ANY &&
+      (p.policyName === 'coSigner' || p.policyName === 'safenet' || p.policyName === 'quorum'),
+  )) {
+    const missing = [SELECTORS.requestConfiguration, SELECTORS.applyConfiguration].filter(
+      (selector) =>
+        !configAttachments.some(
+          (c) =>
+            c.kind === AttachmentKind.POLICY &&
+            same(c.policy, p.policy) &&
+            c.scope.selector.toLowerCase() === selector.toLowerCase(),
+        ),
+    )
+    if (missing.length === 0) continue
+    add(
+      'config-path-unprotected',
+      'warn',
+      `${POLICY_INFO[p.policyName!].label} at (${who(p.scope.actor)}, *) does not cover configuration changes (only the configuration delay does): attach it at (Owners, Policy engine.${missing
+        .map((m) => (m === SELECTORS.requestConfiguration ? 'requestConfiguration' : 'applyConfiguration'))
+        .join(') and (Owners, Policy engine.')}) too, or two owners can detach it`,
+      [p.attachmentId],
+    )
+  }
+  for (const c of configAttachments) {
+    if (c.policyName === 'freeze')
+      add(
+        'config-path-freeze',
+        'block',
+        `Freeze on ${what(c)} blocks the owners' configuration during a freeze: against a rogue guardian, configuration is their only way out`,
+        [c.attachmentId],
+      )
+    if (c.kind === AttachmentKind.DENY)
+      add(
+        'config-path-deny',
+        'warn',
+        `Deny on ${what(c)} never applies: the configuration path ignores Allow and Deny, so a Safe cannot lock itself out`,
+        [c.attachmentId],
+      )
+  }
+
   // --- Global placement ---
   for (const p of policies.filter((p) => isAny(p.scope.actor))) {
+    // Modules never reach the configuration path: there "everyone" is the owners.
+    if (isConfigScope(p.scope, deployment.engine)) continue
     if (p.policyName === 'freeze') {
       // WP7a: a Freeze at (Everyone, *) denies Recovery's swapOwner too, so "freeze, then recover" fails.
       add(

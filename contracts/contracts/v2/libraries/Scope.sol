@@ -38,7 +38,7 @@ library Scope {
     uint8 internal constant EXACT_LEVEL = 7;
 
     /// @notice Caps (SPEC.md §9).
-    uint256 internal constant MAX_ATTACHMENTS_PER_SCOPE = 4;
+    uint256 internal constant MAX_ATTACHMENTS_PER_SCOPE = 6;
     uint256 internal constant MAX_BATCH_CALLS = 8;
     uint256 internal constant MAX_ROLE_MEMBERS = 8;
     uint256 internal constant MAX_TRUSTED_BATCHES = 4;

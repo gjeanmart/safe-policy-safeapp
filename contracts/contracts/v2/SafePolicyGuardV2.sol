@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 pragma solidity =0.8.30;
 
-import {IERC165} from "../vendor/policy-engine/interfaces/IERC165.sol";
-import {ISafeModuleGuard} from "../vendor/policy-engine/interfaces/ISafeModuleGuard.sol";
-import {ISafeTransactionGuard} from "../vendor/policy-engine/interfaces/ISafeTransactionGuard.sol";
 import {Operation} from "../vendor/policy-engine/interfaces/Operation.sol";
 import {SignatureExtension} from "../vendor/policy-engine/libraries/SignatureExtension.sol";
 import {IPolicyEngineV2} from "./interfaces/IPolicyEngineV2.sol";
@@ -27,7 +24,7 @@ import {EngineStorage} from "./engine/EngineStorage.sol";
  *      {fallback} routes everything else (configuration, freeze, `preview`, the other views) to
  *      its module. Modules run on this storage, at this address.
  */
-contract SafePolicyGuardV2 is EngineEvaluator, ISafeTransactionGuard, ISafeModuleGuard {
+contract SafePolicyGuardV2 is EngineEvaluator {
     /// @dev {PolicyEngineV2Config}: configuration path and roles.
     address private immutable _CONFIG;
     /// @dev {PolicyEngineV2Freeze}: freeze, lift, and every view not routed elsewhere.
@@ -116,6 +113,9 @@ contract SafePolicyGuardV2 is EngineEvaluator, ISafeTransactionGuard, ISafeModul
             case 0xdbdbae90 /* getMatchingAttachments */ {
                 module := views
             }
+            case 0x01ffc9a7 /* supportsInterface (ERC-165) */ {
+                module := views
+            }
             calldatacopy(0, 0, calldatasize())
             let ok := delegatecall(gas(), module, 0, calldatasize(), 0, 0)
             returndatacopy(0, 0, returndatasize())
@@ -160,23 +160,10 @@ contract SafePolicyGuardV2 is EngineEvaluator, ISafeTransactionGuard, ISafeModul
     }
 
     // =============================================================================================
-    // ERC-165
-    // =============================================================================================
-
-    /// @inheritdoc IERC165
-    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
-        return
-            interfaceId == type(IPolicyEngineV2).interfaceId ||
-            interfaceId == type(ISafeTransactionGuard).interfaceId ||
-            interfaceId == type(ISafeModuleGuard).interfaceId ||
-            interfaceId == type(IERC165).interfaceId;
-    }
-
-    // =============================================================================================
     // Safe 1.5.0 hooks
     // =============================================================================================
 
-    /// @inheritdoc ISafeTransactionGuard
+    /// @notice {ISafeTransactionGuard-checkTransaction}: the owner path (SPEC.md §6.1).
     function checkTransaction(
         address to,
         uint256 value,
@@ -189,7 +176,7 @@ contract SafePolicyGuardV2 is EngineEvaluator, ISafeTransactionGuard, ISafeModul
         address payable /* refundReceiver */,
         bytes calldata signatures,
         address msgSender
-    ) external override {
+    ) external {
         require(gasPrice == 0, IPolicyEngineV2.NonZeroGasPrice());
         require(safeTxGas == 0, IPolicyEngineV2.NonZeroSafeTxGas());
         _requireNotInCheck();
@@ -203,20 +190,20 @@ contract SafePolicyGuardV2 is EngineEvaluator, ISafeTransactionGuard, ISafeModul
         _setLock(false);
     }
 
-    /// @inheritdoc ISafeTransactionGuard
-    function checkAfterExecution(bytes32, bool success) external view override {
+    /// @notice {ISafeTransactionGuard-checkAfterExecution}.
+    function checkAfterExecution(bytes32, bool success) external view {
         _requireNotInCheck();
         require(success, IPolicyEngineV2.ExecutionFailed());
     }
 
-    /// @inheritdoc ISafeModuleGuard
+    /// @notice {ISafeModuleGuard-checkModuleTransaction}: the module path (SPEC.md §6.1).
     function checkModuleTransaction(
         address to,
         uint256 value,
         bytes calldata data,
         Operation operation,
         address module
-    ) external override returns (bytes32 moduleTxHash) {
+    ) external returns (bytes32 moduleTxHash) {
         _requireNotInCheck();
         _setLock(true);
         moduleTxHash = _moduleCallHash(msg.sender, module, to, value, data, operation);
@@ -227,8 +214,8 @@ contract SafePolicyGuardV2 is EngineEvaluator, ISafeTransactionGuard, ISafeModul
         _setLock(false);
     }
 
-    /// @inheritdoc ISafeModuleGuard
-    function checkAfterModuleExecution(bytes32, bool success) external view override {
+    /// @notice {ISafeModuleGuard-checkAfterModuleExecution}.
+    function checkAfterModuleExecution(bytes32, bool success) external view {
         _requireNotInCheck();
         require(success, IPolicyEngineV2.ModuleExecutionFailed());
     }

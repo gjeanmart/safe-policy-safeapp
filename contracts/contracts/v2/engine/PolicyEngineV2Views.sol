@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 pragma solidity =0.8.30;
 
+import {IERC165} from "../../vendor/policy-engine/interfaces/IERC165.sol";
+import {ISafeModuleGuard} from "../../vendor/policy-engine/interfaces/ISafeModuleGuard.sol";
+import {ISafeTransactionGuard} from "../../vendor/policy-engine/interfaces/ISafeTransactionGuard.sol";
 import {Operation} from "../../vendor/policy-engine/interfaces/Operation.sol";
+import {IPolicyEngineV2} from "../interfaces/IPolicyEngineV2.sol";
 import {MultiSendDecoder} from "../libraries/MultiSendDecoder.sol";
 import {Scope} from "../libraries/Scope.sol";
 import {
@@ -31,6 +35,19 @@ contract PolicyEngineV2Views is EngineModuleBase {
         address[] memory trustedBatches,
         address signLib
     ) EngineModuleBase(delay, expiry, maxFreeze, freezeCooldown, trustedBatches, signLib) {}
+
+    /**
+     * @notice ERC-165 of the guard (SPEC.md §6.1): `IPolicyEngineV2`, both Safe guard interfaces
+     *         and `IERC165`. Here rather than in the guard, which has no code size to spare; Safe
+     *         reads it only in `setGuard` / `setModuleGuard`.
+     */
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return
+            interfaceId == type(IPolicyEngineV2).interfaceId ||
+            interfaceId == type(ISafeTransactionGuard).interfaceId ||
+            interfaceId == type(ISafeModuleGuard).interfaceId ||
+            interfaceId == type(IERC165).interfaceId;
+    }
 
     // =============================================================================================
     // Enumeration views
@@ -101,6 +118,8 @@ contract PolicyEngineV2Views is EngineModuleBase {
         address policy
     ) external view onlyDelegatedView returns (MatchView[] memory views) {
         (bool selOk, bytes4 sel) = _calldataSelector(data);
+        // A top-level configuration call matches as the guard checks it (§5.1, §14 D-19).
+        bool configPath = to == address(this) && selOk && _isConfigSelector(sel);
         Call[] memory calls;
         if (
             operation == Operation.DELEGATECALL &&
@@ -129,7 +148,13 @@ contract PolicyEngineV2Views is EngineModuleBase {
                 continue;
             }
             Operation effOp = _effectiveOperation(calls[i].to, calls[i].operation, selectors[i]);
-            (perCall[i], keys[i]) = _match(safe, actor, calls[i].to, selectors[i], effOp);
+            (perCall[i], keys[i]) = _match(
+                safe,
+                actor,
+                calls[i].to,
+                selectors[i],
+                _matchMode(calls[i].operation, effOp, configPath)
+            );
             for (uint256 k = 0; k < perCall[i].length; k++) {
                 if (policy == address(0) || address(uint160(perCall[i][k])) == policy) {
                     total++;

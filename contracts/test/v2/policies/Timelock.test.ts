@@ -502,6 +502,7 @@ describe('TimelockPolicy (WP3)', () => {
     it('rejects a used nonce (StaleNonce) and too few signatures', async () => {
       const fx = await loadFixture(deploy)
       await execOwner(fx, call(fx.outsider.address), [fx.o1, fx.o2])
+      await attach(fx, scope(OWNERS), fx.timelock, tl(T))
       const c = call(fx.target)
       const stub = await fx.stub.getAddress()
       const safe = await fx.safe.getAddress()
@@ -575,14 +576,22 @@ describe('TimelockPolicy (WP3)', () => {
         hash,
         at + BigInt(R),
       ])
-      // Lengthening applies too.
+      // Lengthening applies too, counted from the reconfiguration (D-20): no head start.
       await attach(fx, scope(fx.ops.address), fx.timelock, tl(5 * DAY))
+      const reconfigured = BigInt(await time.latest())
       await expectPolicyError(execModule(fx, fx.ops, c), fx.stub, fx.timelock, 'NotReady', [
         hash,
-        at + BigInt(5 * DAY),
+        reconfigured + BigInt(5 * DAY),
       ])
+      // Shortening: the delay runs from the latest reconfiguration of a matched attachment.
       await attach(fx, scope(fx.ops.address), fx.timelock, tl(HOUR))
       await fx.stub.detachPolicy(await fx.safe.getAddress(), long)
+      const shortened = BigInt(await time.latest())
+      await expectPolicyError(execModule(fx, fx.ops, c), fx.stub, fx.timelock, 'NotReady', [
+        hash,
+        shortened - 1n + BigInt(HOUR),
+      ])
+      await time.increase(HOUR)
       await execModule(fx, fx.ops, c)
     })
 
@@ -724,7 +733,8 @@ describe('TimelockPolicy (WP3)', () => {
       const { hash } = await scheduleModule(fx, fx.ops, call(fx.target))
       const stub = await fx.stub.getAddress()
       const safe = await fx.safe.getAddress()
-      for (const who of [fx.attacker, fx.ops, fx.o1]) {
+      // Not the owners, not another module (fx.ops, which scheduled it, may: D-21).
+      for (const who of [fx.attacker, fx.recovery, fx.o1]) {
         await expectRevert(fx.timelock.connect(who).cancel(stub, safe, hash), fx.timelock, 'NotCanceller', [
           who.address,
         ])
@@ -1164,6 +1174,192 @@ describe('TimelockPolicy (WP3)', () => {
         fx.recovery.address,
       ])
       expect(await fx.safe.isOwner(fx.attacker.address)).to.equal(false)
+    })
+  })
+
+  describe('bound to the configuration (review M-3, D-20)', () => {
+    it('refuses a schedule no Timelock attachment matches (NoTimelock), on both paths', async () => {
+      const fx = await loadFixture(deploy)
+      const stub = await fx.stub.getAddress()
+      const safe = await fx.safe.getAddress()
+      const c = call(fx.target)
+      const moduleHash = await fx.timelock
+        .connect(fx.ops)
+        .scheduleModuleTx.staticCall(stub, safe, c.to, c.value, c.data, c.operation)
+        .catch(() => undefined)
+      expect(moduleHash).to.equal(undefined)
+      await expectRevert(
+        fx.timelock.connect(fx.ops).scheduleModuleTx(stub, safe, c.to, c.value, c.data, c.operation),
+        fx.timelock,
+        'NoTimelock',
+      )
+      const n = await fx.safe.nonce()
+      const hash = await safeTxHash(fx.safe, c, n)
+      await expectRevert(
+        fx.timelock.scheduleOwnerTx(stub, safe, safeTx(c, n), await sign(hash, [fx.o1, fx.o2])),
+        fx.timelock,
+        'NoTimelock',
+        [hash],
+      )
+      // Another actor's Timelock does not count.
+      await attach(fx, scope(fx.recovery.address), fx.timelock, tl(R))
+      await expectRevert(
+        fx.timelock.connect(fx.ops).scheduleModuleTx(stub, safe, c.to, c.value, c.data, c.operation),
+        fx.timelock,
+        'NoTimelock',
+      )
+    })
+
+    it('a schedule made before a Timelock was attached waits its delay from the attach', async () => {
+      // Opus M-3 (a): the actor pre-schedules under a short Timelock; the owners, suspicious, add a
+      // 72h one. The early schedule must wait the new 72h, counted from the attach.
+      const fx = await loadFixture(deploy)
+      await attach(fx, scope(fx.ops.address, fx.target, '0x00000000', CallMatch.TO), fx.timelock, tl(HOUR))
+      const c = call(fx.target)
+      const { hash } = await scheduleModule(fx, fx.ops, c)
+      await time.increase(4 * DAY)
+      const id = await attach(fx, scope(fx.ops.address), fx.timelock, tl(R))
+      const attachedAt = BigInt(await time.latest())
+      expect(
+        await fx.timelock.configuredAt(await fx.stub.getAddress(), await fx.safe.getAddress(), id),
+      ).to.equal(attachedAt)
+      await expectPolicyError(execModule(fx, fx.ops, c), fx.stub, fx.timelock, 'NotReady', [
+        hash,
+        attachedAt + BigInt(R),
+      ])
+      await time.increaseTo(attachedAt + BigInt(R))
+      await execModule(fx, fx.ops, c)
+    })
+
+    it('raising a delay applies to old schedules too (a schedule matured long ago does not pass at once)', async () => {
+      // Opus M-3 (b): 1h raised to 72h; a schedule made 4 days earlier used to pass immediately.
+      const fx = await loadFixture(deploy)
+      const s = scope(fx.ops.address)
+      await attach(fx, s, fx.timelock, tl(HOUR))
+      const c = call(fx.target)
+      const { hash } = await scheduleModule(fx, fx.ops, c)
+      await time.increase(4 * DAY)
+      await attach(fx, s, fx.timelock, tl(R))
+      const raisedAt = BigInt(await time.latest())
+      await expectPolicyError(execModule(fx, fx.ops, c), fx.stub, fx.timelock, 'NotReady', [
+        hash,
+        raisedAt + BigInt(R),
+      ])
+    })
+  })
+
+  describe('expired schedules (review F1 / M-4, D-21)', () => {
+    /** The app's recovery template: 72h, a one-week window, kept through a freeze, no cancellers. */
+    async function recoveryTemplate() {
+      const fx = await deploy()
+      await attach(fx, scope(fx.recovery.address), fx.timelock, tl(R, { window: 7 * DAY }))
+      return fx
+    }
+
+    it('Recovery re-schedules its expired call (the new schedule replaces it) and executes it', async () => {
+      const fx = await loadFixture(recoveryTemplate)
+      const stub = await fx.stub.getAddress()
+      const safe = await fx.safe.getAddress()
+      const c = call(fx.target)
+      const { hash } = await scheduleModule(fx, fx.recovery, c)
+      const again = () =>
+        fx.timelock.connect(fx.recovery).scheduleModuleTx(stub, safe, c.to, c.value, c.data, c.operation)
+      // Within the window it is live: no second schedule.
+      await time.increase(R + 7 * DAY - 1)
+      await expectRevert(again(), fx.timelock, 'AlreadyScheduled', [hash])
+      // The window missed: the check denies it, and only a new schedule clears it.
+      await time.increase(1)
+      await expectPolicyError(execModule(fx, fx.recovery, c), fx.stub, fx.timelock, 'ScheduleExpired')
+      await expectEvent(await again(), fx.timelock, 'Scheduled')
+      expect((await scheduleOf(fx, hash)).scheduledAt).to.equal(BigInt(await time.latest()))
+      // A fresh full delay: not ready before R, executes after it.
+      await expectPolicyError(execModule(fx, fx.recovery, c), fx.stub, fx.timelock, 'NotReady')
+      await time.increase(R)
+      await expectEvent(await execModule(fx, fx.recovery, c), fx.timelock, 'Executed', [stub, safe, hash])
+    })
+
+    it('judges expiry under the current settings (a wider window keeps it live)', async () => {
+      const fx = await loadFixture(recoveryTemplate)
+      const stub = await fx.stub.getAddress()
+      const safe = await fx.safe.getAddress()
+      const c = call(fx.target)
+      const { hash } = await scheduleModule(fx, fx.recovery, c)
+      await time.increase(R + 7 * DAY + 1)
+      // The owners widen the window: by the current settings the schedule is live again (it now
+      // runs from the reconfiguration, D-20), so it cannot be replaced.
+      await attach(fx, scope(fx.recovery.address), fx.timelock, tl(R, { window: 30 * DAY }))
+      await expectRevert(
+        fx.timelock.connect(fx.recovery).scheduleModuleTx(stub, safe, c.to, c.value, c.data, c.operation),
+        fx.timelock,
+        'AlreadyScheduled',
+        [hash],
+      )
+    })
+
+    it("replaces an expired owners' schedule too", async () => {
+      const fx = await loadFixture(deploy)
+      await attach(fx, scope(OWNERS), fx.timelock, tl(T, { window: HOUR }))
+      const c = call(fx.target)
+      const { hash } = await scheduleOwner(fx, c, [fx.o1, fx.o2])
+      await time.increase(T + HOUR + 1)
+      await expectPolicyError(execOwner(fx, c, [fx.o1, fx.o2]), fx.stub, fx.timelock, 'ScheduleExpired')
+      await scheduleOwner(fx, c, [fx.o1, fx.o2])
+      await time.increase(T)
+      await execOwner(fx, c, [fx.o1, fx.o2])
+      expect((await scheduleOf(fx, hash)).scheduledAt).to.equal(0n)
+    })
+
+    it('a module cancels its own schedule; nobody else unlisted can', async () => {
+      const fx = await loadFixture(recoveryTemplate)
+      const stub = await fx.stub.getAddress()
+      const safe = await fx.safe.getAddress()
+      const c = call(fx.target)
+      const { hash } = await scheduleModule(fx, fx.recovery, c)
+      for (const who of [fx.ops, fx.o1]) {
+        await expectRevert(fx.timelock.connect(who).cancel(stub, safe, hash), fx.timelock, 'NotCanceller', [
+          who.address,
+        ])
+      }
+      const tx = await fx.timelock.connect(fx.recovery).cancel(stub, safe, hash)
+      await expectEvent(tx, fx.timelock, 'Cancelled', [stub, safe, hash, fx.recovery.address, 0n])
+      expect((await scheduleOf(fx, hash)).scheduledAt).to.equal(0n)
+      await scheduleModule(fx, fx.recovery, c)
+    })
+  })
+
+  describe('owner schedules carry no gas fields (review F7, D-24)', () => {
+    it('rejects safeTxGas or gasPrice ≠ 0, which the engine would refuse at execution', async () => {
+      const fx = await loadFixture(deploy)
+      await attach(fx, scope(OWNERS), fx.timelock, tl(T))
+      const stub = await fx.stub.getAddress()
+      const safe = await fx.safe.getAddress()
+      const engineErrors = await ethers.getContractAt('IPolicyEngineV2', stub)
+      const c = call(fx.target)
+      const n = await fx.safe.nonce()
+      for (const [field, error] of [
+        ['gasPrice', 'NonZeroGasPrice'],
+        ['safeTxGas', 'NonZeroSafeTxGas'],
+      ] as const) {
+        const tx = { ...safeTx(c, n), [field]: 1 }
+        const hash = await fx.safe.getTransactionHash(
+          tx.to,
+          tx.value,
+          tx.data,
+          tx.operation,
+          tx.safeTxGas,
+          tx.baseGas,
+          tx.gasPrice,
+          tx.gasToken,
+          tx.refundReceiver,
+          n,
+        )
+        await expectRevert(
+          fx.timelock.scheduleOwnerTx(stub, safe, tx, await sign(hash, [fx.o1, fx.o2])),
+          engineErrors,
+          error,
+        )
+      }
+      await scheduleOwner(fx, c, [fx.o1, fx.o2])
     })
   })
 

@@ -52,6 +52,9 @@ import {
 } from '../e2e/world'
 import { deployV1, deployV1Policies, v1Fallback, v1Rule } from './v1'
 
+/** `Scope.MAX_ATTACHMENTS_PER_SCOPE` (SPEC §9, §14 D-26). */
+const MAX_PER_SCOPE = 6
+
 /** Module-path co-signature deadline far past any time the test advances to. */
 const PROOF_DEADLINE = 2n ** 40n
 
@@ -325,13 +328,21 @@ describe('Gas on a real Safe 1.5.0: plain, V1, V2', function () {
         changes.push(attach(s, addr(policy), '0x'))
       }
     }
-    const configure = (chunk: Change[]) =>
+    const engineTx = (fn: string, args: unknown[]) =>
       execAsOwners(
         w.safe,
-        call(w.engineAddress, w.engine.interface.encodeFunctionData('configureImmediately', [chunk, []])),
+        call(w.engineAddress, (w.engine.interface as Interface).encodeFunctionData(fn, args)),
         w.quorum2,
       )
-    for (let i = 0; i < changes.length; i += 16) await configure(changes.slice(i, i + 16))
+    // Only the first chunk can be immediate (an empty configuration, SPEC §14 D-25); the others go
+    // through the delay, requested together and applied once it passed.
+    const chunks: Change[][] = []
+    for (let i = 0; i < changes.length; i += 16) chunks.push(changes.slice(i, i + 16))
+    await engineTx('configureImmediately', [chunks[0], []])
+    for (const chunk of chunks.slice(1))
+      await engineTx('requestConfiguration', [await w.engine.configurationRoot(chunk, [])])
+    await time.increase(T)
+    for (const chunk of chunks.slice(1)) await engineTx('applyConfiguration', [chunk, []])
     for (const [fn, arg] of [
       ['enableModule', w.ops.address],
       ['setModuleGuard', w.engineAddress],
@@ -355,25 +366,33 @@ describe('Gas on a real Safe 1.5.0: plain, V1, V2', function () {
     )
   }
 
-  it('worst case: one call at 8 / 16 / 32 matches (linear in the policy runs)', async () => {
+  it('worst case: one call at 8 / 16 / 32 / 48 matches (linear in the policy runs)', async () => {
     for (const level of [0, 1] as const) {
-      const [g8, g16, g32] = [await worst(1, 1, level), await worst(1, 2, level), await worst(1, 4, level)]
-      // 8 → 16 matches adds 8 policy runs, 16 → 32 adds 16: the cost per run must not grow.
+      const [g8, g16, g32, g48] = [
+        await worst(1, 1, level),
+        await worst(1, 2, level),
+        await worst(1, 4, level),
+        await worst(1, 6, level),
+      ]
+      // 8 → 16 matches adds 8 policy runs, 16 → 32 adds 16, 32 → 48 another 16: the cost per run
+      // must not grow.
       const perRun16 = Number(g16 - g8) / 8
       const perRun32 = Number(g32 - g16) / 16
+      const perRun48 = Number(g48 - g32) / 16
       expect(perRun32).to.be.lessThan(perRun16 * 1.15)
+      expect(perRun48).to.be.lessThan(perRun16 * 1.15)
     }
   })
 
-  it('worst case at the caps (8 calls × 32 matches) stays well below the 2^24 gas cap', async () => {
-    const atCaps = [
-      await worst(8, 4, 0),
-      await worst(8, 4, 1),
-      await worst(8, 4, 0, true),
-      await worst(8, 4, 1, true),
-    ]
-    // EIP-7825: 2^24 = 16,777,216 per transaction. The engine's worst case must leave room for the
-    // policies' own work (each run here is a pass-only policy).
-    for (const gas of atCaps) expect(Number(gas)).to.be.lessThan(4_000_000)
+  it('worst case at the caps (8 calls × 48 matches) stays below 6M gas, well under the 2^24 cap', async () => {
+    // Also at 4 per scope (the cap before D-26), for the table in GAS.md.
+    for (const perScope of [4, 6])
+      for (const distinct of [false, true])
+        for (const level of [0, 1] as const) {
+          const gas = await worst(8, perScope, level, distinct)
+          // EIP-7825: 2^24 = 16,777,216 per transaction. The engine's worst case must leave room
+          // for the policies' own work (each run here is a pass-only policy).
+          if (perScope === MAX_PER_SCOPE) expect(Number(gas)).to.be.lessThan(6_000_000)
+        }
   })
 })

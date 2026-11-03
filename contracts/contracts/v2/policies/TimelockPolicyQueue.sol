@@ -35,6 +35,9 @@ contract TimelockPolicyQueue is TimelockPolicyStorage {
         ITimelockPolicy.SafeTransaction calldata safeTx,
         bytes calldata signatures
     ) external onlyDelegated returns (bytes32 txHash) {
+        // The engine refuses both at execution: such a schedule could never run (§14 D-24).
+        require(safeTx.gasPrice == 0, IPolicyEngineV2.NonZeroGasPrice());
+        require(safeTx.safeTxGas == 0, IPolicyEngineV2.NonZeroSafeTxGas());
         txHash = ISafe(safe).getTransactionHash(
             safeTx.to,
             safeTx.value,
@@ -75,10 +78,13 @@ contract TimelockPolicyQueue is TimelockPolicyStorage {
 
     /**
      * @dev Snapshots the freeze state and the union of the cancellers of the attachments the
-     *      transaction matches now; `readyAt` is informational (the check recomputes the delay).
-     *      An existing schedule that a freeze voided (its check would fail `ClearedByFreeze`) is
-     *      replaced rather than rejected: schedules must be re-made after a freeze, and a module
-     *      cannot cancel its own.
+     *      transaction matches now (at least one, else `NoTimelock`: a schedule made with no
+     *      Timelock would be ready at once when one is attached later, §14 D-20); `readyAt` is
+     *      informational (the check recomputes it). An existing schedule that could never pass
+     *      its check again is replaced rather than rejected (§14 D-3, D-21): one a freeze voided
+     *      (`ClearedByFreeze`), or one whose window passed under the current settings
+     *      (`ScheduleExpired`). A module-path schedule has no nonce, so either would otherwise
+     *      block the same call forever.
      */
     function _schedule(
         address engine,
@@ -99,24 +105,31 @@ contract TimelockPolicyQueue is TimelockPolicyStorage {
             address(this)
         );
 
+        // Merged as the check merges them (TimelockPolicy._checkTransaction).
         uint256 delay;
+        uint256 window;
         bool clearOnFreeze;
+        uint256 configured;
         uint256 listedCount;
         for (uint256 i = 0; i < matches.length; i++) {
             // The engine filters by policy already; re-checked because `engine` is caller-chosen.
             if (!_isOurs(matches[i])) continue;
-            ITimelockPolicy.Settings storage settings = _settings[
-                _keyOf(engine, safe, matches[i].attachment.attachmentId)
-            ];
+            StoredSettings storage settings = _settings[_keyOf(engine, safe, matches[i].attachment.attachmentId)];
             if (settings.delay > delay) delay = settings.delay;
+            if (settings.window != 0 && (window == 0 || settings.window < window)) window = settings.window;
             clearOnFreeze = clearOnFreeze || settings.clearOnFreeze;
+            if (settings.configuredAt > configured) configured = settings.configuredAt;
             listedCount += settings.cancellers.length;
         }
+        // Every attachment has a non-zero delay (`configure`): zero means none matched.
+        require(delay != 0, ITimelockPolicy.NoTimelock(txHash));
 
         ITimelockPolicy.Schedule storage s = _schedules[engine][safe][txHash];
         if (s.scheduledAt != 0) {
+            uint256 start = s.scheduledAt > configured ? s.scheduledAt : configured;
             require(
-                clearOnFreeze && (s.frozenAtSchedule || s.epoch != epoch),
+                (window != 0 && block.timestamp > start + delay + window) ||
+                    (clearOnFreeze && (s.frozenAtSchedule || s.epoch != epoch)),
                 ITimelockPolicy.AlreadyScheduled(txHash)
             );
         }

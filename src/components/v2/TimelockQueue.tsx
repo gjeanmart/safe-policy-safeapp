@@ -25,6 +25,7 @@ import {
   readMatchingAttachments,
   readSafeNonce,
   readSchedule,
+  readTimelockConfiguredAt,
   readTimelockQueue,
   runPreview,
   safeTransaction,
@@ -149,7 +150,9 @@ function EntryRow({
         readFreezeStatus(publicClient, deployment.engine, safe, entry.actor),
         owners ? readCancelState(publicClient, deployment, safe) : undefined,
       ])
-      return { schedule, matches, freeze, cancel }
+      const ids = [...new Set(matches.map((m) => m.attachment.attachmentId))]
+      const configuredAt = await readTimelockConfiguredAt(publicClient, deployment, safe, ids)
+      return { schedule, matches, freeze, cancel, configuredAt }
     },
     `${entry.txHash}:${model.attachments.length}`,
     15_000,
@@ -166,6 +169,7 @@ function EntryRow({
     window: merged.window,
     clearOnFreeze: merged.clearOnFreeze,
     freezeEpoch: data.freeze.epoch,
+    configuredAt: data.configuredAt,
   })
   const nonceState =
     owners && currentNonce !== undefined ? ownerNonceState(entry.nonce, currentNonce) : undefined
@@ -232,7 +236,7 @@ function EntryRow({
         {entry.txHash} · cancellable by{' '}
         {owners
           ? `the owners (${data.cancel?.requiredSignatures ?? '?'} signature(s) now)`
-          : 'nobody but the listed cancellers'}
+          : `${actorLabel(entry.actor, ctx.nameOf)} itself and the listed cancellers`}
         {data.schedule.cancellers.length > 0 &&
           `, ${data.schedule.cancellers.map((c) => ctx.nameOf?.(c) ?? shortAddress(c)).join(', ')}`}
       </div>
@@ -292,9 +296,21 @@ function EntryRow({
             variant="danger"
             disabled={!relayRole || localOwners.length === 0}
             onClick={cancelAsOwners}
-            title={`Owners cancel: ${data.cancel?.requiredSignatures ?? '?'} signature(s) over the Cancel digest (rising with each cancel until a schedule executes, capped at the threshold), from local owner keys`}
+            title={`Owners cancel: ${data.cancel?.requiredSignatures ?? '?'} signature(s) over the Cancel digest, from local owner keys. The count rises with each cancel (capped at the threshold) and resets when an owners' schedule executes: a single owner gets one cancel per executed transaction, enough to make each of them wait the delay twice`}
           >
             Cancel as owners
+          </AsyncButton>
+        )}
+        {!owners && actorRole && !cancellerRole && (
+          <AsyncButton
+            variant="danger"
+            onClick={async () => {
+              await relay(actorRole, timelockCalls.cancel(deployment, safe, entry.txHash))
+              live.reload()
+            }}
+            title={`${actorRole.label} scheduled it, so it may cancel it (SPEC §8.2)`}
+          >
+            Cancel as {actorRole.label}
           </AsyncButton>
         )}
         {cancellerRole && (

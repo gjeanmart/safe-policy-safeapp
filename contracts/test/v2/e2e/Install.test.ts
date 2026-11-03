@@ -8,6 +8,7 @@ import {
   execOwners,
   execOwnersAfter,
   expectError,
+  expectPolicyDenied,
   orgChanges,
   orgRoles,
   safeCall,
@@ -19,8 +20,11 @@ import {
 /**
  * Story: adopting V2 in one owner transaction, as the app's `installCalls` (src/lib/v2/changes.ts)
  * plans it: `configureImmediately(changes, roles)`, `setFallbackHandler(PolicyFallbackHandler)`,
- * `setGuard(engine)`, `setModuleGuard(engine)`, batched through MultiSendCallOnly 1.5.0 by
- * `planOwnerTransactions`. Does it work on a real Safe 1.5.0?
+ * `setModuleGuard(engine)`, then `setGuard(engine)` last, batched through MultiSendCallOnly 1.5.0
+ * by `planOwnerTransactions`. Inside one batch the order of the last two does not matter (the
+ * batch is checked once, before any of it runs); one transaction at a time it does: once the
+ * guard is set, `setModuleGuard` is an owner transaction like any other. Does it work on a real
+ * Safe 1.5.0?
  */
 describe('E2E story: the app install batch on a real Safe 1.5.0', () => {
   /** `installCalls(safe, deployment, set)`, in the app's order. */
@@ -28,8 +32,8 @@ describe('E2E story: the app install batch on a real Safe 1.5.0', () => {
     return [
       engineCall(w, 'configureImmediately', [orgChanges(w), orgRoles(w)]),
       safeCall(w, 'setFallbackHandler', [await w.handler.getAddress()]),
-      safeCall(w, 'setGuard', [w.engineAddress]),
       safeCall(w, 'setModuleGuard', [w.engineAddress]),
+      safeCall(w, 'setGuard', [w.engineAddress]),
     ]
   }
   const batch = async (w: World, calls: MetaTx[]) =>
@@ -58,9 +62,23 @@ describe('E2E story: the app install batch on a real Safe 1.5.0', () => {
     expect(await w.token.balanceOf(w.vendorA.address)).to.equal(usdc(1))
   })
 
+  it('one transaction at a time, in the app order: the guard last, nothing else to wait for', async () => {
+    const w = await loadFixture(deploy)
+    for (const tx of await installCalls(w)) await execAsOwners(w.safe, tx, w.quorum2)
+    expect(await guardsOf(w.safe)).to.deep.equal({ guard: w.engineAddress, moduleGuard: w.engineAddress })
+  })
+
+  it('one transaction at a time, guard first: setModuleGuard then waits the owners’ Timelock', async () => {
+    const w = await loadFixture(deploy)
+    const [configure, handler, moduleGuard, guard] = await installCalls(w)
+    for (const tx of [configure, handler, guard]) await execAsOwners(w.safe, tx, w.quorum2)
+    await expectPolicyDenied(execOwners(w, moduleGuard), w.engine, w.timelock, 'NotScheduled')
+    expect((await guardsOf(w.safe)).moduleGuard).to.equal(getAddress('0x' + '00'.repeat(20)))
+  })
+
   it('the order matters: setGuard before configureImmediately reverts the batch (GuardAlreadyEnabled)', async () => {
     const w = await loadFixture(deploy)
-    const [configure, handler, guard, moduleGuard] = await installCalls(w)
+    const [configure, handler, moduleGuard, guard] = await installCalls(w)
     // Safe 1.5.0 bubbles the inner revert when safeTxGas and gasPrice are zero.
     await expectError(
       execAsOwners(w.safe, await batch(w, [guard, configure, handler, moduleGuard]), w.quorum2),

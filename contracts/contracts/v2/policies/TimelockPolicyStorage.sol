@@ -20,7 +20,17 @@ abstract contract TimelockPolicyStorage {
     bytes32 private constant _CANCEL_TYPEHASH =
         keccak256("Cancel(address engine,address safe,bytes32 txHash,uint256 cancelCount)");
 
-    mapping(bytes32 settingsKey => ITimelockPolicy.Settings) internal _settings;
+    /// @dev `ITimelockPolicy.Settings` plus when they were last configured, in the delay's slot so
+    ///      the check reads it for free (SPEC.md §8.2, §14 D-20).
+    struct StoredSettings {
+        uint32 delay;
+        uint32 window;
+        bool clearOnFreeze;
+        uint64 configuredAt;
+        address[] cancellers;
+    }
+
+    mapping(bytes32 settingsKey => StoredSettings) internal _settings;
 
     mapping(address engine => mapping(address safe => mapping(bytes32 txHash => ITimelockPolicy.Schedule)))
         internal _schedules;

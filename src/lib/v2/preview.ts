@@ -269,6 +269,8 @@ export function describeReason(
       return text('Modules can never change the configuration')
     case 'ConfigFrozen':
       return text(`Configuration is frozen until ${time(a(0))}`)
+    case 'ConfigurationNotEmpty':
+      return text('This Safe already has a configuration: change it through the delay (request, apply)')
     case 'MalformedContext':
       return text('The policy context after the signatures is malformed')
     // Freeze
@@ -283,6 +285,8 @@ export function describeReason(
       return text(`The schedule expired at ${time(a(1))}: schedule again`, 'schedule')
     case 'ClearedByFreeze':
       return text('The schedule was cleared by a freeze: schedule again', 'schedule')
+    case 'NoTimelock':
+      return text('No Timelock applies to this call: there is nothing to schedule')
     // Co-signer, Safenet, Quorum
     case 'MissingCoSignature':
       return text(`Needs a co-signature from ${who(0)}`, 'cosignature')

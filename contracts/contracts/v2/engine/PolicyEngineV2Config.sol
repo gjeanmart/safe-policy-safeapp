@@ -10,6 +10,7 @@ import {
     AttachmentChange,
     AttachmentKind,
     ChangeType,
+    FreezeRole,
     PolicyLevel,
     RoleChange,
     ScopeData
@@ -49,6 +50,14 @@ contract PolicyEngineV2Config is EngineModuleBase {
         RoleChange[] calldata roles
     ) external onlyDelegated {
         require(!_isGuardEnabled(msg.sender), IPolicyEngineV2.GuardAlreadyEnabled());
+        // Not additive (§14 D-25): leftovers of an earlier install, or attachments a module added
+        // before the module guard was set, would otherwise survive the owners' install.
+        require(
+            _levelCounts[msg.sender] == 0 &&
+                _roleMembers[msg.sender][FreezeRole.GUARDIAN].length == 0 &&
+                _roleMembers[msg.sender][FreezeRole.LIFTER].length == 0,
+            IPolicyEngineV2.ConfigurationNotEmpty()
+        );
         emit IPolicyEngineV2.ConfiguredImmediately(msg.sender, keccak256(abi.encode(changes, roles)));
         _applyAll(msg.sender, changes, roles);
     }

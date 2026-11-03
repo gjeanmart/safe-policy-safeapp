@@ -22,6 +22,7 @@ import {
   expectPolicyDenied,
   expectSafeError,
   guardianRole,
+  lifterRole,
   requestConfig,
   safeCall,
   scheduleModule,
@@ -153,6 +154,69 @@ describe('E2E story: compromise timelines (T < R < F)', () => {
 
     // After the cooldown the old guardian can do nothing; the owners re-queue and pay.
     await time.increaseTo(t0 + F + C)
+    await expectError(w.engine.connect(w.guardian).freeze([w.safeAddress]), w.engine, 'NotGuardian', [
+      w.safeAddress,
+    ])
+    await scheduleOwners(w, pay)
+    await time.increase(T)
+    await execOwners(w, pay)
+    expect(await w.token.balanceOf(w.vendorA.address)).to.equal(usdc(500))
+  })
+
+  it('guardian compromised, cycling: repeated freezes are bounded, each cycle leaves C for the configuration (F14 a)', async () => {
+    const w = await loadFixture(deployOrg)
+    const skipped = async () => {
+      const tx = await w.engine.connect(w.guardian).freeze([w.safeAddress])
+      expect(await eventsOf(tx, w.engine, 'FreezeSkipped')).to.have.length(1)
+    }
+    for (let cycle = 0; cycle < 3; cycle++) {
+      // The guardian freezes for as long as it can: F, then the cooldown C, then again.
+      await w.engine.connect(w.guardian).freeze([w.safeAddress])
+      const t = BigInt(await time.latest())
+      expect((await w.engine.getFreezeState(w.safeAddress, ANY)).frozenUntil).to.equal(t + F)
+      // Owners request a change during the freeze (allowed); re-freezing extends nothing.
+      const roles = [lifterRole([w.o3, w.outsider, w.vendorB][cycle].address)]
+      await requestConfig(w, [], roles)
+      await skipped()
+      await time.increaseTo(t + DELAY + 1n)
+      await expectError(applyConfig(w, [], roles), w.engine, 'ConfigFrozen', [t + F])
+      // At F the freeze ends by itself; for C the guardian cannot freeze again: the matured
+      // request applies.
+      await time.increaseTo(t + F)
+      await skipped()
+      await applyConfig(w, [], roles)
+      expect(await w.engine.isLifter(w.safeAddress, roles[0].account)).to.equal(true)
+      await time.increaseTo(t + F + C - 2n) // the freeze transaction lands one second later
+      await skipped()
+      await time.increaseTo(t + F + C)
+    }
+  })
+
+  it('guardian compromised, cycling with C < T: no owners’ timelocked transaction gets through, the configuration does (F14 b)', async () => {
+    const w = await loadFixture(deployOrg)
+    // Freeze and lift at once: each freeze bumps the epoch, and the next one comes C later.
+    const cycle = async () => {
+      await w.engine.connect(w.guardian).freeze([w.safeAddress])
+      await w.engine.connect(w.guardian).lift(w.safeAddress, ANY)
+    }
+    const pay = tokenTransfer(w, w.vendorA.address, usdc(500))
+    await cycle()
+    const t0 = BigInt(await time.latest())
+    const removeGuardian = [guardianRole(w.guardian.address, false)]
+    await requestConfig(w, [], removeGuardian)
+    for (let i = 0; i < 3; i++) {
+      const start = BigInt(await time.latest())
+      const hash = await scheduleOwners(w, pay)
+      // C < T: the guardian freezes again before the owners' T has passed, voiding the schedule.
+      await time.increaseTo(start + C)
+      await cycle()
+      await time.increaseTo(start + T)
+      await expectPolicyDenied(execOwners(w, pay), w.engine, w.timelock, 'ClearedByFreeze', [hash])
+    }
+    // The configuration path runs neither the owners' Freeze nor their Timelock (SPEC §5.1): the
+    // guardian's removal applies between two freezes.
+    expect(BigInt(await time.latest()) >= t0 + DELAY).to.equal(true)
+    await applyConfig(w, [], removeGuardian)
     await expectError(w.engine.connect(w.guardian).freeze([w.safeAddress]), w.engine, 'NotGuardian', [
       w.safeAddress,
     ])

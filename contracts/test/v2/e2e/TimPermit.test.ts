@@ -197,15 +197,19 @@ describe("E2E story: Tim's permit attack", () => {
       )
     })
 
-    it('denied: the raw message routes (SignMessageLib, PolicySignLib.signMessage) are not granted', async () => {
+    it('denied: SignMessageLib is not granted; PolicySignLib.signMessage waits the owners’ Timelock (D-22)', async () => {
       const w = await loadFixture(deployV2)
       const digest = await permitDigest(w, w.safeAddress, w.attacker.address, 1n, 1n)
-      for (const tx of [
-        await signHashOnchainTx(w.infra, digest),
-        call(w.signLibAddress, w.signLib.interface.encodeFunctionData('signMessage', [digest]), 0n, 1),
-      ]) {
-        await expectError(execOwners(w, tx), w.engine, 'NotGranted')
-      }
+      await expectError(execOwners(w, await signHashOnchainTx(w.infra, digest)), w.engine, 'NotGranted')
+      // A raw approval is opaque to Limit and Recipients (unpriced, unclassified): the owners'
+      // Timelock is what stands between the owners' keys and it, as for any unpriced owner call.
+      const raw = call(
+        w.signLibAddress,
+        w.signLib.interface.encodeFunctionData('signMessage', [digest]),
+        0n,
+        1,
+      )
+      await expectPolicyDenied(execOwners(w, raw), w.engine, w.timelock, 'NotScheduled')
     })
 
     it('allowed within policy: a timelocked, priced permit the token accepts (slot-7 signedMessages, SignMsg)', async () => {

@@ -19,6 +19,7 @@ export const policyEngineV2Abi = [
     name: 'ConfigFrozen',
     type: 'error',
   },
+  { inputs: [], name: 'ConfigurationNotEmpty', type: 'error' },
   {
     inputs: [
       { internalType: 'uint256', name: 'delay', type: 'uint256' },
@@ -1116,6 +1117,11 @@ export const timelockPolicyAbi = [
   },
   { inputs: [], name: 'InvalidSettings', type: 'error' },
   {
+    inputs: [{ internalType: 'bytes32', name: 'txHash', type: 'bytes32' }],
+    name: 'NoTimelock',
+    type: 'error',
+  },
+  {
     inputs: [{ internalType: 'address', name: 'account', type: 'address' }],
     name: 'NotCanceller',
     type: 'error',
@@ -1234,6 +1240,17 @@ export const timelockPolicyAbi = [
     ],
     name: 'cancelDigest',
     outputs: [{ internalType: 'bytes32', name: '', type: 'bytes32' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'address', name: 'engine', type: 'address' },
+      { internalType: 'address', name: 'safe', type: 'address' },
+      { internalType: 'bytes32', name: 'attachmentId', type: 'bytes32' },
+    ],
+    name: 'configuredAt',
+    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
     stateMutability: 'view',
     type: 'function',
   },
@@ -1904,6 +1921,7 @@ export const policyV2ErrorsAbi = [
     name: 'ConfigFrozen',
     type: 'error',
   },
+  { inputs: [], name: 'ConfigurationNotEmpty', type: 'error' },
   {
     inputs: [
       { internalType: 'uint256', name: 'delay', type: 'uint256' },
@@ -2092,6 +2110,11 @@ export const policyV2ErrorsAbi = [
   {
     inputs: [{ internalType: 'bytes32', name: 'txHash', type: 'bytes32' }],
     name: 'ClearedByFreeze',
+    type: 'error',
+  },
+  {
+    inputs: [{ internalType: 'bytes32', name: 'txHash', type: 'bytes32' }],
+    name: 'NoTimelock',
     type: 'error',
   },
   {

@@ -64,7 +64,7 @@ export const ACTOR_LEVEL_OFFSET = 4
 /** `(actor, to.selector)`: the only level where DELEGATECALL can be granted. */
 export const EXACT_LEVEL = 7
 
-export const MAX_ATTACHMENTS_PER_SCOPE = 4
+export const MAX_ATTACHMENTS_PER_SCOPE = 6
 export const MAX_BATCH_CALLS = 8
 export const MAX_ROLE_MEMBERS = 8
 export const MAX_TRUSTED_BATCHES = 4

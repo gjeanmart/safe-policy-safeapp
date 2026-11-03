@@ -4,8 +4,10 @@ import { ethers } from 'hardhat'
 import { expectEvent } from '../helpers'
 import {
   ANY,
+  Behaviour,
   CallMatch,
   Kind,
+  Level,
   OWNERS,
   Op,
   SEL,
@@ -16,6 +18,7 @@ import {
   execOwner,
   expectRevert,
   levelOf,
+  policy,
   scope,
   scopeKey,
   setup,
@@ -136,11 +139,11 @@ describe('V2 engine: scope lattice', () => {
     const s5 = scope(module.address, CallMatch.TO, f.targetAddr)
     expect(Number(await f.engine.levelsUsed(f.safeAddr))).to.equal(0)
     // configureImmediately is closed once installed; use a fresh Safe for each change set.
-    const { deploySafe } = await import('./fixtures')
+    const { configureLater, deploySafe } = await import('./fixtures')
     const fresh = await deploySafe()
     await f.engine.connect(fresh.asSafe).configureImmediately([allow(s0), deny(s5), allow(s7)], [])
     expect(Number(await f.engine.levelsUsed(fresh.address))).to.equal((1 << 0) | (1 << 5) | (1 << 7))
-    await f.engine.connect(fresh.asSafe).configureImmediately([{ ...deny(s5), changeType: 1 }], [])
+    await configureLater(f.engine, fresh.asSafe, [{ ...deny(s5), changeType: 1 }])
     expect(Number(await f.engine.levelsUsed(fresh.address))).to.equal((1 << 0) | (1 << 7))
     const views = await f.engine.getAttachments(fresh.address)
     expect(views.map((v) => v.attachmentId)).to.have.members([
@@ -200,7 +203,7 @@ describe('V2 engine: op masks and DELEGATECALL', () => {
     ])
   })
 
-  it('typed PolicySignLib DELEGATECALLs are matched as CALL; others stay DELEGATECALL', async () => {
+  it('PolicySignLib DELEGATECALLs (typed and signMessage) are matched as CALL; others stay DELEGATECALL', async () => {
     const lib = await ethers.deployContract('EngineTarget')
     const libAddr = await lib.getAddress()
     const f = await setup([allow(scope(OWNERS))], [], { signLib: libAddr })
@@ -209,16 +212,48 @@ describe('V2 engine: op masks and DELEGATECALL', () => {
     expect(signPermit).to.equal('0x51bdfa61')
     const tx = await execOwner(f.safe, libAddr, concat([signPermit, ethers.ZeroHash]), Op.DELEGATECALL)
     // The target's code ran in the Safe's context (DELEGATECALL really executed).
-    const logs = await (await import('../helpers')).eventsOf(tx, f.safe, 'ExecutionSuccess')
-    expect(logs.length).to.equal(1)
-    await expectRevert(
-      execOwner(f.safe, libAddr, concat([signMessage, ethers.ZeroHash]), Op.DELEGATECALL),
-      f.engine,
-      'NotGranted',
-    )
+    const { eventsOf } = await import('../helpers')
+    expect((await eventsOf(tx, f.safe, 'ExecutionSuccess')).length).to.equal(1)
+    // signMessage too since D-22: a CALL Allow grants it (the Safe can sign as a nested owner).
+    const message = await execOwner(f.safe, libAddr, concat([signMessage, ethers.ZeroHash]), Op.DELEGATECALL)
+    expect((await eventsOf(message, f.safe, 'ExecutionSuccess')).length).to.equal(1)
+    await expectRevert(execOwner(f.safe, libAddr, SEL.ping, Op.DELEGATECALL), f.engine, 'NotGranted')
     await expectRevert(
       execOwner(f.safe, f.targetAddr, concat([signPermit, ethers.ZeroHash]), Op.DELEGATECALL),
       f.engine,
+      'NotGranted',
+    )
+  })
+
+  it('restrictions match the raw op too: a DELEGATECALL-only DENY or policy on SIGN_LIB fires (D-23)', async () => {
+    const lib = await ethers.deployContract('EngineTarget')
+    const libAddr = await lib.getAddress()
+    const signPermit = '0x51bdfa61'
+    const exact = scope(OWNERS, CallMatch.TO_SELECTOR, libAddr, signPermit)
+    const data = concat([signPermit, ethers.ZeroHash])
+    // A DENY whose mask names only DELEGATECALL, what a user who knows signing is a DELEGATECALL picks.
+    const denied = await setup([allow(scope(OWNERS)), deny(exact, 2)], [], { signLib: libAddr })
+    await expectRevert(execOwner(denied.safe, libAddr, data, Op.DELEGATECALL), denied.engine, 'Denied', [
+      0,
+      attachmentId(exact, Kind.DENY),
+    ])
+    // A policy with the same mask runs.
+    const p = await ethers.deployContract('MockPolicyV2', [Level.CALL])
+    const runs = await setup(
+      [
+        allow(scope(OWNERS)),
+        policy(scope(ANY, CallMatch.TO, libAddr), await p.getAddress(), Behaviour.REVERT, 2),
+      ],
+      [],
+      { signLib: libAddr },
+    )
+    await expectRevert(execOwner(runs.safe, libAddr, data, Op.DELEGATECALL), runs.engine, 'PolicyDenied')
+    // An ALLOW still grants by the effective op only: a DELEGATECALL-only exact Allow does not
+    // grant the typed entry (a CALL one does).
+    const allowOnly = await setup([allow(exact, 2)], [], { signLib: libAddr })
+    await expectRevert(
+      execOwner(allowOnly.safe, libAddr, data, Op.DELEGATECALL),
+      allowOnly.engine,
       'NotGranted',
     )
   })

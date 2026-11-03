@@ -58,7 +58,11 @@ contract TimelockPolicy is PolicyBaseV2, TimelockPolicyStorage, ITimelockPolicy 
         for (uint256 i = 0; i < settings.cancellers.length; i++) {
             require(settings.cancellers[i] != address(0), InvalidSettings());
         }
-        _settings[_keyOf(engine, safe, attachmentId)] = settings;
+        StoredSettings storage stored = _settings[_keyOf(engine, safe, attachmentId)];
+        (stored.delay, stored.window, stored.clearOnFreeze) = (settings.delay, settings.window, settings.clearOnFreeze);
+        // A schedule made before this matures only `delay` after it (§14 D-20).
+        stored.configuredAt = uint64(block.timestamp);
+        stored.cancellers = settings.cancellers;
         return settings.delay;
     }
 
@@ -73,18 +77,21 @@ contract TimelockPolicy is PolicyBaseV2, TimelockPolicyStorage, ITimelockPolicy 
         Schedule memory s = _schedules[engine][ctx.safe][ctx.txHash];
         require(s.scheduledAt != 0 && s.actor == ctx.actor, NotScheduled(ctx.txHash));
 
-        // Merge (SPEC.md §8): longest delay, shortest non-zero window, clear if any attachment says so.
+        // Merge (SPEC.md §8): longest delay, shortest non-zero window, clear if any attachment says
+        // so; the delay runs from the schedule or the latest (re)configuration, whichever is later.
         uint256 delay;
         uint256 window;
         bool clearOnFreeze;
+        uint256 start = s.scheduledAt;
         for (uint256 i = 0; i < attachmentIds.length; i++) {
-            Settings storage settings = _settings[_keyOf(engine, ctx.safe, attachmentIds[i])];
+            StoredSettings storage settings = _settings[_keyOf(engine, ctx.safe, attachmentIds[i])];
             if (settings.delay > delay) delay = settings.delay;
             if (settings.window != 0 && (window == 0 || settings.window < window)) window = settings.window;
             clearOnFreeze = clearOnFreeze || settings.clearOnFreeze;
+            if (settings.configuredAt > start) start = settings.configuredAt;
         }
 
-        uint256 readyAt = s.scheduledAt + delay;
+        uint256 readyAt = start + delay;
         require(block.timestamp >= readyAt, NotReady(ctx.txHash, readyAt));
         require(window == 0 || block.timestamp <= readyAt + window, ScheduleExpired(ctx.txHash, readyAt + window));
         if (clearOnFreeze) {
@@ -121,9 +128,12 @@ contract TimelockPolicy is PolicyBaseV2, TimelockPolicyStorage, ITimelockPolicy 
 
     /// @inheritdoc ITimelockPolicy
     function cancel(address engine, address safe, bytes32 txHash) external {
-        require(_schedules[engine][safe][txHash].scheduledAt != 0, NotScheduled(txHash));
+        Schedule storage s = _schedules[engine][safe][txHash];
+        require(s.scheduledAt != 0, NotScheduled(txHash));
         address[] storage cancellers = _cancellers[engine][safe][txHash];
-        bool listed;
+        // A module cancels its own schedule: that removes no protection (§14 D-21). The owners'
+        // actor `Scope.OWNERS` is never a caller.
+        bool listed = s.actor == msg.sender;
         for (uint256 i = 0; i < cancellers.length && !listed; i++) {
             listed = cancellers[i] == msg.sender;
         }
@@ -203,7 +213,13 @@ contract TimelockPolicy is PolicyBaseV2, TimelockPolicyStorage, ITimelockPolicy 
 
     /// @inheritdoc ITimelockPolicy
     function getSettings(address engine, address safe, bytes32 attachmentId) external view returns (Settings memory) {
-        return _settings[_keyOf(engine, safe, attachmentId)];
+        StoredSettings storage stored = _settings[_keyOf(engine, safe, attachmentId)];
+        return Settings(stored.delay, stored.window, stored.clearOnFreeze, stored.cancellers);
+    }
+
+    /// @inheritdoc ITimelockPolicy
+    function configuredAt(address engine, address safe, bytes32 attachmentId) external view returns (uint256) {
+        return _settings[_keyOf(engine, safe, attachmentId)].configuredAt;
     }
 
     /// @inheritdoc ITimelockPolicy

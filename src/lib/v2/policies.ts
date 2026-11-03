@@ -142,7 +142,8 @@ export const SELECTORS = {
   increaseAllowance: toFunctionSelector('increaseAllowance(address,uint256)'),
   decreaseAllowance: toFunctionSelector('decreaseAllowance(address,uint256)'),
   multiSend: toFunctionSelector('multiSend(bytes)'),
-  // PolicySignLib typed entries (matched as CALL, SPEC §6.3) and the raw one (DELEGATECALL only).
+  // PolicySignLib entries, all matched as CALL (SPEC §6.3, D-22): the typed ones are priced, the raw
+  // signMessage is not.
   signPermit: '0x51bdfa61',
   signCowOrder: '0x3d296e04',
   signPermit2: '0xda3c0cb0',
@@ -190,6 +191,31 @@ export const PRICED_SIGN_LIB_SELECTORS: readonly Hex[] = [
   SELECTORS.signPermit,
   SELECTORS.signPermit2,
   SELECTORS.signCowOrder,
+]
+
+/** The engine's configuration selectors: the configuration path (SPEC §5.1). */
+export const CONFIG_SELECTORS: readonly Hex[] = [
+  SELECTORS.requestConfiguration,
+  SELECTORS.invalidateRoot,
+  SELECTORS.applyConfiguration,
+]
+
+/**
+ * Contracts that act for whoever calls them as the Safe (review L-6): the module-path rule that
+ * calls to the Safe or the engine need an exact Allow (F5) does not reach them. Canonical
+ * addresses, the same on every chain the app supports.
+ */
+export const AUTHORITY_TARGETS: readonly { address: Address; name: string; risk: string }[] = [
+  {
+    address: '0x000000000022D473030F116dDEE9F6B43aC78BA3',
+    name: 'Permit2',
+    risk: 'moves any token the Safe approved to Permit2, unpriced (approve, transferFrom)',
+  },
+  {
+    address: '0x9008D19f58AAbD9eD0D60971565AA8510560ab41',
+    name: 'GPv2Settlement',
+    risk: 'pre-signs CoW orders (setPreSignature) that no budget or recipients list sees',
+  },
 ]
 
 const SELECTOR_NAMES: Record<string, string> = Object.fromEntries(

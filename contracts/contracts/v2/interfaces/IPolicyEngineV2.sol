@@ -146,6 +146,10 @@ interface IPolicyEngineV2 {
     /// @notice `configureImmediately` after the guard (or module guard) was installed on the caller.
     error GuardAlreadyEnabled();
 
+    /// @notice `configureImmediately` on a Safe that already has attachments or roles (left over
+    ///         from an earlier install, or added by a module): change them through the delay.
+    error ConfigurationNotEmpty();
+
     error RootAlreadyRequested(bytes32 root);
     error RootNotRequested(bytes32 root);
     error RootPending(bytes32 root, uint256 validFrom);
@@ -203,7 +207,7 @@ interface IPolicyEngineV2 {
     // =============================================================================================
 
     /// @notice Applies changes with no delay. Only while this contract is neither the Safe's guard
-    ///         nor its module guard.
+    ///         nor its module guard, and only on an empty configuration (no attachment, no role).
     function configureImmediately(AttachmentChange[] calldata changes, RoleChange[] calldata roles) external;
 
     /// @notice Requests `root = configurationRoot(changes, roles)`; applicable after `DELAY`.

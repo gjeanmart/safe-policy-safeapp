@@ -408,18 +408,52 @@ export async function readSchedule(
   return { txHash, ...s, cancellers }
 }
 
+/**
+ * The latest `configuredAt` of the given Timelock attachments (0 for none): a schedule is ready
+ * `delay` after the later of its own time and this (SPEC §8.2, §14 D-20).
+ */
+export async function readTimelockConfiguredAt(
+  client: PublicClient,
+  deployment: V2Deployment,
+  safe: Address,
+  attachmentIds: readonly Hex[],
+): Promise<bigint> {
+  const times = await Promise.all(
+    attachmentIds.map((id) =>
+      client.readContract({
+        address: deployment.policies.timelock,
+        abi: timelockPolicyAbi,
+        functionName: 'configuredAt',
+        args: [deployment.engine, safe, id],
+      }),
+    ),
+  )
+  return times.reduce((max, t) => (t > max ? t : max), 0n)
+}
+
 export type ScheduleStatus = 'waiting' | 'ready' | 'expired' | 'cleared'
 
 /**
- * Where a schedule stands for the queue view. `delay` / `window` are the current merged settings
- * (max delay, min non-zero window) of the attachments the call matches; `freezeEpoch` the actor's
- * current `freezeStatus` epoch when a matched attachment has `clearOnFreeze`.
+ * Where a schedule stands for the queue view, as TimelockPolicy's check and its replacement rule
+ * judge it. `delay` / `window` are the current merged settings (max delay, min non-zero window) of
+ * the attachments the call matches, `configuredAt` their latest (re)configuration (the delay runs
+ * from it when it is later than the schedule); `freezeEpoch` the actor's current `freezeStatus`
+ * epoch when a matched attachment has `clearOnFreeze`. `expired` and `cleared` schedules are
+ * replaced by a new schedule of the same call.
  */
 export function scheduleStatus(
   s: Pick<Schedule, 'scheduledAt' | 'epoch' | 'frozenAtSchedule'>,
-  current: { now: bigint; delay: bigint; window: bigint; clearOnFreeze: boolean; freezeEpoch: bigint },
+  current: {
+    now: bigint
+    delay: bigint
+    window: bigint
+    clearOnFreeze: boolean
+    freezeEpoch: bigint
+    configuredAt?: bigint
+  },
 ): { status: ScheduleStatus; readyAt: bigint; expiresAt?: bigint } {
-  const readyAt = s.scheduledAt + current.delay
+  const configuredAt = current.configuredAt ?? 0n
+  const readyAt = (s.scheduledAt > configuredAt ? s.scheduledAt : configuredAt) + current.delay
   const expiresAt = current.window === 0n ? undefined : readyAt + current.window
   if (current.clearOnFreeze && (s.frozenAtSchedule || s.epoch !== current.freezeEpoch))
     return { status: 'cleared', readyAt, expiresAt }

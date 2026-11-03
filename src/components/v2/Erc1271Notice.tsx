@@ -22,8 +22,9 @@ export function Erc1271Notice({ handler, policyHandler }: { handler?: Address; p
       <strong>Off-chain signatures are refused.</strong> PolicyFallbackHandler rejects every off-chain owner
       signature: signing a message, a Permit or a CoW order in Safe{'{Wallet}'} (Sign-In with Ethereum,
       gasless approvals, off-chain orders) returns &quot;invalid&quot;. Approve them on-chain instead, as a
-      Safe transaction that the policies check (PolicySignLib signPermit / signCowOrder; a raw signMessage
-      needs an exact-scope Allow).
+      Safe transaction that the policies check (PolicySignLib signPermit / signCowOrder, priced; or a raw
+      signMessage, for another Safe this one owns or a login: the owners&apos; Allow covers it, their Timelock
+      and Co-signer apply, but no budget sees what it approves).
     </Notice>
   )
 }

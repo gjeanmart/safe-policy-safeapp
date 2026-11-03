@@ -81,6 +81,8 @@ interface ITimelockPolicy {
     event Executed(address indexed engine, address indexed safe, bytes32 indexed txHash);
 
     error InvalidSettings();
+    /// @notice A schedule for a transaction that no Timelock attachment of this policy matches.
+    error NoTimelock(bytes32 txHash);
     error AlreadyScheduled(bytes32 txHash);
     error NotScheduled(bytes32 txHash);
     error NotReady(bytes32 txHash, uint256 readyAt);
@@ -95,6 +97,11 @@ interface ITimelockPolicy {
      * @notice Owners schedule a Safe transaction with the same signatures they will execute it with:
      *         `ISafe.checkNSignatures(address(0), txHash, signatures, threshold)`.
      *         Not a Safe transaction (it would wait for its own timelock). Anyone may relay.
+     *         `safeTxGas` and `gasPrice` must be 0, as the engine requires at execution
+     *         (`IPolicyEngineV2.NonZeroSafeTxGas` / `NonZeroGasPrice`).
+     * @dev Both schedule functions revert `NoTimelock` unless a Timelock attachment of this policy
+     *      matches the transaction, and `AlreadyScheduled` if one exists that is neither expired
+     *      (window passed under the current settings) nor voided by a freeze; those are replaced.
      * @return txHash The Safe transaction hash (binds the nonce: the schedule dies when the nonce moves).
      */
     function scheduleOwnerTx(
@@ -125,7 +132,8 @@ interface ITimelockPolicy {
      */
     function cancelAsOwners(address engine, address safe, bytes32 txHash, bytes calldata signatures) external;
 
-    /// @notice A canceller listed (at schedule time) by an attachment the transaction matched cancels it.
+    /// @notice A canceller listed (at schedule time) by an attachment the transaction matched, or the
+    ///         module that scheduled it, cancels it.
     function cancel(address engine, address safe, bytes32 txHash) external;
 
     function getSchedule(address engine, address safe, bytes32 txHash) external view returns (Schedule memory);
@@ -143,6 +151,13 @@ interface ITimelockPolicy {
     function cancelDigest(address engine, address safe, bytes32 txHash) external view returns (bytes32);
 
     function getSettings(address engine, address safe, bytes32 attachmentId) external view returns (Settings memory);
+
+    /**
+     * @notice When the attachment's settings were last configured. A transaction it matches is
+     *         ready `delay` after the later of its schedule and the latest `configuredAt` of the
+     *         Timelock attachments it matches (SPEC.md §8.2).
+     */
+    function configuredAt(address engine, address safe, bytes32 attachmentId) external view returns (uint256);
 
     /// @notice `abi.encode(settings)`; exists so the ABI carries the settings type.
     function encodeSettings(Settings calldata settings) external pure returns (bytes memory);

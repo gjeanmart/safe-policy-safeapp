@@ -69,19 +69,22 @@ abstract contract EngineEvaluator is EngineStorage {
     ) internal {
         (bool selOk, bytes4 sel) = _calldataSelector(data);
 
-        // The configuration path: no lookup, no policy, no ALLOW needed (§5.1).
+        // The configuration path: no ALLOW needed; only the owners' policies at its exact scopes
+        // run (§5.1, §14 D-19, in {_checkCall}).
         if (to == address(this) && selOk && _isConfigSelector(sel)) {
             if (f.ctx.actor != Scope.OWNERS) {
                 _ruleDeny(f, Scope.TX_INDEX, IPolicyEngineV2.ModuleConfigurationDenied.selector, false, 0);
-            } else if (operation != Operation.CALL || value != 0) {
-                _ruleDeny(f, Scope.TX_INDEX, IPolicyEngineV2.GuardTargetDenied.selector, false, 0);
-            } else if (sel == IPolicyEngineV2.applyConfiguration.selector) {
-                uint64 frozenUntil = _freezes[f.ctx.safe][Scope.ANY].frozenUntil;
-                if (block.timestamp < frozenUntil) {
-                    _ruleDeny(f, Scope.TX_INDEX, IPolicyEngineV2.ConfigFrozen.selector, true, frozenUntil);
-                }
+                return;
             }
-            return;
+            if (operation != Operation.CALL || value != 0) {
+                _ruleDeny(f, Scope.TX_INDEX, IPolicyEngineV2.GuardTargetDenied.selector, false, 0);
+                return;
+            }
+            uint64 frozenUntil = _freezes[f.ctx.safe][Scope.ANY].frozenUntil;
+            if (sel == IPolicyEngineV2.applyConfiguration.selector && block.timestamp < frozenUntil) {
+                _ruleDeny(f, Scope.TX_INDEX, IPolicyEngineV2.ConfigFrozen.selector, true, frozenUntil);
+                return;
+            }
         }
 
         bool isBatch = operation == Operation.DELEGATECALL &&
@@ -331,17 +334,22 @@ abstract contract EngineEvaluator is EngineStorage {
             return notGranted;
         }
         address actor = f.ctx.actor;
+        // The top-level configuration path, whose engine rules {_evaluate} already passed.
+        bool configPath;
         if (call.to == address(this)) {
             if (_isConfigSelector(sel)) {
-                _ruleDeny(
-                    f,
-                    i,
-                    actor == Scope.OWNERS
-                        ? IPolicyEngineV2.GuardTargetDenied.selector
-                        : IPolicyEngineV2.ModuleConfigurationDenied.selector,
-                    false,
-                    0
-                );
+                configPath = !inBatch;
+                if (inBatch) {
+                    _ruleDeny(
+                        f,
+                        i,
+                        actor == Scope.OWNERS
+                            ? IPolicyEngineV2.GuardTargetDenied.selector
+                            : IPolicyEngineV2.ModuleConfigurationDenied.selector,
+                        false,
+                        0
+                    );
+                }
             } else if (
                 sel != IPolicyEngineV2.freeze.selector &&
                 sel != IPolicyEngineV2.freezeActor.selector &&
@@ -358,8 +366,15 @@ abstract contract EngineEvaluator is EngineStorage {
         // F5: on the module path, calls to the Safe itself or to the engine need an exact ALLOW.
         bool exactOnly = actor != Scope.OWNERS && (call.to == f.ctx.safe || call.to == address(this));
 
-        (uint256[] memory matches, bytes32[8] memory keys) = _match(f.ctx.safe, actor, call.to, sel, effOp);
-        bool granted;
+        (uint256[] memory matches, bytes32[8] memory keys) = _match(
+            f.ctx.safe,
+            actor,
+            call.to,
+            sel,
+            _matchMode(call.operation, effOp, configPath)
+        );
+        // The configuration path needs no ALLOW: a Safe can never lock itself out (§5.1).
+        bool granted = configPath;
         bytes32[] memory ids;
         uint256[] memory metas;
         uint256 count;
@@ -506,17 +521,6 @@ abstract contract EngineEvaluator is EngineStorage {
         f.txIds[n] = id;
         f.txMetas[n] = meta;
         f.txCount = n + 1;
-    }
-
-    function _isConfigSelector(bytes4 sel) private pure returns (bool config) {
-        (bytes4 request, bytes4 invalidate, bytes4 apply_) = (
-            IPolicyEngineV2.requestConfiguration.selector,
-            IPolicyEngineV2.invalidateRoot.selector,
-            IPolicyEngineV2.applyConfiguration.selector
-        );
-        assembly ("memory-safe") {
-            config := or(or(eq(sel, request), eq(sel, invalidate)), eq(sel, apply_))
-        }
     }
 
     /// @dev `Scope.selectorOf` for a memory call: the first 4 bytes, or 0 for empty data (§6.3).

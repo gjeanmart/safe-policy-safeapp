@@ -95,16 +95,20 @@ describe('V2 engine: gas', () => {
     expect(Number(g.module - baseline.module)).to.be.lessThan(72_000)
   })
 
-  it('worst case at caps: 8-call batch, 8 levels × 4 attachments (1 ALLOW + 3 policies) per call', async () => {
+  it('worst case at caps: 8-call batch, 8 levels × 6 attachments (1 ALLOW + 5 policies) per call', async () => {
     const policies = [
       ...(await Promise.all(
-        [0, 1].map(async () => (await ethers.deployContract('MockPolicyV2', [Level.CALL])).getAddress()),
+        [0, 1, 2].map(async () => (await ethers.deployContract('MockPolicyV2', [Level.CALL])).getAddress()),
       )),
-      await (await ethers.deployContract('MockPolicyV2', [Level.TRANSACTION])).getAddress(),
+      ...(await Promise.all(
+        [0, 1].map(async () =>
+          (await ethers.deployContract('MockPolicyV2', [Level.TRANSACTION])).getAddress(),
+        ),
+      )),
     ]
-    // Every call of the batch hits all 8 levels; every scope is full (1 ALLOW + 2 call-level + 1
-    // transaction-level policy). Per call: 32 matches, 2 call-level runs of 8 ids each; then 1
-    // transaction-level run of 8 deduplicated ids.
+    // Every call of the batch hits all 8 levels; every scope is full (1 ALLOW + 3 call-level + 2
+    // transaction-level policies, D-26). Per call: 48 matches, 3 call-level runs of 8 ids each;
+    // then 2 transaction-level runs of 8 deduplicated ids.
     const scopesFor = (actor: string, t: string): ScopeData[] => [
       scope(actor, CallMatch.ANY),
       scope(actor, CallMatch.TO, t),
@@ -113,12 +117,12 @@ describe('V2 engine: gas', () => {
     ]
     const fill = (s: ScopeData): Change[] => [allow(s), ...policies.map((p) => policy(s, p))]
     const g = await measure(
-      'worst case at caps: 8 calls × 32 matches',
+      'worst case at caps: 8 calls × 48 matches',
       () => [],
       8,
       ({ targetAddr, module }) =>
         [ANY, OWNERS, module].flatMap((actor) => scopesFor(actor, targetAddr)).flatMap(fill),
     )
-    expect(Number(g.module - baseline.module)).to.be.lessThan(1_500_000)
+    expect(Number(g.module - baseline.module)).to.be.lessThan(2_000_000)
   })
 })

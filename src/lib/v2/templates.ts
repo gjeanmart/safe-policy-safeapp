@@ -271,14 +271,30 @@ export type QuorumParams = {
   tiers: readonly QuorumTier[]
 }
 
+/**
+ * Owner-side restrictions (Co-signer, Safenet, Quorum) at `(Owners, *)` do not reach the
+ * configuration path: they must also sit at its exact scopes (SPEC §5.1, §14 D-19), or two owners
+ * request a root that detaches them, wait the delay and apply. `invalidateRoot` stays free: it is
+ * how the honest owners kill a malicious request.
+ */
+export const onConfiguration = (deployment: V2Deployment): Scope[] =>
+  [SELECTORS.requestConfiguration, SELECTORS.applyConfiguration].map((selector) =>
+    exact(OWNERS, deployment.engine, selector),
+  )
+
 const quorumLargeTransfers: Template<QuorumParams> = {
   id: 'quorum-large-transfers',
   title: 'Quorum on large transfers',
   summary:
-    'Owner transactions moving more than a tier amount (summed over a batch, priced like the transfer budget) need more owner signatures than the threshold.',
+    'Owner transactions moving more than a tier amount (summed over a batch, priced like the transfer budget) need more owner signatures than the threshold; configuration changes need the base quorum too.',
   source: 'zkSync / InfiniFi approval matrix (Notion)',
   build: (deployment, { required, tiers }) => ({
-    changes: [policyChange(deployment, anyCall(OWNERS), { policy: 'quorum', settings: { required, tiers } })],
+    changes: [
+      policyChange(deployment, anyCall(OWNERS), { policy: 'quorum', settings: { required, tiers } }),
+      ...onConfiguration(deployment).map((scope) =>
+        policyChange(deployment, scope, { policy: 'quorum', settings: { required, tiers: [] } }),
+      ),
+    ],
     roles: [],
   }),
 }

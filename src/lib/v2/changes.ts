@@ -159,7 +159,7 @@ export const mergeRole = (draft: readonly RoleChange[], change: RoleChange): Rol
   change,
 ]
 
-/** DETACHes first (they free slots for the SETs under the 4-per-scope cap), order otherwise kept. */
+/** DETACHes first (they free slots for the SETs under the per-scope cap, `MAX_ATTACHMENTS_PER_SCOPE`), order otherwise kept. */
 export const sortForApply = (changes: readonly AttachmentChange[]): AttachmentChange[] => [
   ...changes.filter((c) => c.changeType === ChangeType.DETACH),
   ...changes.filter((c) => c.changeType === ChangeType.SET),
@@ -240,7 +240,7 @@ export type ChangeProblem = {
 
 /**
  * Problems that would make `applyConfiguration` (or `configureImmediately`) revert, checked
- * locally: scope normalization, op mask, built-in shape, DELEGATECALL grant level, 4 attachments
+ * locally: scope normalization, op mask, built-in shape, DELEGATECALL grant level, 6 attachments
  * per scope, DETACH of something not attached, `DELAY ≥` timelock delay at ANY / OWNERS, settings,
  * role caps. Unknown policy contracts are only checked for shape (the engine checks ERC-165).
  */
@@ -439,7 +439,9 @@ export const safeCalls = {
  * either guard is set), then the fallback handler (ERC-1271 only accepts on-chain approvals), the
  * module guard, and the transaction guard last (after `setGuard` every further owner transaction
  * is checked, so `setModuleGuard` would need the owners' Allow and wait their Timelock). As one
- * MultiSend batch the guard checks the batch once, before any of it runs.
+ * MultiSend batch the guard checks the batch once, before any of it runs. `configureImmediately`
+ * only takes an empty configuration (SPEC §14 D-25): a Safe with leftovers changes them through
+ * the delayed path first.
  */
 export const installCalls = (safe: Address, deployment: V2Deployment, set: ChangeSet): OwnerCall[] => [
   engineCalls.configureImmediately(deployment.engine, set),
@@ -584,8 +586,15 @@ export function describeChange(
       if (detach) return `Removes ${policyLabel()} from ${who}, ${what}`
       if (!attached) return `Attaches ${policyLabel()} to ${who}, ${what}`
       // LimitPolicy versions its budgets on every configure (review F10).
-      return `Re-configures ${policyLabel()} for ${who}, ${what}${name === 'limit' ? ' (resets the budget: spent goes back to 0)' : ''}`
+      return `Re-configures ${policyLabel()} for ${who}, ${what}${RECONFIGURE_NOTE[name ?? ''] ?? ''}`
   }
+}
+
+/** What re-configuring an attached policy resets (LimitPolicy versions its budgets, review F10). */
+const RECONFIGURE_NOTE: Record<string, string> = {
+  limit: ' (resets the budget: spent goes back to 0)',
+  // TimelockPolicy counts the delay from the latest configuration (SPEC §14 D-20).
+  timelock: ' (calls already scheduled wait the full delay again, from the change)',
 }
 
 export const describeRoleChange = (change: RoleChange, ctx: LabelContext = {}): string =>

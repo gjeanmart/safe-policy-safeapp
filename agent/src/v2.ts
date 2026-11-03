@@ -53,6 +53,7 @@ import {
   readPolicySettings,
   readRoles,
   readSchedule,
+  readTimelockConfiguredAt,
   revertDataOf,
   runPreview,
   safenetModuleTxDigest,
@@ -654,7 +655,10 @@ export async function timelockFor(
   config: Config,
   ctx: V2Context,
   tx: ModuleTx,
-): Promise<{ delay: bigint; window: bigint; clearOnFreeze: boolean; cancellers: Address[] } | undefined> {
+): Promise<
+  | { delay: bigint; window: bigint; clearOnFreeze: boolean; cancellers: Address[]; configuredAt: bigint }
+  | undefined
+> {
   const timelock = ctx.deployment.policies.timelock
   if (isAddressEqual(timelock, zeroAddress)) return undefined
   const matches = await readMatchingAttachments(client(), ctx.engine, config.safe, config.role, tx, timelock)
@@ -666,18 +670,23 @@ export async function timelockFor(
     ),
   ]
   if (!ids.length) return undefined
-  const settings = await Promise.all(
-    ids.map(async (id) => {
-      const s = await readPolicySettings(client(), ctx.deployment, config.safe, 'timelock', id)
-      return s.settings as TimelockSettings
-    }),
-  )
+  const [settings, configuredAt] = await Promise.all([
+    Promise.all(
+      ids.map(async (id) => {
+        const s = await readPolicySettings(client(), ctx.deployment, config.safe, 'timelock', id)
+        return s.settings as TimelockSettings
+      }),
+    ),
+    // The delay runs from the latest (re)configuration when it is later than the schedule (D-20).
+    readTimelockConfiguredAt(client(), ctx.deployment, config.safe, ids),
+  ])
   const windows = settings.map((s) => s.window).filter((w) => w > 0)
   return {
     delay: BigInt(Math.max(...settings.map((s) => s.delay))),
     window: BigInt(windows.length ? Math.min(...windows) : 0),
     clearOnFreeze: settings.some((s) => s.clearOnFreeze),
     cancellers: [...new Set(settings.flatMap((s) => s.cancellers.map((c) => getAddress(c))))],
+    configuredAt,
   }
 }
 

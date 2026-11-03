@@ -16,6 +16,7 @@ import {
   TIMING,
   allow,
   attachmentId,
+  configureLater,
   deny,
   deployEngine,
   deploySafe,
@@ -197,6 +198,32 @@ describe('V2 engine: configuration', () => {
       }
     })
 
+    it('only takes an empty configuration: ConfigurationNotEmpty once an attachment or a role exists (D-25)', async () => {
+      for (const first of ['attachment', 'role'] as const) {
+        const f = await fresh()
+        await f.engine
+          .connect(f.asSafe)
+          .configureImmediately(
+            first === 'attachment' ? [allow(scope(OWNERS))] : [],
+            first === 'role' ? [{ role: 1, account: f.t, enabled: true }] : [],
+          )
+        // Additive changes on top (a module's injected Allow, an earlier install's leftovers) are refused.
+        await expectRevert(
+          f.engine.connect(f.asSafe).configureImmediately([allow(scope(f.t))], []),
+          f.engine,
+          'ConfigurationNotEmpty',
+        )
+        // The delayed path still changes it.
+        await configureLater(f.engine, f.asSafe, [allow(scope(f.t))])
+        expect((await f.engine.getAttachments(f.address)).length).to.equal(first === 'attachment' ? 2 : 1)
+      }
+      // Emptied again, it is immediate again.
+      const f = await fresh()
+      await f.engine.connect(f.asSafe).configureImmediately([allow(scope(OWNERS))], [])
+      await configureLater(f.engine, f.asSafe, [detach(scope(OWNERS), Kind.ALLOW)])
+      await f.engine.connect(f.asSafe).configureImmediately([allow(scope(f.t))], [])
+    })
+
     it('works for a caller that is not a Safe (no getStorageAt)', async () => {
       const { engine } = await deployEngine()
       const [, eoa] = await ethers.getSigners()
@@ -312,30 +339,30 @@ describe('V2 engine: configuration', () => {
         .connect(f.asSafe)
         .configureImmediately([policy(scope(OWNERS), f.cpA, 0, 0, TIMING.delay)], [])
       // Another actor's timelock is not bounded by DELAY.
-      await f.engine.connect(f.asSafe).configureImmediately([policy(scope(f.t), f.cpA, 0, 0, over * 10n)], [])
+      await configureLater(f.engine, f.asSafe, [policy(scope(f.t), f.cpA, 0, 0, over * 10n)])
     })
 
-    it('TooManyAttachments: 4 per scope', async () => {
+    it('TooManyAttachments: 6 per scope (D-26)', async () => {
       const f = await fresh()
       const s = scope(ANY)
       const policies = await Promise.all(
-        Array.from({ length: 3 }, async () =>
+        Array.from({ length: 5 }, async () =>
           (await ethers.deployContract('MockPolicyV2', [Level.CALL])).getAddress(),
         ),
       )
-      const changes = [allow(s), deny(s), ...policies.slice(0, 2).map((p) => policy(s, p))]
+      const changes = [allow(s), deny(s), ...policies.slice(0, 4).map((p) => policy(s, p))]
       await f.engine.connect(f.asSafe).configureImmediately(changes, [])
       await expectRevert(
-        f.engine.connect(f.asSafe).configureImmediately([policy(s, policies[2])], []),
+        configureLater(f.engine, f.asSafe, [policy(s, policies[4])]),
         f.engine,
         'TooManyAttachments',
         [scopeKey(s)],
       )
       // An update of an existing attachment does not count.
-      await f.engine.connect(f.asSafe).configureImmediately([policy(s, policies[0], Behaviour.REVERT, 3)], [])
+      await configureLater(f.engine, f.asSafe, [policy(s, policies[0], Behaviour.REVERT, 3)])
       const [, view] = await f.engine.getAttachment(f.address, attachmentId(s, Kind.POLICY, policies[0]))
       expect(view.opMask).to.equal(3n)
-      expect((await f.engine.getScopeAttachments(f.address, scopeKey(s))).length).to.equal(4)
+      expect((await f.engine.getScopeAttachments(f.address, scopeKey(s))).length).to.equal(6)
     })
 
     it('detach: NotAttached, swap-and-pop, scope list, no policy call', async () => {
@@ -353,7 +380,7 @@ describe('V2 engine: configuration', () => {
         .configureImmediately([allow(s), deny(s), policy(s, f.cpA), allow(s2)], [])
       let [keys] = await f.engine.getScopes(f.address)
       expect([...keys]).to.deep.equal([scopeKey(s), scopeKey(s2)])
-      const tx = await f.engine.connect(f.asSafe).configureImmediately([detach(s, Kind.ALLOW)], [])
+      const tx = await configureLater(f.engine, f.asSafe, [detach(s, Kind.ALLOW)])
       await expectEvent(tx, f.engine, 'Detached', [f.address, attachmentId(s, Kind.ALLOW), scopeKey(s)])
       const left = await f.engine.getScopeAttachments(f.address, scopeKey(s))
       expect(left.map((v) => v.attachmentId)).to.deep.equal([
@@ -361,9 +388,7 @@ describe('V2 engine: configuration', () => {
         attachmentId(s, Kind.DENY),
       ])
       // The moved attachment's position was updated: detaching it works.
-      await f.engine
-        .connect(f.asSafe)
-        .configureImmediately([detach(s, Kind.POLICY, f.cpA), detach(s, Kind.DENY)], [])
+      await configureLater(f.engine, f.asSafe, [detach(s, Kind.POLICY, f.cpA), detach(s, Kind.DENY)])
       ;[keys] = await f.engine.getScopes(f.address)
       expect([...keys]).to.deep.equal([scopeKey(s2)])
       const [exists] = await f.engine.getAttachment(f.address, attachmentId(s, Kind.DENY))
@@ -381,34 +406,30 @@ describe('V2 engine: configuration', () => {
       const add = (i: number, role = 0) => ({ role, account: acc(i), enabled: true })
       const tx = await f.engine.connect(f.asSafe).configureImmediately([], [add(0), add(0)])
       expect((await eventsOf(tx, f.engine, 'RoleSet')).length).to.equal(1)
-      await f.engine.connect(f.asSafe).configureImmediately(
+      await configureLater(
+        f.engine,
+        f.asSafe,
         [],
         [1, 2, 3, 4, 5, 6, 7].map((i) => add(i)),
       )
       await expectRevert(
-        f.engine.connect(f.asSafe).configureImmediately([], [add(8)]),
+        configureLater(f.engine, f.asSafe, [], [add(8)]),
         f.engine,
         'TooManyRoleMembers',
         [0],
       )
-      await f.engine.connect(f.asSafe).configureImmediately([], [add(8, 1)]) // lifters are separate
-      await f.engine
-        .connect(f.asSafe)
-        .configureImmediately([], [{ role: 0, account: acc(3), enabled: false }])
+      await configureLater(f.engine, f.asSafe, [], [add(8, 1)]) // lifters are separate
+      await configureLater(f.engine, f.asSafe, [], [{ role: 0, account: acc(3), enabled: false }])
       const members = await f.engine.getRoleMembers(f.address, 0)
       expect(members.length).to.equal(7)
       expect(members.map((m) => m.toLowerCase())).to.not.include(acc(3))
       expect(await f.engine.isGuardian(f.address, acc(3))).to.equal(false)
       expect(await f.engine.isGuardian(f.address, acc(7))).to.equal(true)
       expect(await f.engine.isLifter(f.address, acc(8))).to.equal(true)
-      const tx2 = await f.engine
-        .connect(f.asSafe)
-        .configureImmediately([], [{ role: 0, account: acc(3), enabled: false }])
+      const tx2 = await configureLater(f.engine, f.asSafe, [], [{ role: 0, account: acc(3), enabled: false }])
       expect((await eventsOf(tx2, f.engine, 'RoleSet')).length).to.equal(0)
       await expectRevert(
-        f.engine
-          .connect(f.asSafe)
-          .configureImmediately([], [{ role: 0, account: ZeroAddress, enabled: true }]),
+        configureLater(f.engine, f.asSafe, [], [{ role: 0, account: ZeroAddress, enabled: true }]),
         f.engine,
         'InvalidActor',
         [ZeroAddress],

@@ -258,6 +258,9 @@ export function DraftPanel({
     : []
   const unconfirmed = findings.filter((f) => f.severity === 'block' && !confirmed.has(findingKey(f)))
   const empty = draft.changes.length === 0 && draft.roles.length === 0
+  // `configureImmediately` refuses a Safe that already has attachments or roles (D-25).
+  const leftover =
+    model.attachments.length > 0 || model.roles.guardians.length > 0 || model.roles.lifters.length > 0
   const blocked = empty || problems.length > 0 || unconfirmed.length > 0
   const clear = () => setDraft(emptyChangeSet())
   const remove = (i: number) => setDraft({ ...draft, changes: draft.changes.filter((_, j) => j !== i) })
@@ -326,8 +329,17 @@ export function DraftPanel({
         <Notice tone="bad">The engine would refuse this draft: fix the changes marked in red.</Notice>
       )}
 
+      {!v2Installed && leftover && (
+        <Notice tone="warn">
+          This Safe already has a configuration on this engine (from an earlier install, or added by a module
+          before the module guard was set). Installing configures only an empty Safe (SPEC §14 D-25), so
+          change it through the delay first: request this draft, wait the delay, apply. Then set the handler
+          and the guards.
+        </Notice>
+      )}
+
       {info &&
-        (v2Installed ? (
+        (v2Installed || leftover ? (
           <ConfigureActions
             deployment={deployment}
             info={info}
