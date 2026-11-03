@@ -36,7 +36,7 @@ import {
   policyChange,
 } from '../../lib/v2'
 import { parseSelectorInput } from '../../lib/validation'
-import { rolesStore } from '../../store'
+import { canAct, rolesStore } from '../../store'
 import { AddressShortcuts } from '../AddressShortcuts'
 import { InfoTip } from '../Tooltip'
 import { Card, Field, Notice } from '../ui'
@@ -322,7 +322,7 @@ function ConditionsFields({
 /** Who the scope is for: Everyone, Owners, a module, a local role or any address. */
 function useActorOptions() {
   const { state } = useSandbox()
-  const roles = rolesStore.use()
+  const roles = rolesStore.use().filter(canAct)
   const options: { value: string; label: string }[] = [
     { value: ANY, label: 'Everyone (every actor, owners included)' },
     { value: OWNERS, label: 'Owners (multisig path)' },

@@ -7,7 +7,7 @@ import { Operation } from '../../lib/configurations'
 import type { Step } from '../../lib/runner'
 import { isModuleEnabled } from '../../lib/safe'
 import { fieldError, parseAddressInput, parseAmountInput, parseHexInput } from '../../lib/validation'
-import { type Role, rolesStore } from '../../store'
+import { type Role, canAct, rolesStore } from '../../store'
 import { Card, Field, Notice } from '../ui'
 import { ActivityLog } from './ActivityLog'
 import { CowSwap } from './CowSwap'
@@ -161,7 +161,7 @@ const OWNERS_PATH = 'owners'
 
 export function Playground() {
   const { state, v2Installed } = useSandbox()
-  const roles = rolesStore.use()
+  const roles = rolesStore.use().filter(canAct)
   const [roleAddress, setRoleAddress] = useState<string>(roles[0]?.address ?? OWNERS_PATH)
   const [action, setAction] = useState<ActionKey>('erc20')
   const owners = roleAddress === OWNERS_PATH

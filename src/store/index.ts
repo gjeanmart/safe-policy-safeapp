@@ -10,18 +10,18 @@ import { persisted } from './persisted'
 export type Encrypted = { iv: string; data: string }
 
 /**
- * A role is a locally generated EOA meant to be enabled as a Safe module. Its key is either
- * encrypted with the vault password (`encryptedKey`) or, before a password is set, stored in
- * plain text (`privateKey`). Never both.
- */
-/**
  * What a role is, which decides how it acts:
  * - `eoa`: a local key signs and sends execTransactionFromModule (default, and roles saved before
  *   kinds existed).
  * - `safe`: another Safe is the module; it acts through its own transactions (nested call).
  * - `contract`: any other contract; the app can only simulate its calls.
+ * - `relayer`: a local key that only pays gas to send what others signed (schedule, execute,
+ *   cancel). Never a module nor a signer, so it gains no power from the key being in a browser.
+ *
+ * A local key is either encrypted with the vault password (`encryptedKey`) or, before a password
+ * is set, stored in plain text (`privateKey`). Never both.
  */
-export type RoleKind = 'eoa' | 'safe' | 'contract'
+export type RoleKind = 'eoa' | 'safe' | 'contract' | 'relayer'
 
 export type Role = {
   kind?: RoleKind
@@ -33,6 +33,12 @@ export type Role = {
 }
 
 export const roleKind = (role: Role): RoleKind => role.kind ?? 'eoa'
+
+/** A key held in this browser that can send transactions (an EOA role or a relayer). */
+export const hasLocalKey = (role: Role) => roleKind(role) === 'eoa' || roleKind(role) === 'relayer'
+
+/** Roles that can be an actor (module) or a signer: everything but relayers. */
+export const canAct = (role: Role) => roleKind(role) !== 'relayer'
 
 export const rolesStore = persisted<Role[]>('roles', [])
 
@@ -127,3 +133,46 @@ export type V2OwnerTx = {
 }
 
 export const v2OwnerTxStore = persisted<Record<string, V2OwnerTx>>('v2-owner-txs', {})
+
+/**
+ * Owner transactions this app proposed in Safe{Wallet} (or that were added by hash), per Safe
+ * (lowercase address): the Queue follows each one from signatures to execution.
+ */
+export type TrackedOwnerTx = {
+  hash: Hex
+  label?: string
+  addedAt: number
+  /** Executed by a relayer from this app (Safe{Wallet} reports it too, when the app runs inside it). */
+  executed?: boolean
+}
+
+export const v2TrackedStore = persisted<Record<string, TrackedOwnerTx[]>>('v2-tracked', {})
+
+export const trackOwnerTx = (safe: Address, hash: Hex, label?: string) =>
+  v2TrackedStore.set((all) => {
+    const key = safe.toLowerCase()
+    const list = all[key] ?? []
+    if (list.some((t) => t.hash.toLowerCase() === hash.toLowerCase())) return all
+    return { ...all, [key]: [{ hash, label, addedAt: Date.now() }, ...list] }
+  })
+
+export const untrackOwnerTx = (safe: Address, hash: Hex) =>
+  v2TrackedStore.set((all) => {
+    const key = safe.toLowerCase()
+    return { ...all, [key]: (all[key] ?? []).filter((t) => t.hash.toLowerCase() !== hash.toLowerCase()) }
+  })
+
+export const markOwnerTxExecuted = (safe: Address, hash: Hex) =>
+  v2TrackedStore.set((all) => {
+    const key = safe.toLowerCase()
+    const list = all[key] ?? []
+    return {
+      ...all,
+      [key]: list.map((t) => (t.hash.toLowerCase() === hash.toLowerCase() ? { ...t, executed: true } : t)),
+    }
+  })
+
+/** Who relays (pays gas) and whether fully signed tracked transactions are scheduled on sight. */
+export type RelaySettings = { relayer?: Address; autoSchedule: boolean }
+
+export const relayStore = persisted<RelaySettings>('v2-relay', { autoSchedule: false })

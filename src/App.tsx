@@ -4,6 +4,7 @@ import { RolesPanel } from './components/RolesPanel'
 import { Footer } from './components/Footer'
 import { Notes } from './components/Notes'
 import { VaultDialogs } from './components/PasswordDialogs'
+import { AutoScheduler } from './components/v2/AutoScheduler'
 import { VaultLockButton } from './components/VaultLockButton'
 import { SettingsPanel } from './components/SettingsPanel'
 import { Playground } from './components/playground/Playground'
@@ -180,6 +181,7 @@ function Workspace({
 
       <Footer onOpenNotes={() => setTab('notes')} />
       <VaultDialogs />
+      <AutoScheduler />
     </SandboxContext.Provider>
   )
 }

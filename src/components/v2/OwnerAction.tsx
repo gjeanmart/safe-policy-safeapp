@@ -1,8 +1,8 @@
+import { useState } from 'react'
 import { chain, publicClient } from '../../config/client'
-import { EXPLORER } from '../../config/contracts'
 import { useSandbox } from '../../context'
 import { useAsync } from '../../hooks/useAsync'
-import { execOwnerTxAsRole, signHashAsRole } from '../../lib/roleExec'
+import { execTransactionCall, signHashAsRole } from '../../lib/roleExec'
 import {
   OWNERS,
   type OwnerCall,
@@ -12,16 +12,18 @@ import {
   safeTxHash,
   sortOwnerSignatures,
 } from '../../lib/v2'
-import { logActivity } from '../../store'
+import { trackOwnerTx, v2OwnerTxStore } from '../../store'
 import { ProposeButton } from '../ProposeButton'
 import { AsyncButton, Badge, Notice } from '../ui'
-import { ScheduleOwnerTx, ScheduleSteps, useLocalOwners } from './Queue'
+import { OwnerTxTimeline } from './OwnerTxTimeline'
+import { useLocalOwners } from './Queue'
+import { relay } from './relayer'
 import { toSafeTxs } from './ownerCalls'
 
 /**
- * One owner (multisig) transaction started from this app. It reads what the owners' policies say
- * (a gate preview as Owners) and offers the right route: execute it now, or, under a Timelock, the
- * sign → schedule → wait → execute steps. Without V2 installed nothing checks the multisig path.
+ * One owner (multisig) transaction started from this app: a status line from the owners' gate
+ * preview, then the route. No delay: propose it, or sign and execute it here. Under a Timelock:
+ * the owners sign (in Safe{Wallet} or here) and the Queue schedules and executes it.
  */
 export function OwnerAction({
   call,
@@ -36,6 +38,9 @@ export function OwnerAction({
   const { safe, state, v2, v2Installed, reloadState } = useSandbox()
   const localOwners = useLocalOwners()
   const threshold = state?.threshold ?? 1
+  const signers = localOwners.slice(0, threshold)
+  const canSignHere = signers.length >= threshold
+  const [signedHere, setSignedHere] = useState<string>()
   const key = `${call.to}:${call.value}:${call.data}:${v2Installed}`
   const preview = useAsync(
     async () =>
@@ -48,26 +53,36 @@ export function OwnerAction({
   const outcome = preview.data?.ok ? preview.data.outcome : undefined
   const needsSchedule = !!outcome?.needs.includes('schedule')
   const denied = !!outcome && !outcome.allowed && !needsSchedule
+  const signerNames = signers.map((o) => o.label).join(', ')
 
-  const executeHere = async () => {
+  const sign = async () => {
     if (nonce.data === undefined) throw new Error('Reading the Safe nonce…')
-    const signers = localOwners.slice(0, threshold)
     const tx = safeTransaction(call, nonce.data)
     const hash = safeTxHash(chain.id, safe, tx)
     const sigs = []
     for (const s of signers) sigs.push(await signHashAsRole(s, hash))
-    const sent = await execOwnerTxAsRole(signers[0]!, safe, tx, sortOwnerSignatures(sigs))
-    logActivity({
-      role: signers[0]!.address,
-      mode: 'execute',
-      label: `owners: ${call.description}`,
-      status: 'sent',
-      txHash: sent,
-      link: `${EXPLORER}/tx/${sent}`,
+    return { tx, hash, signatures: sortOwnerSignatures(sigs) }
+  }
+
+  const executeHere = async () => {
+    const { tx, signatures } = await sign()
+    await relay(signers[0]!, {
+      ...execTransactionCall(safe, tx, signatures),
+      description: `owners: ${call.description}`,
     })
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: sent })
-    if (receipt.status !== 'success') throw new Error('Reverted on-chain')
     reloadState()
+    onDone?.()
+  }
+
+  const signForQueue = async () => {
+    if (!v2) return
+    const { tx, hash, signatures } = await sign()
+    v2OwnerTxStore.set((all) => ({
+      ...all,
+      [hash.toLowerCase()]: { safe, engine: v2.deployment.engine, tx, signatures },
+    }))
+    trackOwnerTx(safe, hash, call.description)
+    setSignedHere(`Signed at nonce ${tx.nonce}: it is in the Queue, which schedules and executes it.`)
     onDone?.()
   }
 
@@ -83,61 +98,66 @@ export function OwnerAction({
       {outcome && (
         <div className="row wrap small">
           <Badge tone={outcome.allowed ? 'ok' : needsSchedule ? 'warn' : 'bad'}>
-            {outcome.allowed ? 'allowed now' : needsSchedule ? 'needs a schedule' : 'denied'}
+            {outcome.allowed
+              ? 'no delay'
+              : needsSchedule
+                ? `delayed${delayLabel ? ` ${delayLabel}` : ''}`
+                : 'denied'}
           </Badge>
-          {outcome.deciding?.reasonText && <span>{outcome.deciding.reasonText}</span>}
+          {!outcome.allowed && outcome.deciding?.reasonText && <span>{outcome.deciding.reasonText}</span>}
         </div>
       )}
-      {denied && (
-        <p className="small muted">
-          The owners&apos; rules refuse it, so there is nothing to sign. Change the rules (Setup → V2) first.
-        </p>
-      )}
-      {needsSchedule && v2 ? (
+      {denied && <p className="small muted">The owners&apos; rules refuse it: change them in Setup first.</p>}
+      {needsSchedule && v2 && (
         <>
-          <p className="small">
-            The owners&apos; Timelock delays this transaction{delayLabel ? ` by ${delayLabel}` : ''}. It goes
-            through four steps:
-          </p>
-          <ScheduleSteps delay={delayLabel} />
-          <ScheduleOwnerTx
-            engine={v2}
-            currentNonce={nonce.data}
-            call={call}
-            onScheduled={() => {
-              reloadState()
-              onDone?.()
-            }}
-          />
-          <p className="small muted">Once scheduled, follow it and execute it in Setup → V2 → Queue.</p>
-        </>
-      ) : (
-        !denied && (
+          <OwnerTxTimeline current="sign" delay={delayLabel} />
           <div className="row wrap">
             <ProposeButton
-              label="Propose in Safe{Wallet}"
-              variant={localOwners.length >= threshold ? 'secondary' : 'primary'}
+              label="Propose & sign in Safe{Wallet}"
+              variant="primary"
               preview={false}
               txs={toSafeTxs([call])}
-              info="The signers sign and execute it in the Safe{Wallet} queue."
+              trackAs={call.description}
+              proposedNote="Proposed: sign it in Safe{Wallet}, do not execute."
               onProposed={() => onDone?.()}
             />
-            {localOwners.length >= threshold ? (
-              <AsyncButton variant="primary" onClick={executeHere}>
-                Sign &amp; execute with{' '}
-                {localOwners
-                  .slice(0, threshold)
-                  .map((o) => o.label)
-                  .join(', ')}
+            {canSignHere && (
+              <AsyncButton onClick={signForQueue} title="Signs with local signer keys at the current nonce">
+                Sign here with {signerNames}
               </AsyncButton>
-            ) : (
-              <span className="muted small">
-                To sign here instead: Roles → Make signer on an EOA role ({localOwners.length}/{threshold}{' '}
-                local signer keys).
-              </span>
             )}
           </div>
-        )
+          <p className="small muted">
+            Sign only, do not execute
+            {threshold === 1
+              ? ': in a 1-of-1 Safe, Safe{Wallet} offers to execute right away, which fails under the Timelock'
+              : ''}
+            . It appears in the Queue (Setup), which schedules and executes it.
+          </p>
+          {signedHere && <Notice>{signedHere}</Notice>}
+        </>
+      )}
+      {!needsSchedule && !denied && (
+        <div className="row wrap">
+          <ProposeButton
+            label="Propose in Safe{Wallet}"
+            variant={canSignHere ? 'secondary' : 'primary'}
+            preview={false}
+            txs={toSafeTxs([call])}
+            trackAs={call.description}
+            onProposed={() => onDone?.()}
+          />
+          {canSignHere ? (
+            <AsyncButton variant="primary" onClick={executeHere}>
+              Sign &amp; execute with {signerNames}
+            </AsyncButton>
+          ) : (
+            <span className="muted small">
+              To sign here instead: Roles → Make signer on an EOA role ({localOwners.length}/{threshold} local
+              signer keys).
+            </span>
+          )}
+        </div>
       )}
     </div>
   )

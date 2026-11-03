@@ -19,7 +19,7 @@ import {
   templates,
 } from '../../lib/v2'
 import { parseAddressList } from '../../lib/validation'
-import { rolesStore } from '../../store'
+import { canAct, rolesStore } from '../../store'
 import { AddressShortcuts } from '../AddressShortcuts'
 import { Field, Notice } from '../ui'
 
@@ -225,7 +225,7 @@ const initialValues = (form: TemplateForm): Values =>
 /** Actors offered in the forms: the Safe's modules and the local roles. */
 function useActors() {
   const { state } = useSandbox()
-  const roles = rolesStore.use()
+  const roles = rolesStore.use().filter(canAct)
   const actors: { value: string; label: string }[] = [{ value: OWNERS, label: 'Owners (multisig)' }]
   for (const m of state?.modules ?? [])
     actors.push({ value: m, label: roles.find((r) => r.address === m)?.label ?? m })

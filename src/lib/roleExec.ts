@@ -55,7 +55,7 @@ export type Executor =
 
 export async function resolveExecutor(role: Role): Promise<Executor> {
   const kind = roleKind(role)
-  if (kind === 'eoa') return { kind: 'eoa' }
+  if (kind === 'eoa' || kind === 'relayer') return { kind: 'eoa' }
   if (kind === 'contract') {
     return {
       kind: 'manual',
@@ -222,25 +222,39 @@ export async function signHashAsRole(role: Role, hash: Hex): Promise<{ signer: A
 }
 
 /**
- * Executes an owner transaction (`execTransaction`) relayed by a local EOA role, with signatures
- * collected elsewhere. V2 requires `safeTxGas == 0` and `gasPrice == 0`.
+ * An owner transaction (`execTransaction`) with signatures collected elsewhere, as a plain call any
+ * local key can relay. V2 refuses `safeTxGas` or `gasPrice` other than 0 before any policy runs.
  */
-export async function execOwnerTxAsRole(
-  relayer: Role,
+export const execTransactionCall = (
   safe: Address,
-  tx: { to: Address; value: bigint; data: Hex; operation: number },
+  tx: {
+    to: Address
+    value: bigint
+    data: Hex
+    operation: number
+    safeTxGas: bigint
+    baseGas: bigint
+    gasPrice: bigint
+    gasToken: Address
+    refundReceiver: Address
+  },
   signatures: Hex,
-): Promise<Hash> {
-  if (roleKind(relayer) !== 'eoa') throw new Error(`${relayer.label} cannot relay: pick a local key`)
-  const account = privateKeyToAccount(
-    await revealKey(relayer, `Enter your password to send as ${relayer.label}.`),
-  )
-  const wallet = createWalletClient({ account, chain, transport: http(rpcUrl()) })
-  return wallet.writeContract({
-    account,
-    address: safe,
-    abi: [...safeAbi, ...policyErrorsAbi],
+): DirectCall => ({
+  to: safe,
+  data: encodeFunctionData({
+    abi: safeAbi,
     functionName: 'execTransaction',
-    args: [tx.to, tx.value, tx.data, tx.operation, 0n, 0n, 0n, zeroAddress, zeroAddress, signatures],
-  })
-}
+    args: [
+      tx.to,
+      tx.value,
+      tx.data,
+      tx.operation,
+      tx.safeTxGas,
+      tx.baseGas,
+      tx.gasPrice,
+      tx.gasToken,
+      tx.refundReceiver,
+      signatures,
+    ],
+  }),
+})

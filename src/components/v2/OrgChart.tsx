@@ -26,7 +26,7 @@ import {
   readLimitRemaining,
   settingsLabel,
 } from '../../lib/v2'
-import { rolesStore } from '../../store'
+import { canAct, rolesStore } from '../../store'
 import { InfoTip, Tooltip } from '../Tooltip'
 import { AddressView, Badge, Card } from '../ui'
 import { Chip, type ChipStatus, type ChipTone } from './Chip'
@@ -283,7 +283,7 @@ export function OrgChart({
   onDetach?: (attachments: Attachment[]) => void
 }) {
   const { safe, state, v2Installed } = useSandbox()
-  const roles = rolesStore.use()
+  const roles = rolesStore.use().filter(canAct)
   const modules = state?.modules ?? []
   const model = buildModel({ safe, engine: deployment.engine, attachments: items, modules, now: 0n })
   const statusOf = (a: Attachment) => (a as ChartAttachment).status

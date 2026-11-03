@@ -1066,6 +1066,37 @@ select:focus-visible {
   text-decoration: line-through;
 }
 
+.inline-details {
+  display: inline-block;
+}
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.timeline li {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.timeline li.done::before {
+  content: '✓ ';
+}
+
+.timeline li.current {
+  border-color: currentColor;
+  color: inherit;
+  font-weight: 600;
+}
+
 .lint-item summary {
   cursor: pointer;
 }
