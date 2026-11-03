@@ -5,7 +5,6 @@ import { useAsync } from '../../hooks/useAsync'
 import { describeError } from '../../lib/errors'
 import {
   type Change,
-  type OwnerCall,
   changeAttachmentId,
   detachChange,
   lint,
@@ -28,7 +27,6 @@ function V2Screens() {
   const view = useV2()
   const [draft, setDraft] = useV2Draft()
   const [preview, setPreview] = useState<Change[]>()
-  const [prefill, setPrefill] = useState<OwnerCall>()
   const { deployment } = view.engine
   const handler = useAsync(() => readFallbackHandler(safe), `${safe}:handler`, 30_000)
 
@@ -59,8 +57,9 @@ function V2Screens() {
       <Erc1271Notice handler={handler.data} installed={v2Installed} />
       {!v2Installed && (
         <Notice>
-          V2 is not installed on this Safe yet. Build the configuration (start with the Owners template), then
-          propose the install batch: configure, setModuleGuard, setGuard.
+          V2 is not installed on this Safe yet, so nothing checks the owners or the modules. Build the rules
+          below (start with the template Delay + freeze on the Owners), then propose the install batch from
+          the draft.
         </Notice>
       )}
       <OrgChart
@@ -84,7 +83,6 @@ function V2Screens() {
         findings={findings}
         ctx={view.ctx}
         handler={handler.data}
-        onSchedule={setPrefill}
       />
       {v2Installed && (
         <Queue
@@ -92,7 +90,6 @@ function V2Screens() {
           model={model}
           ctx={view.ctx}
           freezeLimits={view.freezeLimits}
-          prefill={prefill}
           onChange={view.reload}
         />
       )}

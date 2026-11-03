@@ -304,7 +304,7 @@ export function lint(input: LintInput): LintFinding[] {
     add(
       'canceller-covers-owners',
       'warn',
-      `${t.cancellers.map(who).join(', ')} can cancel every owners' transaction (all but engine.configure) the Timelock at ${at(a)} delays, at any time and without limit. Prefer cancellers on narrower scopes, e.g. (Owners, USDC.*).`,
+      `${t.cancellers.map(who).join(', ')} can veto (cancel) any transaction the Timelock at ${at(a)} delays, as often as they like (configuration changes excepted). If that is more power than intended, put the canceller on a Timelock with a narrower scope, e.g. only USDC transfers.`,
       [a],
     )
   }
@@ -324,7 +324,7 @@ export function lint(input: LintInput): LintFinding[] {
       add(
         'delay-below-cooldown',
         reachesOwners(a) ? 'block' : 'warn',
-        `The delay at ${at(a)} (${durationLabel(t.delay)}) is shorter than the guardians' cooldown C (${durationLabel(cooldown)}): after a freeze ends, a transaction scheduled at the start of the cooldown is executed before any guardian can freeze again. Use a delay of at least C.`,
+        `After a freeze ends, guardians must wait ${durationLabel(cooldown)} before they can freeze again. With a delay of only ${durationLabel(t.delay)} at ${at(a)}, a transaction scheduled when the freeze ends executes inside that gap, before anyone can stop it. Use a delay of at least ${durationLabel(cooldown)} (fine to confirm on a test Safe).`,
         [a],
       )
     }

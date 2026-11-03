@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { type Hex, parseEther } from 'viem'
+import { type Address, type Hex, isAddressEqual, parseEther } from 'viem'
 import { useSandbox } from '../context'
 import { useAsync } from '../hooks/useAsync'
 import { useBalances } from '../hooks/useBalances'
@@ -51,6 +51,7 @@ export function RolesPanel() {
   return (
     <>
       <SafeStatus />
+      <SignersCard roles={roles} />
 
       <Card
         title={
@@ -93,7 +94,7 @@ export function RolesPanel() {
                   <th>Role</th>
                   <th>Gas balance</th>
                   <th>Module</th>
-                  <th colSpan={4}>Actions</th>
+                  <th colSpan={5}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -124,6 +125,7 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
 
   const kind = roleKind(role)
   const executor = useAsync(() => resolveExecutor(role), `${role.address}:${kind}`)
+  const isSigner = !!state?.owners.some((o) => isAddressEqual(o, role.address))
 
   const toggleKey = async () => {
     setRevealError(undefined)
@@ -174,6 +176,12 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
         ) : (
           <Badge>not enabled</Badge>
         )}
+        {isSigner && (
+          <>
+            {' '}
+            <Badge tone="ok">signer</Badge>
+          </>
+        )}
       </td>
       {/* One cell per action so buttons line up across rows. */}
       <td>
@@ -204,6 +212,17 @@ function RoleRow({ role, eth, enabled }: { role: Role; eth?: bigint; enabled?: b
             variant="secondary"
             preview={false}
             txs={[safeTxs.sendEth(role.address, TOP_UP)]}
+          />
+        )}
+      </td>
+      <td>
+        {kind === 'eoa' && state && !isSigner && (
+          <ProposeButton
+            label="Make signer"
+            title={`Propose addOwnerWithThreshold: ${role.label} becomes a signer of this Safe (threshold stays ${state.threshold}), so this app can sign owner transactions with its key`}
+            variant="secondary"
+            preview={false}
+            txs={[safeTxs.addOwner(state, role.address)]}
           />
         )}
       </td>
@@ -245,5 +264,65 @@ function ExecutorNote({ executor }: { executor: Executor }) {
           ? 'simulate here, execute from elsewhere'
           : null}
     </div>
+  )
+}
+
+/** Display name of a signer: its local role, else "Signer N". */
+export function signerName(owner: Address, index: number, roles: readonly Role[]): string {
+  return roles.find((r) => isAddressEqual(r.address, owner))?.label ?? `Signer ${index + 1}`
+}
+
+/**
+ * The Safe's signers (owners): the multisig path. A signer whose key is a local role can sign owner
+ * transactions in this app (Act as a role → Owners, the Queue); the others sign in Safe{Wallet}.
+ */
+function SignersCard({ roles }: { roles: readonly Role[] }) {
+  const { state } = useSandbox()
+  if (!state) return null
+  const local = state.owners.filter((o) =>
+    roles.some((r) => roleKind(r) === 'eoa' && isAddressEqual(r.address, o)),
+  ).length
+  return (
+    <Card
+      title={
+        <span className="row">
+          Signers
+          <InfoTip>
+            The owners of this Safe: together they form the multisig path ({state.threshold} signature
+            {state.threshold === 1 ? '' : 's'} needed). A signer whose key is a local role signs here; the
+            others sign in Safe{'{Wallet}'}. To test the owner path from this app, add an EOA role and click
+            Make signer.
+          </InfoTip>
+        </span>
+      }
+      actions={
+        <span className="muted small">
+          {state.threshold}-of-{state.owners.length} · {local} local key{local === 1 ? '' : 's'}
+        </span>
+      }
+    >
+      <ul className="plain stack">
+        {state.owners.map((owner, i) => {
+          const role = roles.find((r) => roleKind(r) === 'eoa' && isAddressEqual(r.address, owner))
+          return (
+            <li key={owner} className="row wrap">
+              <strong>{signerName(owner, i, roles)}</strong>
+              <AddressView address={owner} name="" full />
+              {role ? (
+                <Badge tone="ok">local key: signs here</Badge>
+              ) : (
+                <Badge>signs in Safe{'{Wallet}'}</Badge>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+      {local < state.threshold && (
+        <p className="muted small">
+          This app holds {local} of the {state.threshold} signature{state.threshold === 1 ? '' : 's'} needed:
+          owner transactions go through Safe{'{Wallet}'}. Make signer on an EOA role lets the app sign too.
+        </p>
+      )}
+    </Card>
   )
 }

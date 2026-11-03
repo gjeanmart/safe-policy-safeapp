@@ -2,7 +2,7 @@ import { type Address, isAddressEqual } from 'viem'
 import type { Attachment } from './attachments'
 import { type Change, allowChange, policyChange } from './changes'
 import { SELECTORS, type V2Deployment } from './policies'
-import { OWNERS, anyCall, onFunction } from './scopes'
+import { ANY, OWNERS, anyCall, onFunction } from './scopes'
 import {
   DAY,
   HOUR,
@@ -74,6 +74,8 @@ export const killSwitch = (
 // ---------------------------------------------------------------------------------------------
 
 export type OwnersParams = {
+  /** Who gets the delayed Allow; default the owners. */
+  actor?: Address
   /** T, seconds. Default 24h. */
   delay?: number
   guardians: readonly Address[]
@@ -85,13 +87,27 @@ export type OwnersParams = {
 
 const owners: Template<OwnersParams> = {
   id: 'owners',
-  title: 'Owners: Allow + Timelock with guardians',
+  title: 'Delay + freeze: any call, after a delay, guardians can freeze',
   summary:
-    "The owners can do anything, after a delay T; configuration (engine.configure) waits too. The guardians can freeze the owners' queue at once.",
-  build: (deployment, { delay = DAY, guardians, lifters = [], cancellers = [] }) => [
-    allowChange(anyCall(OWNERS)),
-    timelock(deployment, OWNERS, { delay, guardians, lifters, cancellers }),
+    'The actor may call anything, but every call waits the delay T after it is scheduled. Guardians can freeze the actor at once (for at most F). On the Owners, configuration changes (engine.configure) wait too.',
+  build: (deployment, { actor = OWNERS, delay = DAY, guardians, lifters = [], cancellers = [] }) => [
+    allowChange(anyCall(actor)),
+    timelock(deployment, actor, { delay, guardians, lifters, cancellers }),
   ],
+}
+
+export type EveryoneDelayParams = {
+  /** T, seconds. */
+  delay: number
+  cancellers?: readonly Address[]
+}
+
+const everyone: Template<EveryoneDelayParams> = {
+  id: 'everyone',
+  title: 'Delay for everyone: every transaction waits',
+  summary:
+    'A Timelock at (Everyone, any call): every transaction, from the owners or from any module, must be scheduled and waits T. It grants nothing (each actor still needs its Allow) and has no guardians (a freeze targets one actor: add a Delay + freeze on that actor).',
+  build: (deployment, { delay, cancellers = [] }) => [timelock(deployment, ANY, { delay, cancellers })],
 }
 
 export type OpsPaymentsParams = {
@@ -108,9 +124,9 @@ export type OpsPaymentsParams = {
 
 const opsPayments: Template<OpsPaymentsParams> = {
   id: 'ops-payments',
-  title: 'Ops payments: Allow token.transfer + Recipients + Budget',
+  title: 'Payments: one token, listed recipients, a budget per period',
   summary:
-    'An ops key pays listed recipients in one token, within a budget per period; a guardian can stop it.',
+    'The actor (a key, an agent, another Safe…) transfers one token to listed recipients only, within a budget per period. Optional guardians can stop it at once.',
   build: (deployment, { ops, token, recipients, amount, period = BigInt(MONTH), guardians = [] }) => {
     const scope = onFunction(ops, token, SELECTORS.transfer)
     return [
@@ -140,9 +156,9 @@ export type AgentCowParams = {
 
 const agentCow: Template<AgentCowParams> = {
   id: 'agent-cow',
-  title: 'Agent CoW: approve + pre-sign, Budget, Co-signer, kill switch',
+  title: 'CoW swaps: capped approval, pre-sign, budget, co-signer, kill switch',
   summary:
-    'An AI agent approves the CoW vault relayer (capped) and pre-signs orders. The approvals count against a budget; the order itself is opaque (passUnpriced). Every transaction needs a co-signer; a guardian can stop the agent at once.',
+    'The actor approves the CoW vault relayer (capped) and pre-signs orders. The approvals count against a budget; the order itself is opaque (passUnpriced). Every transaction needs a co-signer; a guardian can stop the agent at once.',
   build: (deployment, { agent, budgets, vaultRelayer, settlement, approvers, guardians }) => [
     ...budgets.flatMap((b) => {
       const scope = onFunction(agent, b.token, SELECTORS.approve)
@@ -179,9 +195,9 @@ export type RecoveryParams = {
 
 const recovery: Template<RecoveryParams> = {
   id: 'recovery',
-  title: 'Recovery: Allow swapOwner + Timelock R, no guardian',
+  title: 'Recovery: replace an owner after a long delay R',
   summary:
-    "A recovery module replaces an owner after R. No guardian: a freeze of the owners never stops it. It may lift the owners' freeze. The owners stop a rogue recovery by detaching it (T < R).",
+    "The actor (a recovery module) may replace an owner, after R. No guardian: a freeze of the owners never stops it. It may lift the owners' freeze. The owners stop a rogue recovery by detaching it (T < R).",
   build: (deployment, { recovery, delay = 3 * DAY, configure = false, lifter = true }, context) => {
     const changes: Change[] = [
       // Calls to the Safe (and the engine) need an exact Allow on the module path (F5).
@@ -226,6 +242,6 @@ const committee: Template<CommitteeParams> = {
     opsPayments.build(deployment, { ops: committee, ...rest }, context),
 }
 
-export const templates = { owners, opsPayments, agentCow, recovery, committee }
+export const templates = { owners, everyone, opsPayments, agentCow, recovery, committee }
 
 export type TemplateId = keyof typeof templates

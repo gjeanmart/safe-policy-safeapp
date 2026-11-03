@@ -7,6 +7,7 @@ export const safeAbi = parseAbi([
   'function getModulesPaginated(address start, uint256 pageSize) view returns (address[] array, address next)',
   'function enableModule(address module)',
   'function disableModule(address prevModule, address module)',
+  'function addOwnerWithThreshold(address owner, uint256 _threshold)',
   'function setGuard(address guard)',
   'function setModuleGuard(address moduleGuard)',
   'function execTransactionFromModule(address to, uint256 value, bytes data, uint8 operation) returns (bool success)',

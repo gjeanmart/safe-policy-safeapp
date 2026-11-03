@@ -76,6 +76,17 @@ export const safeTxs = {
     }
   },
 
+  /** Adds `owner` as a signer, keeping the threshold. */
+  addOwner: (state: SafeState, owner: Address): SafeTx => ({
+    to: state.address,
+    data: encodeFunctionData({
+      abi: safeAbi,
+      functionName: 'addOwnerWithThreshold',
+      args: [owner, BigInt(state.threshold)],
+    }),
+    description: `addOwnerWithThreshold(${owner}, ${state.threshold})`,
+  }),
+
   setModuleGuard: (safe: Address, guard: Address): SafeTx => ({
     to: safe,
     data: encodeFunctionData({ abi: safeAbi, functionName: 'setModuleGuard', args: [guard] }),

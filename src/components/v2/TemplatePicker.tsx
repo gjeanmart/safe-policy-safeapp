@@ -7,6 +7,7 @@ import {
   DAY,
   type LabelContext,
   MONTH,
+  OWNERS,
   PERIOD_PRESETS,
   type PolicyName,
   TIMELOCK_PRESETS,
@@ -67,7 +68,7 @@ const payments = (actorLabel: string, amount: string): FieldDef[] => [
   { key: 'recipients', label: 'Recipients', kind: 'addresses' },
   { key: 'amount', label: 'Budget', kind: 'text', initial: amount },
   { key: 'period', label: 'Period', kind: 'period', initial: String(MONTH) },
-  { key: 'guardians', label: 'Guardians (kill switch, optional)', kind: 'addresses' },
+  { key: 'guardians', label: 'Guardians (optional)', kind: 'addresses', info: KILL_SWITCH_INFO },
 ]
 
 const buildPayments =
@@ -90,35 +91,42 @@ const buildPayments =
       : templates.opsPayments.build(d, { ops: actor as Address, ...params }, context)
   }
 
+export const GUARDIANS_INFO =
+  'Can freeze this actor at once: nothing it scheduled executes while frozen. A freeze lasts at most F, then a cooldown C before a new one. Pick people or devices that are not this actor.'
+export const LIFTERS_INFO =
+  'Can end a freeze early, but cannot start one. Typical: the recovery module, so a stuck freeze never blocks recovery.'
+export const CANCELLERS_INFO =
+  "Can cancel a transaction while it waits in the queue (a veto), as often as they like. They cannot cancel the owners' configuration changes. Listed here, they can veto every call this Timelock delays; to veto only some calls (e.g. USDC transfers), add a Timelock on that narrower scope in One rule."
+const KILL_SWITCH_INFO =
+  'Can freeze this actor at once (a kill switch: a Timelock with no delay). Leave empty for no kill switch.'
+
 const FORMS: TemplateForm[] = [
   {
     id: 'owners',
     needs: ['timelock'],
     fields: [
-      { key: 'delay', label: 'Owners timelock (T)', kind: 'delay', initial: String(DAY) },
+      { key: 'actor', label: 'Actor', kind: 'actor', initial: OWNERS },
+      { key: 'delay', label: 'Delay (T)', kind: 'delay', initial: String(DAY) },
       {
         key: 'guardians',
         label: 'Guardians',
         kind: 'addresses',
-        info: 'May freeze the owners for at most MAX_FREEZE (F), then a cooldown C. Never the Safe itself.',
+        info: GUARDIANS_INFO,
       },
-      { key: 'lifters', label: 'Lifters (optional)', kind: 'addresses', info: 'May lift a freeze only.' },
-      {
-        key: 'cancellers',
-        label: 'Cancellers (optional)',
-        kind: 'addresses',
-        info: "E.g. another Safe. A canceller here can cancel every owners' schedule except engine.configure, at any time and without limit: prefer narrower scopes such as (Owners, USDC.*).",
-      },
+      { key: 'lifters', label: 'Lifters (optional)', kind: 'addresses', info: LIFTERS_INFO },
+      { key: 'cancellers', label: 'Cancellers (optional)', kind: 'addresses', info: CANCELLERS_INFO },
     ],
     build: (d, v, context) => {
+      const actor = address(v.actor!, 'the actor')
       const guardians = list(v.guardians!, 'the guardians', true)
       const lifters = list(v.lifters!, 'lifters')
       const cancellers = list(v.cancellers!, 'cancellers')
-      const error = firstError(guardians, lifters, cancellers)
+      const error = firstError(actor, guardians, lifters, cancellers)
       if (error) return error
       return templates.owners.build(
         d,
         {
+          actor: actor as Address,
           delay: Number(v.delay),
           guardians: guardians as Address[],
           lifters: lifters as Address[],
@@ -129,21 +137,34 @@ const FORMS: TemplateForm[] = [
     },
   },
   {
+    id: 'everyone',
+    needs: ['timelock'],
+    fields: [
+      { key: 'delay', label: 'Delay (T)', kind: 'delay', initial: String(DAY) },
+      { key: 'cancellers', label: 'Cancellers (optional)', kind: 'addresses', info: CANCELLERS_INFO },
+    ],
+    build: (d, v, context) => {
+      const cancellers = list(v.cancellers!, 'cancellers')
+      if (isErr(cancellers)) return cancellers.error
+      return templates.everyone.build(d, { delay: Number(v.delay), cancellers }, context)
+    },
+  },
+  {
     id: 'opsPayments',
     needs: ['args', 'limit'],
-    fields: payments('Ops actor', '5000'),
+    fields: payments('Actor', '5000'),
     build: buildPayments('opsPayments'),
   },
   {
     id: 'agentCow',
     needs: ['args', 'limit', 'coSigner', 'timelock'],
     fields: [
-      { key: 'agent', label: 'Agent actor', kind: 'actor' },
+      { key: 'agent', label: 'Actor', kind: 'actor' },
       { key: 'token', label: 'Sell token', kind: 'token', initial: TOKENS.WETH.address },
       { key: 'amount', label: 'Budget (approval cap too)', kind: 'text', initial: '1' },
       { key: 'period', label: 'Period', kind: 'period', initial: String(DAY) },
       { key: 'approvers', label: 'Co-signer(s)', kind: 'addresses' },
-      { key: 'guardians', label: 'Guardians (kill switch)', kind: 'addresses' },
+      { key: 'guardians', label: 'Guardians', kind: 'addresses', info: KILL_SWITCH_INFO },
     ],
     build: (d, v, context) => {
       const agent = address(v.agent!, 'the agent')
@@ -170,7 +191,7 @@ const FORMS: TemplateForm[] = [
     id: 'recovery',
     needs: ['timelock'],
     fields: [
-      { key: 'recovery', label: 'Recovery actor', kind: 'actor' },
+      { key: 'recovery', label: 'Actor (the recovery module)', kind: 'actor' },
       { key: 'delay', label: 'Recovery timelock (R > T)', kind: 'delay', initial: String(3 * DAY) },
       {
         key: 'configure',
@@ -196,12 +217,6 @@ const FORMS: TemplateForm[] = [
       )
     },
   },
-  {
-    id: 'committee',
-    needs: ['args', 'limit'],
-    fields: payments('Committee Safe (a module)', '50000'),
-    build: buildPayments('committee'),
-  },
 ]
 
 const initialValues = (form: TemplateForm): Values =>
@@ -211,7 +226,7 @@ const initialValues = (form: TemplateForm): Values =>
 function useActors() {
   const { state } = useSandbox()
   const roles = rolesStore.use()
-  const actors: { value: string; label: string }[] = []
+  const actors: { value: string; label: string }[] = [{ value: OWNERS, label: 'Owners (multisig)' }]
   for (const m of state?.modules ?? [])
     actors.push({ value: m, label: roles.find((r) => r.address === m)?.label ?? m })
   for (const r of roles)

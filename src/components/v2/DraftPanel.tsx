@@ -12,6 +12,7 @@ import {
   SAFE_HANDLERS,
   type V2Deployment,
   changeAttachmentId,
+  changeNote,
   configureCall,
   configureCoverIds,
   describeChange,
@@ -25,8 +26,9 @@ import { rolesStore } from '../../store'
 import { ConfirmIconButton } from '../ConfirmIconButton'
 import { ProposeButton } from '../ProposeButton'
 import { InfoTip } from '../Tooltip'
-import { Card, CopyButton, Notice } from '../ui'
+import { Card, Notice, Tag } from '../ui'
 import { LintPanel, findingKey } from './LintPanel'
+import { OwnerAction } from './OwnerAction'
 import { toSafeTxs } from './ownerCalls'
 
 /**
@@ -141,54 +143,36 @@ function InstallActions({
   )
 }
 
-/** Once installed: `engine.configure(draft)` as one owner transaction, delayed by the owners' Timelock. */
+/** Once installed: `engine.configure(draft)` as one owner transaction, judged like any other. */
 function ConfigureActions({
-  deployment,
   call,
   ownersDelay,
   blocked,
   onDone,
-  onSchedule,
 }: {
-  deployment: V2Deployment
   call: OwnerCall
   ownersDelay: number
   blocked: boolean
   onDone: () => void
-  onSchedule: (call: OwnerCall) => void
 }) {
   return (
     <div className="stack">
-      {ownersDelay > 0 ? (
-        <Notice>
-          The owners&apos; Timelock covers engine.configure: this change must be <strong>scheduled</strong>{' '}
-          and waits {durationLabel(ownersDelay)} (frozen while a guardian freezes the owners; a configure
-          schedule is never voided by a freeze). Propose it in Safe{'{Wallet}'}, collect the signatures, then
-          schedule it in the queue below; or sign it here with local owner keys. Keep safeTxGas and gasPrice
-          at 0 in Safe{'{Wallet}'} (V2 refuses any other value).
-        </Notice>
-      ) : (
+      <h3>Apply</h3>
+      {ownersDelay === 0 && (
         <Notice tone="warn">
-          No owners&apos; Timelock covers engine.configure: this change applies as soon as the owners execute
-          it.
+          No owners&apos; Timelock covers configuration changes: this one applies as soon as the signers
+          execute it.
         </Notice>
       )}
-      <div className="row wrap">
-        <ProposeButton
-          label="Propose configure"
-          txs={blocked ? [] : toSafeTxs([call])}
-          info="engine.configure(changes): an ordinary owner transaction, alone (never inside a batch), judged by the owners' policies like any other call. It uses the next Safe nonce: an owner schedule waiting at that nonce dies."
-          onProposed={onDone}
+      {blocked ? (
+        <p className="muted small">Fix or confirm the points above to apply the draft.</p>
+      ) : (
+        <OwnerAction
+          call={call}
+          delayLabel={ownersDelay > 0 ? durationLabel(ownersDelay) : undefined}
+          onDone={onDone}
         />
-        {ownersDelay > 0 && (
-          <button type="button" className="btn" disabled={blocked} onClick={() => onSchedule(call)}>
-            Schedule with local owner keys…
-          </button>
-        )}
-        <span className="small muted">
-          to {deployment.engine.slice(0, 10)}… · calldata <CopyButton value={call.data} />
-        </span>
-      </div>
+      )}
     </div>
   )
 }
@@ -205,7 +189,6 @@ export function DraftPanel({
   findings,
   ctx,
   handler,
-  onSchedule,
 }: {
   deployment: V2Deployment
   current: readonly Attachment[]
@@ -215,7 +198,6 @@ export function DraftPanel({
   ctx: LabelContext
   /** The Safe's current fallback handler, once read. */
   handler?: Address
-  onSchedule: (call: OwnerCall) => void
 }) {
   const { safe, v2Installed } = useSandbox()
   const [confirmed, setConfirmed] = useState<ReadonlySet<string>>(new Set())
@@ -238,41 +220,52 @@ export function DraftPanel({
 
   return (
     <Card
-      title={`Draft (${draft.length})`}
+      title={
+        <span className="row">
+          Draft ({draft.length})
+          <InfoTip>
+            The changes you are preparing, applied together in one owner transaction. They run in this order:
+            removals first, then Timelocks on any call before narrower rules, so a delay is always in place
+            before what it protects.
+          </InfoTip>
+        </span>
+      }
       actions={!empty && <ConfirmIconButton title="Clear the draft" onConfirm={clear} />}
     >
       {empty ? (
-        <p className="muted">Add rules from the scope builder, or × a chip to queue a detach.</p>
+        <p className="muted">
+          Empty. Add rules from the scope builder, or × a chip on the chart to remove one.
+        </p>
       ) : (
-        <ol className="stack draft-list">
-          {ordered.map((c, i) => (
-            <li key={`${changeAttachmentId(c)}:${c.detach}`} className="row wrap">
-              <span>
-                {describeChange(
-                  c,
-                  deployment,
-                  ctx,
-                  current.some((a) => a.attachmentId === changeAttachmentId(c)),
-                )}
-              </span>
-              <ConfirmIconButton
-                title="Remove from the draft"
-                onConfirm={() => setDraft(draft.filter((d) => d !== c))}
-              />
-              {problems
-                .filter((p) => p.index === i)
-                .map((p) => (
-                  <span key={p.message} className="error-text">
-                    {p.message}
-                  </span>
-                ))}
-            </li>
-          ))}
+        <ol className="draft-list">
+          {ordered.map((c, i) => {
+            const attached = current.some((a) => a.attachmentId === changeAttachmentId(c))
+            const note = changeNote(c, deployment, attached)
+            return (
+              <li key={`${changeAttachmentId(c)}:${c.detach}`} className="draft-item">
+                <Tag tone={c.detach ? 'bad' : attached ? 'info' : 'ok'} fixed>
+                  {c.detach ? 'remove' : attached ? 'change' : 'add'}
+                </Tag>
+                <span>
+                  {describeChange(c, deployment, ctx, attached, false)}
+                  {note && <span className="draft-note">Note: {note}.</span>}
+                  {problems
+                    .filter((p) => p.index === i)
+                    .map((p) => (
+                      <span key={p.message} className="error-text draft-note">
+                        {p.message}
+                      </span>
+                    ))}
+                </span>
+                <ConfirmIconButton
+                  title="Remove from the draft"
+                  onConfirm={() => setDraft(draft.filter((d) => d !== c))}
+                />
+              </li>
+            )
+          })}
         </ol>
       )}
-      <p className="muted small">
-        Applied in this order: detaches first, Timelocks on any call before narrower ones.
-      </p>
 
       <LintPanel
         findings={findings}
@@ -292,14 +285,14 @@ export function DraftPanel({
       )}
 
       {v2Installed ? (
-        <ConfigureActions
-          deployment={deployment}
-          call={configureCall(deployment.engine, ordered)}
-          ownersDelay={ownersDelay}
-          blocked={blocked}
-          onDone={clear}
-          onSchedule={onSchedule}
-        />
+        !empty && (
+          <ConfigureActions
+            call={configureCall(deployment.engine, ordered)}
+            ownersDelay={ownersDelay}
+            blocked={blocked}
+            onDone={clear}
+          />
+        )
       ) : (
         <InstallActions
           deployment={deployment}

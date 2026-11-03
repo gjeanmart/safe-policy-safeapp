@@ -81,6 +81,8 @@ export function useSafeApp(): SafeAppConnection {
       propose: async (txs) => {
         const { safeTxHash } = await sdk.txs.send({
           txs: txs.map(({ to, value, data }) => ({ to, value: (value ?? 0n).toString(), data })),
+          // Policy Engine V2 refuses a non-zero safeTxGas; 0 is also what Safe >= 1.3 needs.
+          params: { safeTxGas: 0 },
         })
         return safeTxHash
       },

@@ -1,5 +1,24 @@
-import type { LintFinding } from '../../lib/v2'
+import type { LintFinding, LintRule } from '../../lib/v2'
 import { Badge, Notice } from '../ui'
+
+const TITLES: Record<LintRule, string> = {
+  'wildcard-allow-module': 'A module may call anything',
+  'delegatecall-grant': 'DELEGATECALL granted',
+  'safe-target-allow-not-exact': 'Module rule on the Safe itself is too broad',
+  'actor-not-module': 'Not a module yet',
+  'unknown-policy': 'Unknown policy',
+  'no-owners-timelock': 'Owners can change the rules at once',
+  'timelock-not-covering-configure': 'Rule changes are not delayed',
+  'actor-no-guardian': 'Nobody can stop this actor',
+  'no-way-back': 'No way back if a co-signer disappears',
+  'deny-covers-configure': 'A Deny blocks rule changes',
+  'limit-unlisted-spend': 'Budget refuses other tokens',
+  'limit-nft-actor': 'Budget cannot price NFTs',
+  'strict-covers-safe-admin': 'Strict conditions on Safe admin calls',
+  'canceller-covers-owners': 'A canceller can veto every transaction',
+  'delay-below-cooldown': 'Delay shorter than the freeze cooldown',
+  'self-oversight': 'An actor oversees itself',
+}
 
 export const findingKey = (f: LintFinding): string => `${f.rule}:${f.attachmentIds.join(',')}:${f.message}`
 
@@ -17,17 +36,17 @@ export function LintPanel({
   confirmed: ReadonlySet<string>
   onConfirm: (key: string, value: boolean) => void
 }) {
-  if (findings.length === 0) return <p className="muted small">Lint: no finding.</p>
+  if (findings.length === 0) return <p className="muted small">Checks: nothing to report.</p>
   const blocks = findings.filter((f) => f.severity === 'block')
   const open = blocks.filter((f) => !confirmed.has(findingKey(f))).length
   return (
     <div className="lint">
       <div className="row">
-        <h3>Lint</h3>
+        <h3>Checks</h3>
         {open > 0 ? (
           <Badge tone="bad">{open} to confirm</Badge>
         ) : blocks.length > 0 ? (
-          <Badge tone="warn">confirmed</Badge>
+          <Badge tone="ok">all confirmed</Badge>
         ) : null}
       </div>
       <ul className="plain stack">
@@ -37,9 +56,8 @@ export function LintPanel({
             <li key={key}>
               <Notice tone={f.severity === 'block' ? 'bad' : 'warn'}>
                 <div className="stack">
-                  <span>
-                    <code className="small">{f.rule}</code> {f.message}
-                  </span>
+                  <strong>{TITLES[f.rule] ?? f.rule}</strong>
+                  <span>{f.message}</span>
                   {f.severity === 'block' && (
                     <label className="row small">
                       <input
@@ -47,7 +65,7 @@ export function LintPanel({
                         checked={confirmed.has(key)}
                         onChange={(e) => onConfirm(key, e.target.checked)}
                       />
-                      I understand, propose it anyway
+                      I understand, apply it anyway
                     </label>
                   )}
                 </div>

@@ -464,6 +464,13 @@ const RECONFIGURE_NOTE: Partial<Record<string, string>> = {
   timelock: ' (schedules wait the full delay again, from the change; the freeze state is kept)',
 }
 
+/** What re-configuring this existing attachment resets (a budget, the schedules' clock), if anything. */
+export function changeNote(change: Change, deployment: V2Deployment, attached: boolean): string | undefined {
+  if (!attached || change.detach || change.kind !== Kind.POLICY) return undefined
+  const note = RECONFIGURE_NOTE[policyNameOf(deployment, change.policy) ?? '']
+  return note?.trim().replace(/^\((.*)\)$/, '$1')
+}
+
 /**
  * The builder's live sentence: `Ops may call USDC.transfer`, `Ops may call USDC.transfer, with
  * conditions: to Vendor A`, `Owners: Timelock 24h, guardians G on any call`, `Removes ...`.
@@ -474,6 +481,8 @@ export function describeChange(
   ctx: LabelContext = {},
   /** The attachment already exists: an attach re-configures it. */
   attached = false,
+  /** Append what a re-configuration resets (off when the caller shows {@link changeNote} apart). */
+  withNote = true,
 ): string {
   const who = actorLabel(change.scope.actor, ctx.nameOf)
   const what = callPhrase(change.scope, ctx)
@@ -495,7 +504,7 @@ export function describeChange(
       return change.detach ? `Stops denying ${who}: ${what}` : `Denies ${who}: ${what}${ops}`
     default:
       if (change.detach) return `Removes ${policyLabel()} from ${who}, ${what}`
-      return `${attached ? 'Re-configures' : 'Adds'} ${policyLabel()} for ${who}, ${what}${ops}${attached ? (RECONFIGURE_NOTE[name ?? ''] ?? '') : ''}`
+      return `${attached ? 'Re-configures' : 'Adds'} ${policyLabel()} for ${who}, ${what}${ops}${attached && withNote ? (RECONFIGURE_NOTE[name ?? ''] ?? '') : ''}`
   }
 }
 

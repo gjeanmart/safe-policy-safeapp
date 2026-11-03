@@ -41,7 +41,7 @@ import { AddressShortcuts } from '../AddressShortcuts'
 import { InfoTip } from '../Tooltip'
 import { Card, Field, Notice } from '../ui'
 import { NATIVE, type RawSettings, buildConditions, buildSettings, initialRaw } from './settingsForm'
-import { TemplatePicker } from './TemplatePicker'
+import { CANCELLERS_INFO, GUARDIANS_INFO, LIFTERS_INFO, TemplatePicker } from './TemplatePicker'
 
 type Kind = 'allow' | 'deny' | PolicyName
 
@@ -66,7 +66,7 @@ const HELP: Record<Kind, string> = {
     'Grants the calls to this actor (only an Allow grants; deny by default). Add conditions to pin arguments.',
   deny: 'Denies the calls, whatever else allows them.',
   timelock:
-    'Delay (schedule first, wait), freeze by guardians (at most F, then a cooldown C), cancel by cancellers. Delay 0 = a kill switch only.',
+    'Matched calls must be scheduled, then wait the delay before they execute. Guardians can freeze, cancellers can veto a waiting call. Delay 0 = a kill switch only (guardians can stop the actor, nothing waits).',
   args: 'Conditions on the static arguments, target or value of every matched call.',
   limit: 'A budget per token and period: transfers, approvals (in full) and native value count.',
   coSigner: 'M-of-N approvals pushed on-chain before execution, on both paths.',
@@ -83,10 +83,13 @@ function SettingsFields({
   policy,
   raw,
   set,
+  everyone = false,
 }: {
   policy: PolicyName
   raw: RawSettings
   set: (patch: Partial<RawSettings>) => void
+  /** The scope's actor is Everyone (no guardians or lifters there). */
+  everyone?: boolean
 }) {
   const text = (
     key: keyof RawSettings,
@@ -150,21 +153,18 @@ function SettingsFields({
             'Execution window (seconds, 0 = none)',
             'A ready schedule expires after this window.',
           )}
-          {text(
-            'guardians',
-            'Guardians',
-            'May freeze (and lift) this attachment. Not at Everyone.',
-            '0x…, 0x…',
-            true,
+          {everyone ? (
+            <p className="muted small">
+              At Everyone, a Timelock delays every transaction (owners and modules) but takes no guardians or
+              lifters: a freeze always targets one actor. Add a Delay + freeze on that actor for it.
+            </p>
+          ) : (
+            <>
+              {text('guardians', 'Guardians', GUARDIANS_INFO, '0x…, 0x…', true)}
+              {text('lifters', 'Lifters', LIFTERS_INFO, '0x…', true)}
+            </>
           )}
-          {text('lifters', 'Lifters', 'May lift a freeze only (e.g. the recovery module).', '0x…', true)}
-          {text(
-            'cancellers',
-            'Cancellers',
-            "May cancel a schedule this attachment matched (e.g. another Safe), without limit; never an owners' engine.configure.",
-            '0x…',
-            true,
-          )}
+          {text('cancellers', 'Cancellers', CANCELLERS_INFO, '0x…', true)}
         </div>
       )
     case 'limit':
@@ -563,7 +563,9 @@ export function ScopeBuilder({
           {kind === 'allow' && policies.includes('args') && (
             <ConditionsFields raw={raw} set={set} hasFunction={selectorValue !== undefined} />
           )}
-          {kind !== 'allow' && kind !== 'deny' && <SettingsFields policy={kind} raw={raw} set={set} />}
+          {kind !== 'allow' && kind !== 'deny' && (
+            <SettingsFields policy={kind} raw={raw} set={set} everyone={actor === ANY} />
+          )}
 
           {sentence ? (
             <Notice>

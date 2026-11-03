@@ -1012,7 +1012,62 @@ select:focus-visible {
 .actor-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 8px 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.actor-card p {
+  margin: 0;
+}
+
+.actor-today {
+  background: var(--warn-bg);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.draft-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.draft-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.draft-item:last-child {
+  border-bottom: none;
+}
+
+.draft-note {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.steps li.done {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.lint-item summary {
+  cursor: pointer;
 }
 
 .actor-section {

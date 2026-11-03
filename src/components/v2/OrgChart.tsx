@@ -27,7 +27,7 @@ import {
   settingsLabel,
 } from '../../lib/v2'
 import { rolesStore } from '../../store'
-import { InfoTip } from '../Tooltip'
+import { InfoTip, Tooltip } from '../Tooltip'
 import { AddressView, Badge, Card } from '../ui'
 import { Chip, type ChipStatus, type ChipTone } from './Chip'
 
@@ -199,7 +199,7 @@ function RowList({
 }
 
 const SECTIONS = [
-  { role: 'canDo', title: 'Can do', empty: 'Nothing: no Allow (deny by default).' },
+  { role: 'canDo', title: 'Can do', empty: 'nothing yet (deny by default: only an Allow grants).' },
   { role: 'limitedBy', title: 'Limited by' },
   { role: 'protectedBy', title: 'Protected by' },
 ] as const
@@ -207,6 +207,7 @@ const SECTIONS = [
 function ActorCard({
   actor,
   isModule,
+  installed,
   items,
   deployment,
   ctx,
@@ -214,6 +215,8 @@ function ActorCard({
 }: {
   actor: Address
   isModule: boolean
+  /** V2 guards this Safe already: before, the chart is the plan, not what applies. */
+  installed: boolean
   items: ChartAttachment[]
   deployment: V2Deployment
   ctx: LabelContext
@@ -225,15 +228,23 @@ function ActorCard({
     <div className="actor-card">
       <header className="row wrap">
         <strong>{actorLabel(actor, ctx.nameOf)}</strong>
-        {!owners && <AddressView address={actor} name="" />}
         {owners ? (
-          <Badge>multisig path</Badge>
+          <Badge>multisig</Badge>
         ) : isModule ? (
           <Badge tone="ok">module</Badge>
         ) : (
-          <Badge tone="warn">not a module</Badge>
+          <Tooltip content="Enable it as a module in the Roles tab: until then the Safe rejects its transactions, whatever is attached here.">
+            <Badge tone="warn">not a module yet</Badge>
+          </Tooltip>
         )}
       </header>
+      {!owners && <AddressView address={actor} name="" />}
+      {owners && !installed && (
+        <p className="small actor-today">
+          <strong>Today: anything.</strong> No guard checks the multisig path yet, so the signers can execute
+          any transaction. Below is what applies once V2 is installed.
+        </p>
+      )}
       {SECTIONS.map((s) => {
         const list = rows.filter((r) => roleOfRow(r) === s.role && r.main.status !== 'removed')
         const removed = rows.filter((r) => roleOfRow(r) === s.role && r.main.status === 'removed')
@@ -271,7 +282,7 @@ export function OrgChart({
   ctx: LabelContext
   onDetach?: (attachments: Attachment[]) => void
 }) {
-  const { safe, state } = useSandbox()
+  const { safe, state, v2Installed } = useSandbox()
   const roles = rolesStore.use()
   const modules = state?.modules ?? []
   const model = buildModel({ safe, engine: deployment.engine, attachments: items, modules, now: 0n })
@@ -286,21 +297,25 @@ export function OrgChart({
         <span className="row">
           Who can do what
           <InfoTip>
-            Every matching scope runs: Everyone&apos;s attachments apply to every actor, owners included. Any
-            deny wins, an Allow is needed, policies only pass or deny. × queues a detach in the draft; dashed
-            chips are draft changes.
+            One card per actor: what it can do (Allow), what limits it (conditions, budgets, co-signers) and
+            what protects the Safe from it (delay, freeze). Rules under Everyone apply to every actor, owners
+            included. A Deny always wins; with no Allow, an actor can do nothing. Dashed chips are draft
+            changes; × removes a rule (queued in the draft).
           </InfoTip>
         </span>
       }
+      actions={!v2Installed && <Badge tone="warn">plan: not installed yet</Badge>}
     >
       <div className="everyone-band">
         <header className="row wrap">
           <strong>Everyone</strong>
-          <span className="muted small">applies to every actor, owners included</span>
+          <span className="muted small">
+            {everyone.length === 0
+              ? 'nothing here. A rule here applies to every actor, owners included (e.g. the template Delay for everyone).'
+              : 'applies to every actor, owners included'}
+          </span>
         </header>
-        {everyone.length === 0 ? (
-          <p className="muted small">Nothing attached for everyone.</p>
-        ) : (
+        {everyone.length > 0 && (
           <RowList rows={rowsOf(everyone)} deployment={deployment} ctx={ctx} onDetach={onDetach} />
         )}
       </div>
@@ -310,6 +325,7 @@ export function OrgChart({
             key={card.actor}
             actor={card.actor}
             isModule={card.isModule}
+            installed={v2Installed}
             items={withStatus(card.attachments)}
             deployment={deployment}
             ctx={ctx}
@@ -321,6 +337,7 @@ export function OrgChart({
             key={r.address}
             actor={r.address}
             isModule={modules.some((m) => isAddressEqual(m, r.address))}
+            installed={v2Installed}
             items={[]}
             deployment={deployment}
             ctx={ctx}
@@ -328,7 +345,9 @@ export function OrgChart({
         ))}
       </div>
       {items.length === 0 && (
-        <p className="muted small">No attachment yet: start from the Owners template in the builder below.</p>
+        <p className="muted small">
+          Nothing configured yet. Start in the scope builder below: template Delay + freeze, actor Owners.
+        </p>
       )}
     </Card>
   )

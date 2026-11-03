@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { type Address, type Hex, isAddressEqual, parseEther } from 'viem'
+import { type Address, type Hex, formatEther, isAddressEqual, parseEther } from 'viem'
 import { chain, publicClient } from '../../config/client'
 import { EXPLORER, type V2Engine } from '../../config/contracts'
 import { useSandbox } from '../../context'
@@ -47,6 +47,8 @@ import { type Role, logActivity, roleKind, rolesStore, v2OwnerTxStore } from '..
 import { InfoTip } from '../Tooltip'
 import { AddressView, AsyncButton, Badge, Card, CopyButton, Field, Notice } from '../ui'
 import { FreezeBadge } from './OrgChart'
+import { ProposeButton } from '../ProposeButton'
+import { toSafeTxs } from './ownerCalls'
 
 const QUEUE_REFRESH_MS = 30_000
 const NONCE_REFRESH_MS = 10_000
@@ -75,12 +77,12 @@ async function relay(role: Role, call: Call): Promise<Hex> {
 
 const useEoaRoles = () => rolesStore.use().filter((r) => roleKind(r) === 'eoa')
 
-function RelayerSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+export function RelayerSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const relayers = useEoaRoles()
   return (
     <Field
-      label="Relay with (pays gas)"
-      info="Schedules and owner cancels are direct calls to the TimelockPolicy: anyone may send them."
+      label="Sent by (pays gas)"
+      info="Scheduling and cancelling are plain calls to the Timelock that carry the signatures: any local key with some Sepolia ETH can send them. It gains no power by doing so."
     >
       <select value={value} onChange={(e) => onChange(e.target.value)}>
         <option value="">—</option>
@@ -95,7 +97,7 @@ function RelayerSelect({ value, onChange }: { value: string; onChange: (v: strin
 }
 
 /** Owners local to this browser: EOA roles that are owners of the Safe. */
-function useLocalOwners(): Role[] {
+export function useLocalOwners(): Role[] {
   const { state } = useSandbox()
   return useEoaRoles().filter((r) => (state?.owners ?? []).some((o) => isAddressEqual(o, r.address)))
 }
@@ -345,39 +347,43 @@ function EntryRow({
 }
 
 /**
- * Schedules an owner transaction: from the Safe{Wallet} queue (its signatures are read through the
- * Safe Apps SDK) or signed here by local owner keys at a chosen nonce.
+ * Schedules an owner transaction: signed here by local signer keys at a chosen nonce, or proposed and
+ * signed in Safe{Wallet} (its signatures are read back through the Safe Apps SDK). With `call`, the
+ * transaction is fixed (configure, a playground action) and only the signing route is chosen.
  */
-function ScheduleOwnerTx({
+export function ScheduleOwnerTx({
   engine,
   currentNonce,
-  prefill,
+  call,
   onScheduled,
 }: {
   engine: V2Engine
   currentNonce?: bigint
-  prefill?: OwnerCall
+  call?: OwnerCall
   onScheduled: () => void
 }) {
   const { safe, state, getQueuedTx } = useSandbox()
   const { deployment } = engine
   const roles = rolesStore.use()
+  const eoaRoles = useEoaRoles()
   const localOwners = useLocalOwners()
-  const [source, setSource] = useState<'queue' | 'local'>(getQueuedTx && !prefill ? 'queue' : 'local')
+  const threshold = state?.threshold ?? 1
+  const canSignHere = localOwners.length >= threshold
+  const [source, setSource] = useState<'queue' | 'local'>(canSignHere || !getQueuedTx ? 'local' : 'queue')
   const [hashInput, setHashInput] = useState('')
-  const [relayer, setRelayer] = useState('')
-  const [to, setTo] = useState<string>(prefill?.to ?? '')
-  const [value, setValue] = useState('0')
-  const [data, setData] = useState<string>(prefill?.data ?? '0x')
+  const [relayer, setRelayer] = useState<string>(localOwners[0]?.address ?? eoaRoles[0]?.address ?? '')
+  const [to, setTo] = useState<string>(call?.to ?? '')
+  const [value, setValue] = useState(call ? formatEther(call.value) : '0')
+  const [data, setData] = useState<string>(call?.data ?? '0x')
   const [nonceOffset, setNonceOffset] = useState(0)
-  const [signers, setSigners] = useState<string[]>([])
+  const [signers, setSigners] = useState<string[]>(localOwners.slice(0, threshold).map((o) => o.address))
+  const [done, setDone] = useState<string>()
   const queued = useAsync(
     async () =>
       getQueuedTx && /^0x[0-9a-fA-F]{64}$/.test(hashInput.trim()) ? getQueuedTx(hashInput.trim()) : undefined,
     hashInput.trim(),
   )
   const relayRole = roles.find((r) => r.address === relayer)
-  const threshold = state?.threshold ?? 1
   const target = parseAddressInput(to, 'target')
   const calldata = parseHexInput(data)
   const nonce = currentNonce === undefined ? undefined : currentNonce + BigInt(nonceOffset)
@@ -386,13 +392,13 @@ function ScheduleOwnerTx({
 
   const previewAtNonce = async () => {
     if (!target.ok || !calldata.ok || nonce === undefined) return
-    const call = {
+    const tx = {
       to: target.value,
       value: parseEther(value || '0'),
       data: calldata.value,
       operation: Operation.CALL,
     }
-    const r = await runPreview(publicClient, deployment, safe, OWNERS, call, {
+    const r = await runPreview(publicClient, deployment, safe, OWNERS, tx, {
       chainId: chain.id,
       ownerNonce: nonce,
     })
@@ -408,8 +414,9 @@ function ScheduleOwnerTx({
   }
 
   const schedule = async (tx: SafeTransaction, signatures: Hex) => {
-    if (!relayRole) throw new Error('Pick a relayer')
+    if (!relayRole) throw new Error('Pick who sends the schedule (pays gas)')
     await relay(relayRole, timelockCalls.schedule(deployment, safe, tx, signatures))
+    setDone(`Scheduled at nonce ${tx.nonce}. It is now in the queue below, counting down.`)
     onScheduled()
   }
 
@@ -422,7 +429,9 @@ function ScheduleOwnerTx({
     if (q.safeTxGas !== 0n || q.gasPrice !== 0n)
       throw new Error('safeTxGas and gasPrice must be 0 under V2: propose it again with both at 0')
     if (q.signatures.length < threshold)
-      throw new Error(`${q.signatures.length} of ${threshold} signatures so far`)
+      throw new Error(
+        `${q.signatures.length} of ${threshold} signatures so far: collect the rest in Safe{Wallet}`,
+      )
     await schedule(
       {
         to: q.to,
@@ -448,7 +457,7 @@ function ScheduleOwnerTx({
     )
     const hash = safeTxHash(chain.id, safe, tx)
     const chosen = localOwners.filter((o) => signers.includes(o.address))
-    if (chosen.length < threshold) throw new Error(`Pick ${threshold} owner key(s)`)
+    if (chosen.length < threshold) throw new Error(`Pick ${threshold} signer key(s)`)
     const sigs = []
     for (const o of chosen) sigs.push(await signHashAsRole(o, hash))
     const signatures = sortOwnerSignatures(sigs)
@@ -461,33 +470,53 @@ function ScheduleOwnerTx({
 
   return (
     <div className="stack">
-      <div className="tabs" role="group" aria-label="Source">
+      <div className="tabs" role="group" aria-label="How the signers sign">
+        <button
+          type="button"
+          className={source === 'local' ? 'tab active' : 'tab'}
+          onClick={() => setSource('local')}
+        >
+          Sign here (local signer keys)
+        </button>
         {getQueuedTx && (
           <button
             type="button"
             className={source === 'queue' ? 'tab active' : 'tab'}
             onClick={() => setSource('queue')}
           >
-            From the Safe{'{Wallet}'} queue
+            Sign in Safe{'{Wallet}'}
           </button>
         )}
-        <button
-          type="button"
-          className={source === 'local' ? 'tab active' : 'tab'}
-          onClick={() => setSource('local')}
-        >
-          Sign here with local owner keys
-        </button>
       </div>
       {source === 'queue' ? (
         <div className="stack">
-          <p className="small muted">
-            Propose the transaction in Safe{'{Wallet}'}, collect the owners&apos; signatures, then paste its
-            Safe transaction hash: the same signatures schedule it. Execute it from the Safe{'{Wallet}'} queue
-            once ready. V2 requires <strong>safeTxGas = 0 and gasPrice = 0</strong>: set them in Safe
-            {'{Wallet}'}&apos;s advanced parameters before signing (the gate preview does not see them; a
-            proposal with an estimated safeTxGas is refused at schedule and at execution).
-          </p>
+          <ol className="steps small">
+            <li>
+              {call ? (
+                <span className="row wrap">
+                  <ProposeButton
+                    label="Propose in Safe{Wallet}"
+                    variant="secondary"
+                    preview={false}
+                    txs={toSafeTxs([call])}
+                    onProposed={setHashInput}
+                  />
+                </span>
+              ) : (
+                <>Propose the transaction in Safe{'{Wallet}'} (safeTxGas 0, in Advanced parameters).</>
+              )}
+            </li>
+            <li>
+              In Safe{'{Wallet}'}, <strong>sign but do not execute</strong>: untick &quot;Execute
+              transaction&quot; if it is offered. Executing now fails: the guard refuses it until it is
+              scheduled and the delay has passed. Collect {threshold} signature{threshold === 1 ? '' : 's'}.
+            </li>
+            <li>
+              {call
+                ? 'The Safe transaction hash fills in below after the proposal (or paste it), then Schedule.'
+                : 'Paste its Safe transaction hash below, then Schedule.'}
+            </li>
+          </ol>
           <Field label="Safe transaction hash">
             <input
               className="mono"
@@ -526,57 +555,69 @@ function ScheduleOwnerTx({
         </div>
       ) : (
         <div className="stack">
+          {call ? (
+            <p className="small">
+              <strong>{call.description}</strong> · to <AddressView address={call.to} />
+              {call.value > 0n && ` · ${formatEther(call.value)} ETH`}
+            </p>
+          ) : (
+            <div className="grid-2">
+              <Field label="To">
+                <input
+                  className="mono"
+                  value={to}
+                  onChange={(e) => setTo(e.target.value.trim())}
+                  placeholder="0x…"
+                />
+              </Field>
+              <Field label="Value (ETH)">
+                <input value={value} onChange={(e) => setValue(e.target.value)} />
+              </Field>
+              <Field label="Calldata">
+                <input className="mono" value={data} onChange={(e) => setData(e.target.value.trim())} />
+              </Field>
+            </div>
+          )}
           <div className="grid-2">
-            <Field label="To">
-              <input
-                className="mono"
-                value={to}
-                onChange={(e) => setTo(e.target.value.trim())}
-                placeholder="0x…"
-              />
-            </Field>
-            <Field label="Value (ETH)">
-              <input value={value} onChange={(e) => setValue(e.target.value)} />
-            </Field>
-            <Field label="Calldata">
-              <input className="mono" value={data} onChange={(e) => setData(e.target.value.trim())} />
-            </Field>
             <Field
               label={`Nonce (current ${currentNonce ?? '…'})`}
-              info="A later nonce leaves room for owner transactions that execute first (each one uses a nonce)."
+              info="The signatures are bound to one Safe nonce. If another owner transaction executes first, it takes that nonce and this schedule can never execute: pick a later nonce to leave room for it."
             >
               <select value={nonceOffset} onChange={(e) => setNonceOffset(Number(e.target.value))}>
                 {[0, 1, 2, 3, 4].map((k) => (
                   <option key={k} value={k}>
                     {currentNonce === undefined ? `+${k}` : (currentNonce + BigInt(k)).toString()}
-                    {k === 0 ? ' (next)' : ` (leaves ${k} before it)`}
+                    {k === 0 ? ' (next)' : ` (${k} owner transaction${k === 1 ? '' : 's'} before it)`}
                   </option>
                 ))}
               </select>
             </Field>
-          </div>
-          <div className="field">
-            <span className="field-label">Sign with ({threshold} needed)</span>
-            {localOwners.length === 0 ? (
-              <span className="muted small">No local role is an owner of this Safe.</span>
-            ) : (
-              <div className="checklist">
-                {localOwners.map((o) => (
-                  <label key={o.address} className="row">
-                    <input
-                      type="checkbox"
-                      checked={signers.includes(o.address)}
-                      onChange={(e) =>
-                        setSigners((list) =>
-                          e.target.checked ? [...list, o.address] : list.filter((a) => a !== o.address),
-                        )
-                      }
-                    />
-                    {o.label}
-                  </label>
-                ))}
-              </div>
-            )}
+            <div className="field">
+              <span className="field-label">Signers ({threshold} needed)</span>
+              {localOwners.length === 0 ? (
+                <span className="muted small">
+                  No local key is a signer of this Safe. Roles tab → Make signer on an EOA role, or sign in
+                  Safe{'{Wallet}'}.
+                </span>
+              ) : (
+                <div className="checklist">
+                  {localOwners.map((o) => (
+                    <label key={o.address} className="row">
+                      <input
+                        type="checkbox"
+                        checked={signers.includes(o.address)}
+                        onChange={(e) =>
+                          setSigners((list) =>
+                            e.target.checked ? [...list, o.address] : list.filter((a) => a !== o.address),
+                          )
+                        }
+                      />
+                      {o.label}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
           <div className="row wrap align-end">
             <RelayerSelect value={relayer} onChange={setRelayer} />
@@ -600,7 +641,30 @@ function ScheduleOwnerTx({
           )}
         </div>
       )}
+      {done && <Notice>{done}</Notice>}
     </div>
+  )
+}
+
+/** The four steps of a delayed owner transaction, for the places that start one. */
+export function ScheduleSteps({ delay, cancellable = true }: { delay?: string; cancellable?: boolean }) {
+  return (
+    <ol className="steps small">
+      <li>
+        <strong>Sign</strong>: the signers sign the transaction as usual, but nobody executes it yet.
+      </li>
+      <li>
+        <strong>Schedule</strong>: anyone sends those signatures to the Timelock (one small transaction). The
+        clock starts.
+      </li>
+      <li>
+        <strong>Wait {delay ?? 'the delay'}</strong>: guardians can freeze it
+        {cancellable ? ', the owners and cancellers can cancel it' : ''}. This is the safety window.
+      </li>
+      <li>
+        <strong>Execute</strong>: with the same signatures, from the Queue (or the Safe{'{Wallet}'} queue).
+      </li>
+    </ol>
   )
 }
 
@@ -712,14 +776,12 @@ export function Queue({
   model,
   ctx,
   freezeLimits,
-  prefill,
   onChange,
 }: {
   engine: V2Engine
   model: SafeV2Model
   ctx: LabelContext
   freezeLimits?: { maxFreeze: bigint; cooldown: bigint }
-  prefill?: OwnerCall
   onChange: () => void
 }) {
   const { safe } = useSandbox()
@@ -749,20 +811,31 @@ export function Queue({
         <span className="row">
           Queue
           <InfoTip>
-            A transaction under a Timelock is scheduled, then executed after the delay (the longest matched
-            delay, from the schedule or the latest re-configuration). A freeze blocks it; a schedule made
-            before the freeze ended is void (except configuration changes). Module schedules are made from the
-            playground, by the module itself.
+            Everything a Timelock delays, owners and modules: what waits, until when, and who can cancel it.
+            The delay is the longest one that matches, counted from the schedule (or from the latest change to
+            that Timelock). A freeze blocks execution; a schedule made before a freeze ended is void, except a
+            configuration change.
           </InfoTip>
         </span>
       }
       actions={<span className="muted small">Safe nonce {nonce.data?.toString() ?? '…'}</span>}
     >
-      <Notice tone="warn">
-        <strong>Owner schedules are bound to the Safe nonce.</strong> Any other owner transaction executed
-        first, a configure included, uses that nonce and the schedule can never execute. Schedule at a later
-        nonce to leave room, and execute in nonce order.
-      </Notice>
+      <details className="small">
+        <summary>How scheduling works</summary>
+        <div className="stack">
+          <p>
+            A Timelock does not let a transaction execute right away. It goes through four steps, and the
+            Queue shows where each one is:
+          </p>
+          <ScheduleSteps />
+          <p>
+            <strong>Owner transactions are bound to a Safe nonce.</strong> If another owner transaction
+            executes first (a configure too), it takes that nonce and the scheduled one is dead: schedule at a
+            later nonce to leave room, and execute in nonce order. Module transactions are scheduled by the
+            module itself, from Act as a role.
+          </p>
+        </div>
+      </details>
       {logs.error !== undefined && <Notice tone="bad">Could not read the queue: {String(logs.error)}</Notice>}
       {ownersFirst.length === 0 ? (
         <p className="muted">{logs.loading && !logs.data ? 'Scanning…' : 'Nothing scheduled.'}</p>
@@ -799,14 +872,15 @@ export function Queue({
           </ul>
         </details>
       )}
-      <h3>Schedule an owner transaction</h3>
-      <ScheduleOwnerTx
-        key={prefill?.data ?? 'none'}
-        engine={engine}
-        currentNonce={nonce.data}
-        prefill={prefill}
-        onScheduled={reload}
-      />
+      <details>
+        <summary>
+          <strong>Schedule any owner transaction</strong>{' '}
+          <span className="muted small">
+            (configure and Act as a role → Owners schedule from their own screen)
+          </span>
+        </summary>
+        <ScheduleOwnerTx engine={engine} currentNonce={nonce.data} onScheduled={reload} />
+      </details>
       <h3>
         Freeze and lift
         {freezeLimits && (
