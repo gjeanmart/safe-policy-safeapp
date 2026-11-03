@@ -37,6 +37,10 @@ every matched call: a carve-out).
 
 Only the engine calls it (`configure` at attach, `check` per transaction). It keeps no state at check time.
 
+A call to the engine itself (`configure`, the only one the engine lets through) is never judged: it moves nothing, and
+a strict Args at `(Owners, *)` or `(ANY, *)` would otherwise lock the owners out of their own configuration. Safe admin
+calls (`setGuard`, `setModuleGuard`, `addOwner...`) stay judged (a strict Args denies them as `NoConstraint`).
+
 ## The check
 
 Every (call, attachment) match is judged alone with that attachment's own constraints and `strict`. Within one
@@ -50,6 +54,11 @@ attachment, every constraint whose selector is the call's, or `0xffffffff`, must
 
 Rev 2 Recipients let `approve(x, 0)` pass for any spender; Args does not (owners can revoke, an ops key may not
 revoke an approval it could not make).
+
+Use allowlists (`IN`, `EQ`, `EQ_SAFE`) for addresses, not denylists (`NEQ`, `NOT_IN`). Words are compared in full (32
+bytes). An address word with dirty upper bits fails every allowlist (fail closed), but passes a denylist, while a token
+compiled without ABI decoding checks (USDT and other pre-0.8 tokens) masks the word to 160 bits and pays the denied
+address. The app presets are all allowlists.
 
 ## Errors
 

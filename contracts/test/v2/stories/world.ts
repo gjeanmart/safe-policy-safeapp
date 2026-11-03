@@ -246,6 +246,12 @@ export interface World {
   engineAddress: string
   configAddress: string
   batch: string
+  /**
+   * Safe 1.5.0's `TokenCallbackHandler`: token callbacks, no ERC-1271. `install` sets it as the
+   * fallback handler, so the owners' off-chain signatures (permits, Permit2, CoW orders) cannot
+   * move funds around the policies (SPEC §6).
+   */
+  tokenCallbackHandler: string
   timelock: TimelockPolicy
   args: ArgsPolicy
   limit: LimitPolicy
@@ -288,6 +294,9 @@ export async function deployWorld(): Promise<World> {
   const limit = (await ethers.getContractAt(FQN.limit, p.limit)) as unknown as LimitPolicy
   const cosigner = (await ethers.getContractAt(FQN.coSigner, p.coSigner)) as unknown as CoSignerPolicy
   const token = (await ethers.deployContract('E2eToken')) as unknown as E2eToken
+  const handler = await ethers.deployContract(
+    'contracts/vendor/safe-smart-account/handler/TokenCallbackHandler.sol:TokenCallbackHandler',
+  )
   const owners = [o1, o2, o3]
   const safe = await deploySafe(owners, 2, { infra })
   const safeAddress = await safe.getAddress()
@@ -302,6 +311,7 @@ export async function deployWorld(): Promise<World> {
     engineAddress: await engine.getAddress(),
     configAddress,
     batch,
+    tokenCallbackHandler: await handler.getAddress(),
     timelock,
     args,
     limit,
@@ -343,20 +353,26 @@ export async function deployEngine(batches: string[]) {
 
 /**
  * Installs the engine as one owners' batch (SPEC §3.3): `[configure(changes), enableModule(m)...,
- * setModuleGuard, setGuard]`, executed before any guard runs. Leftovers of an earlier install are
- * detached by putting their detach changes first in `changes`.
+ * setFallbackHandler(TokenCallbackHandler), setModuleGuard, setGuard]`, executed before any guard
+ * runs. Leftovers of an earlier install are detached by putting their detach changes first in
+ * `changes`. `fallbackHandler: null` keeps the Safe's handler (the compatibility handler, with
+ * ERC-1271: the owners' off-chain signatures then bypass every policy).
  */
 export async function install(
   w: World,
   changes: Change[],
-  opts: { modules?: string[]; safe?: Safe; signers?: Signer[] } = {},
+  opts: { modules?: string[]; safe?: Safe; signers?: Signer[]; fallbackHandler?: string | null } = {},
 ) {
   const safe = opts.safe ?? w.safe
   const self = await safe.getAddress()
   const iface = safe.interface as Interface
+  const handler = opts.fallbackHandler === undefined ? w.tokenCallbackHandler : opts.fallbackHandler
   const calls: MetaTx[] = [
     { to: w.engineAddress, data: w.engine.interface.encodeFunctionData('configure', [changes]) },
     ...(opts.modules ?? []).map((m) => ({ to: self, data: iface.encodeFunctionData('enableModule', [m]) })),
+    ...(handler === null
+      ? []
+      : [{ to: self, data: iface.encodeFunctionData('setFallbackHandler', [handler]) }]),
     { to: self, data: iface.encodeFunctionData('setModuleGuard', [w.engineAddress]) },
     { to: self, data: iface.encodeFunctionData('setGuard', [w.engineAddress]) },
   ]

@@ -168,11 +168,31 @@ export const ownerNonceState = (scheduleNonce: bigint, currentNonce: bigint): Ow
 
 export const isOwnerEntry = (entry: Pick<QueueEntry, 'actor'>): boolean => isAddressEqual(entry.actor, OWNERS)
 
-/** TimelockPolicy's merge over the attachments a transaction matches (SPEC.md §5.1). */
+/**
+ * What a cancel means (rev 3 fix T2). An owner-path schedule is bound to the signed Safe transaction
+ * (its nonce): once cancelled the policy refuses that hash for good (`CancelledTransaction`), so the
+ * public signatures can never be scheduled again. A module schedule has no nonce and stays
+ * re-schedulable by the module itself. `undefined` for an entry that was not cancelled.
+ */
+export const cancelOutcome = (
+  entry: Pick<QueueEntry, 'actor' | 'state'>,
+): 'final' | 'reschedulable' | undefined =>
+  entry.state !== 'cancelled' ? undefined : isOwnerEntry(entry) ? 'final' : 'reschedulable'
+
+/** Who may cancel: listed cancellers never cancel a configuration change (rev 3 fix T4). */
+export const cancellersOf = (
+  entry: Pick<QueueEntry, 'isConfiguration'>,
+  cancellers: readonly Address[],
+): readonly Address[] => (entry.isConfiguration ? [] : cancellers)
+
+/**
+ * TimelockPolicy's merge over the attachments a transaction matches (SPEC.md §5.1; the window of a
+ * delay-0 kill switch no longer shortens a delayed one, rev 3 fix T5).
+ */
 export type MergedTimelock = {
   /** Longest delay; 0 = no schedule needed (kill switch only). */
   delay: bigint
-  /** Shortest non-zero window; 0 = never expires. */
+  /** Shortest non-zero window of the delayed attachments (a kill switch's is ignored); 0 = never expires. */
   window: bigint
   /** Latest `configuredAt`: the delay restarts from a re-configuration. */
   configuredAt: bigint
@@ -194,7 +214,8 @@ export function mergeTimelocks(
   for (const p of parts) {
     const { delay, window, cancellers } = p.settings
     if (BigInt(delay) > m.delay) m.delay = BigInt(delay)
-    if (window !== 0 && (m.window === 0n || BigInt(window) < m.window)) m.window = BigInt(window)
+    if (delay !== 0 && window !== 0 && (m.window === 0n || BigInt(window) < m.window))
+      m.window = BigInt(window)
     if ((p.configuredAt ?? 0n) > m.configuredAt) m.configuredAt = p.configuredAt ?? 0n
     const frozenUntil = p.freeze?.frozenUntil ?? 0n
     if (frozenUntil > m.frozenUntil) {

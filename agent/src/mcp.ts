@@ -162,12 +162,16 @@ const TOOLS: Tool[] = [
     name: 'safe_role_approve',
     command: 'approve',
     description:
-      'V2 only, for a role listed as a Co-signer approver: approves a transaction hash until validFor from now (default 1h). The hash alone does not say what it approves: only approve a hash the user gave you and reviewed. The signer shows what it can and asks y/N in ask mode.',
+      'V2 only, for a role listed as a Co-signer approver: approves a transaction hash until validUntil, or validFor from now (default 1h). When a simulate suggested a validUntil (it covers the Timelock delay of the call), pass that one. The hash alone does not say what it approves: only approve a hash the user gave you and reviewed. The signer shows what it can and asks y/N in ask mode.',
     inputSchema: {
       type: 'object',
       properties: {
         id: { type: 'string', description: 'The transaction hash to approve (0x, 32 bytes)' },
         validFor: { type: 'string', description: 'How long the approval counts: 30m, 1h, 1d (default 1h)' },
+        validUntil: {
+          type: 'string',
+          description: 'Until when the approval counts: unix seconds or an ISO date (overrides validFor)',
+        },
       },
       required: ['id'],
       additionalProperties: false,

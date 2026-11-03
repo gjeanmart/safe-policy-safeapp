@@ -87,11 +87,11 @@ export const ERC1271_MAGIC_VALUE: Hex = '0x1626ba7e'
 export const InterfaceIds = {
   IPolicyGuard: '0x0f8d6033',
   IPolicy: '0xedd49bcb',
-  ITimelockPolicy: '0xc8de6ca0',
+  ITimelockPolicy: '0xa46bc64f',
   IArgsPolicy: '0x365878b9',
   ILimitPolicy: '0x64ad8ac4',
   ICoSignerPolicy: '0x9c977234',
-  ISafenetPolicy: '0xef9151ab',
+  ISafenetPolicy: '0x1f1cd9d7',
 } as const satisfies Record<string, Hex>
 
 // ---------------------------------------------------------------------------------------------

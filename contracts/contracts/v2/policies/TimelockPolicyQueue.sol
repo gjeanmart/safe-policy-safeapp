@@ -48,6 +48,23 @@ abstract contract TimelockPolicyStorage {
     mapping(address engine => mapping(address safe => mapping(bytes32 txHash => ITimelockPolicy.Schedule)))
         internal _schedules;
 
+    /// @dev A guardian's freeze window in one Safe: every freeze it makes ends at `end`; it is
+    ///      cooling down until `end + COOLDOWN`. `frozen` counts the ids it froze in this window
+    ///      and has not seen lifted.
+    struct GuardianWindow {
+        uint64 end;
+        uint32 frozen;
+    }
+
+    mapping(address engine => mapping(address safe => mapping(address guardian => GuardianWindow)))
+        internal _windows;
+
+    /// @dev The window end of the guardian that froze the id (0 once lifted): `lift` releases it.
+    mapping(bytes32 settingsKey => mapping(address guardian => uint64 windowEnd)) internal _frozenBy;
+
+    /// @dev Owner-path hashes cancelled for good (they bind a nonce, so this never blocks a new transaction).
+    mapping(address engine => mapping(address safe => mapping(bytes32 txHash => bool))) internal _cancelled;
+
     /// @dev `PolicyBase._settingsKey`.
     function _keyOf(address engine, address safe, bytes32 attachmentId) internal pure returns (bytes32) {
         return keccak256(abi.encode(engine, safe, attachmentId));
@@ -64,7 +81,8 @@ abstract contract TimelockPolicyStorage {
         );
         require(!denyFrozen || block.timestamp >= frozenUntil, ITimelockPolicy.AttachmentFrozen(id, frozenUntil));
         if (delay > m.delay) m.delay = delay;
-        if (window != 0 && (m.window == 0 || window < m.window)) m.window = window;
+        // A kill switch (delay 0) never schedules, so its window never expires a schedule.
+        if (delay != 0 && window != 0 && (m.window == 0 || window < m.window)) m.window = window;
         if (configured > m.configuredAt) m.configuredAt = configured;
         if (frozenUntil > m.frozenUntil) (m.frozenUntil, m.frozenId) = (frozenUntil, id);
     }
@@ -149,14 +167,17 @@ contract TimelockPolicyQueue is TimelockPolicyStorage {
     function cancel(address engine, address safe, bytes32 txHash) external onlyDelegated {
         ITimelockPolicy.Schedule storage s = _schedules[engine][safe][txHash];
         require(s.scheduledAt != 0, ITimelockPolicy.NotScheduled(txHash));
-        // The owners' actor (address 1) is never a caller.
+        // The owners' actor (address 1) is never a caller. A configuration change is the owners'
+        // way out: listed cancellers cannot cancel it (only `cancelAsOwners` or its module can).
         bool allowed = s.actor == msg.sender;
-        bytes32[] storage ids = s.attachmentIds;
-        for (uint256 i = 0; i < ids.length && !allowed; i++) {
-            allowed = _contains(_attachments[_keyOf(engine, safe, ids[i])].cancellers, msg.sender);
+        if (!s.isConfiguration) {
+            bytes32[] storage ids = s.attachmentIds;
+            for (uint256 i = 0; i < ids.length && !allowed; i++) {
+                allowed = _contains(_attachments[_keyOf(engine, safe, ids[i])].cancellers, msg.sender);
+            }
         }
         require(allowed, ITimelockPolicy.NotCanceller(msg.sender));
-        delete _schedules[engine][safe][txHash];
+        _cancel(engine, safe, txHash, s.actor);
         emit ITimelockPolicy.Cancelled(engine, safe, txHash, msg.sender);
     }
 
@@ -176,8 +197,15 @@ contract TimelockPolicyQueue is TimelockPolicyStorage {
             signatures,
             ISafe(safe).getThreshold()
         );
-        delete _schedules[engine][safe][txHash];
+        _cancel(engine, safe, txHash, ScopeLib.OWNERS);
         emit ITimelockPolicy.Cancelled(engine, safe, txHash, safe);
+    }
+
+    /// @dev Deletes the schedule; an owner-path hash is also retired for good: its signatures are
+    ///      public calldata, so otherwise anyone could re-schedule it. A module re-schedules its own.
+    function _cancel(address engine, address safe, bytes32 txHash, address actor) private {
+        delete _schedules[engine][safe][txHash];
+        if (actor == ScopeLib.OWNERS) _cancelled[engine][safe][txHash] = true;
     }
 
     /**
@@ -212,6 +240,7 @@ contract TimelockPolicyQueue is TimelockPolicyStorage {
             _merge(m, engine, safe, id, false);
         }
         require(n != 0, ITimelockPolicy.NoTimelock(txHash));
+        require(!_cancelled[engine][safe][txHash], ITimelockPolicy.CancelledTransaction(txHash));
         assembly ("memory-safe") {
             mstore(ids, n)
         }

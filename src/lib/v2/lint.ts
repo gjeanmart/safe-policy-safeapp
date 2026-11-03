@@ -21,10 +21,10 @@ import {
   isOwners,
   scopeCovers,
 } from './scopes'
-import type { LabelContext } from './settings'
+import { type LabelContext, durationLabel } from './settings'
 
 /**
- * Lint over a (projected) rev 3 configuration (DESIGN §9.6, ~12 rules). Pure: give it the
+ * Lint over a (projected) rev 3 configuration (DESIGN §9.6, 16 rules). Pure: give it the
  * attachments after the draft (`projectAttachments`) and the Safe's modules. `block` findings need
  * an explicit confirmation in the UI; `warn` ones are advice. The engine's own configure rules are
  * not repeated here: `validateChanges` refuses those.
@@ -49,6 +49,10 @@ export type LintRule =
   | 'deny-covers-configure'
   | 'limit-unlisted-spend'
   | 'limit-nft-actor'
+  | 'strict-covers-safe-admin'
+  | 'canceller-covers-owners'
+  | 'delay-below-cooldown'
+  | 'self-oversight'
 
 export type LintFinding = { rule: LintRule; severity: LintSeverity; message: string; attachmentIds: Hex[] }
 
@@ -58,12 +62,14 @@ export type LintInput = {
   attachments: readonly Attachment[]
   modules: readonly Address[]
   ctx?: LabelContext
+  /** TimelockPolicy `COOLDOWN` (C), seconds; rule 15 is skipped until it is known. */
+  cooldown?: bigint
 }
 
 const timelockOf = (a: Attachment) => (a.settings?.policy === 'timelock' ? a.settings.settings : undefined)
 
 export function lint(input: LintInput): LintFinding[] {
-  const { safe, deployment, attachments, modules, ctx = {} } = input
+  const { safe, deployment, attachments, modules, ctx = {}, cooldown } = input
   const { engine } = deployment
   const findings: LintFinding[] = []
   const add = (rule: LintRule, severity: LintSeverity, message: string, list: readonly Attachment[]) =>
@@ -262,6 +268,91 @@ export function lint(input: LintInput): LintFinding[] {
         `${who(actor)} moves what looks like ERC-721 (${nft.map(where).join(', ')}) under a budget at (${who(actor)}, *): ERC-721 shares transferFrom / approve with ERC-20 and cannot be priced. Put the budget at (${who(actor)}, token.*) scopes instead.`,
         [limit, ...nft],
       )
+  }
+
+  const reachesOwners = (a: Attachment) => isAny(a.scope.actor) || isOwners(a.scope.actor)
+  const at = (a: Attachment) => `(${who(a.scope.actor)}, ${where(a)})`
+
+  // 13. A Limit without "other calls pass", or a strict Args, on the owners' calls to the Safe. Limit
+  //     and Args ignore calls to the engine (rev 3 fix P1), so engine.configure still works and the
+  //     owners can detach it; but setGuard, setModuleGuard, setFallbackHandler and owner management
+  //     are denied (Unpriced / NoConstraint) while it is attached.
+  for (const a of attachments) {
+    const strict =
+      (a.settings?.policy === 'limit' && !a.settings.settings.passUnpriced) ||
+      (a.settings?.policy === 'args' && a.settings.settings.strict)
+    if (!strict || !reachesOwners(a) || !(a.opMask & OP_CALL)) continue
+    if (a.scope.callMatch !== CallMatch.ANY && !isAddressEqual(a.scope.to, safe)) continue
+    const label =
+      a.settings?.policy === 'limit' ? 'Budget (no "other calls pass")' : 'Conditions ("deny other calls")'
+    add(
+      'strict-covers-safe-admin',
+      'warn',
+      `${label} at ${at(a)} covers Safe admin calls: setGuard, setModuleGuard, setFallbackHandler and owner management are denied while it is attached. engine.configure is not judged by it, so the owners can still detach it first.`,
+      [a],
+    )
+  }
+
+  // 14. A canceller on a Timelock that delays the owners: it may cancel every owners' schedule
+  //     (all but engine.configure, rev 3 fix T4) at any time, with no cap and no cooldown.
+  for (const a of attachments) {
+    const t = timelockOf(a)
+    if (!t || t.cancellers.length === 0) continue
+    if (!scopeCovers(a.scope, isAny(a.scope.actor) ? OWNERS : a.scope.actor, engine, SELECTORS.configure))
+      continue
+    if (!reachesOwners(a)) continue
+    add(
+      'canceller-covers-owners',
+      'warn',
+      `${t.cancellers.map(who).join(', ')} can cancel every owners' transaction (all but engine.configure) the Timelock at ${at(a)} delays, at any time and without limit. Prefer cancellers on narrower scopes, e.g. (Owners, USDC.*).`,
+      [a],
+    )
+  }
+
+  // 15. A delay shorter than the cooldown C: once a freeze ends the guardians cannot freeze again
+  //     for C, so a transaction scheduled at the start of the cooldown is ready and executed first.
+  if (cooldown !== undefined && cooldown > 0n)
+    for (const a of attachments) {
+      const t = timelockOf(a)
+      if (!t || t.delay <= 0 || BigInt(t.delay) >= cooldown) continue
+      const guarded = attachments.some(
+        (g) =>
+          (timelockOf(g)?.guardians.length ?? 0) > 0 &&
+          (isAny(g.scope.actor) || isAddressEqual(g.scope.actor, a.scope.actor)),
+      )
+      if (!guarded) continue
+      add(
+        'delay-below-cooldown',
+        reachesOwners(a) ? 'block' : 'warn',
+        `The delay at ${at(a)} (${durationLabel(t.delay)}) is shorter than the guardians' cooldown C (${durationLabel(cooldown)}): after a freeze ends, a transaction scheduled at the start of the cooldown is executed before any guardian can freeze again. Use a delay of at least C.`,
+        [a],
+      )
+    }
+
+  // 16. An actor overseeing itself: its own approver (the co-signer checks nothing), or its own
+  //     guardian / lifter (it can lift a freeze someone else put on it). Only the Safe is refused
+  //     on-chain. At Everyone, every enabled module the attachment reaches counts.
+  for (const a of attachments) {
+    if (isOwners(a.scope.actor)) continue
+    const subjects = isAny(a.scope.actor) ? modules : [a.scope.actor]
+    const roles: [string, readonly Address[]][] =
+      a.settings?.policy === 'coSigner'
+        ? [['approver', a.settings.settings.approvers]]
+        : a.settings?.policy === 'timelock'
+          ? [
+              ['guardian', a.settings.settings.guardians],
+              ['lifter', a.settings.settings.lifters],
+            ]
+          : []
+    for (const [role, list] of roles)
+      for (const subject of subjects)
+        if (list.some((x) => isAddressEqual(x, subject)))
+          add(
+            'self-oversight',
+            'block',
+            `${who(subject)} is its own ${role} at ${at(a)}: ${role === 'approver' ? 'it approves its own transactions, the co-signer checks nothing' : 'it can lift any freeze put on it, nobody can stop it'}. List someone else.`,
+            [a],
+          )
   }
 
   return findings

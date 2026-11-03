@@ -10,7 +10,14 @@ import {
 } from 'viem'
 import { policyGuardAbi } from './abi'
 import type { Attachment } from './attachments'
-import { POLICY_INFO, SELECTORS, type V2Deployment, policyNameOf, selectorName } from './policies'
+import {
+  POLICY_INFO,
+  SAFE_HANDLERS,
+  SELECTORS,
+  type V2Deployment,
+  policyNameOf,
+  selectorName,
+} from './policies'
 import {
   ACTOR_LEVEL_OFFSET,
   CallMatch,
@@ -24,6 +31,7 @@ import {
   Operation,
   type Scope,
   actorLabel,
+  anyCall,
   attachmentId,
   isAny,
   isNormalized,
@@ -225,10 +233,15 @@ export const configureCoverIds = (deployment: V2Deployment, actor: Address): Hex
     ),
   )
 
+/** The one Timelock id that counts as covering `actor`'s configuration: `(actor, *)` (rev 3 fix T3). */
+export const configurationCoverId = (deployment: V2Deployment, actor: Address): Hex =>
+  attachmentId(scopeKey(normalizeScope(anyCall(actor))), Kind.POLICY, deployment.policies.timelock)
+
 /**
  * `TimelockNotCoveringConfiguration`: a Timelock with `delay > 0` at OWNERS or ANY needs a Timelock
- * attachment (CALL in its mask, delay at least as long) matching that actor's `engine.configure`
- * call, attached before it or itself.
+ * at that actor's `*` (`(Owners, *)`, `(ANY, *)` for ANY) with CALL in its mask and a delay at least
+ * as long, attached before it or itself. A cover at `(Owners, engine.configure)` alone no longer
+ * counts: it left `setGuard(0)` and other Safe admin calls faster than the delay.
  */
 export function coversConfiguration(
   deployment: V2Deployment,
@@ -238,16 +251,11 @@ export function coversConfiguration(
   opMask: number,
   delay: number,
 ): boolean {
-  for (const cover of configureCoverIds(deployment, actor)) {
-    if (cover === id) {
-      if (opMask & OP_CALL) return true
-      continue
-    }
-    const a = state.find((x) => x.attachmentId === cover)
-    const s = a?.settings?.policy === 'timelock' ? a.settings.settings : undefined
-    if (a && s && s.delay >= delay && a.opMask & OP_CALL) return true
-  }
-  return false
+  const cover = configurationCoverId(deployment, actor)
+  if (cover === id) return (opMask & OP_CALL) !== 0
+  const a = state.find((x) => x.attachmentId === cover)
+  const s = a?.settings?.policy === 'timelock' ? a.settings.settings : undefined
+  return !!a && !!s && s.delay >= delay && (a.opMask & OP_CALL) !== 0
 }
 
 /**
@@ -294,8 +302,8 @@ export function validateChanges(
             !coversConfiguration(deployment, state, id, scope.actor, opMask, value.settings.delay)
           )
             add(
-              `A ${actorLabel(scope.actor)} Timelock needs one at least as long covering engine.configure ` +
-                '(attach a Timelock at (Owners, *) first): otherwise the owners could detach it faster than it delays',
+              `A ${actorLabel(scope.actor)} Timelock needs one at least as long at (${actorLabel(scope.actor)}, any call) ` +
+                '(attach it first): otherwise the owners could detach it, or leave the engine, faster than it delays',
             )
         } catch {
           add('Settings do not decode')
@@ -337,6 +345,7 @@ const call = (to: Address, data: Hex, description: string): OwnerCall => ({
 const safeAdminAbi = parseAbi([
   'function setGuard(address guard)',
   'function setModuleGuard(address moduleGuard)',
+  'function setFallbackHandler(address handler)',
 ])
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
@@ -366,23 +375,40 @@ export const safeCalls = {
       encodeFunctionData({ abi: safeAdminAbi, functionName: 'setModuleGuard', args: [guard] }),
       `setModuleGuard(${guard})`,
     ),
+  setFallbackHandler: (safe: Address, handler: Address): OwnerCall =>
+    call(
+      safe,
+      encodeFunctionData({ abi: safeAdminAbi, functionName: 'setFallbackHandler', args: [handler] }),
+      `setFallbackHandler(${handler})`,
+    ),
 }
 
 /**
- * Installs the engine (SPEC.md §3.3): `[configure, setModuleGuard, setGuard]` in one owner batch,
- * before any guard runs. Leftovers from an earlier install are detached first in the same
- * `configure`. The fallback handler is left alone (the app recommends `TokenCallbackHandler`).
+ * Installs the engine (SPEC.md §3.3): `[configure, setFallbackHandler?, setModuleGuard, setGuard]` in
+ * one owner batch, before any guard runs (so none of it is checked). Leftovers from an earlier install
+ * are detached first in the same `configure`.
+ *
+ * By default the batch also sets Safe's TokenCallbackHandler as fallback handler: with an ERC-1271
+ * handler (CompatibilityFallbackHandler) the owners' off-chain signatures move funds with no policy
+ * running, which voids the owners' Timelock / freeze / recovery timeline (SPEC.md §5.1, §6). Pass
+ * `fallbackHandler: null` to keep the current handler; the call is skipped when `currentHandler`
+ * already is the one asked for.
  */
 export function installCalls(
   safe: Address,
   deployment: V2Deployment,
   changes: readonly Change[],
   leftovers: readonly Attachment[] = [],
+  options: { fallbackHandler?: Address | null; currentHandler?: Address } = {},
 ): OwnerCall[] {
+  const { fallbackHandler = SAFE_HANDLERS.tokenCallback, currentHandler } = options
   const touched = new Set(changes.map(changeAttachmentId))
   const detaches = leftovers.filter((a) => !touched.has(a.attachmentId)).map(detachChange)
+  const setHandler =
+    fallbackHandler !== null && !(currentHandler && isAddressEqual(currentHandler, fallbackHandler))
   return [
     configureCall(deployment.engine, sortForApply(deployment, [...detaches, ...changes])),
+    ...(setHandler ? [safeCalls.setFallbackHandler(safe, fallbackHandler)] : []),
     safeCalls.setModuleGuard(safe, deployment.engine),
     safeCalls.setGuard(safe, deployment.engine),
   ]

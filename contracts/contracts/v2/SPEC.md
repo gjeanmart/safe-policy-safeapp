@@ -24,7 +24,7 @@ A call by actor A to `to.selector` is looked up at 6 scopes, one per level:
 | Level | Scope | App label | Example |
 | --- | --- | --- | --- |
 | 0 | `(ANY, *)` | Everyone, any call | Safenet attestation on every transaction |
-| 1 | `(ANY, to.*)` | Everyone, this contract | Timelock on every call to the Safe itself |
+| 1 | `(ANY, to.*)` | Everyone, this contract | Timelock on every call to the Safe itself (under an `(ANY, *)` one) |
 | 2 | `(ANY, to.selector)` | Everyone, this function | DENY `Safe.setFallbackHandler` |
 | 3 | `(A, *)` | This actor, any call | Ops: Limit, Timelock(0, guardian G) |
 | 4 | `(A, to.*)` | This actor, this contract | Limit on one token |
@@ -78,8 +78,9 @@ by a check never survives a failed execution. A hook or `configure` entered duri
   owners' Timelock delays it, their freeze blocks it, their co-signer approves it.
 - Module path: `configure` needs a level-5 ALLOW `(module, engine.configure)` (F5), e.g. recovery after R.
 - Never inside a batch, never with value, never as DELEGATECALL; any other engine function: `GuardTargetDenied`.
-- Install: the owners execute `[configure, setModuleGuard, setGuard]` in one batch before any guard runs. Leftovers
-  from an earlier install are shown by the app and detached in the same batch.
+- Install: the owners execute `[configure, enableModule..., setFallbackHandler(TokenCallbackHandler), setModuleGuard,
+  setGuard]` in one batch before any guard runs (the handler can be kept by opting out: §6, ERC-1271). Leftovers from an
+  earlier install are shown by the app and detached in the same batch.
 
 ### 3.4 Verdict order
 
@@ -115,46 +116,64 @@ ERC-165, the PASS return, `_forEachMatch` and `_settingsKey`.
 ### 5.1 TimelockPolicy (delay, freeze, cancel)
 
 Settings `{delay, window, guardians[], lifters[], cancellers[]}`, lists of at most 8, never the Safe, no guardians or
-lifters at actor `ANY`. Immutables `MAX_FREEZE` (F) and `COOLDOWN` (C).
+lifters at actor `ANY`. Immutables `MAX_FREEZE` (F) and `COOLDOWN` (C). Schedule and cancel run in
+`TimelockPolicyQueue`, freeze and lift in `TimelockPolicyFreeze(F, C)`, both by DELEGATECALL from
+`TimelockPolicy(F, C, queue, freezer)` (size).
 
 | Function | Who | Effect |
 | --- | --- | --- |
 | `schedule(engine, safe, safeTx, sigs)` | anyone relaying the owners' threshold signatures | queue an owner-path tx (nonce-bound hash) |
 | `scheduleModuleTx(engine, safe, to, value, data, op)` | the module itself | queue its own call |
-| `cancel(engine, safe, txHash)` | a canceller of a matched id, or the scheduling module | delete the schedule |
-| `cancelAsOwners(engine, safe, txHash, sigs)` | anyone relaying `threshold` owner signatures | delete an owner-path schedule only |
-| `freeze(engine, safe, ids[])` | a guardian of every id | freeze each id for F; frozen or cooling ids are skipped |
-| `lift(engine, safe, id)` | a guardian or lifter of id | end the freeze, start the cooldown |
+| `cancel(engine, safe, txHash)` | a canceller of a matched id (never on a configuration change), or the scheduling module | delete the schedule; owner path: final |
+| `cancelAsOwners(engine, safe, txHash, sigs)` | anyone relaying `threshold` owner signatures | delete an owner-path schedule only; final |
+| `freeze(engine, safe, ids[])` | a guardian of every id | freeze each id until the guardian's window ends; frozen or cooling ids, and all ids while the guardian cools down, are skipped |
+| `lift(engine, safe, id)` | a guardian or lifter of id | end the freeze, start the id's cooldown; the guardian that froze it, left with nothing frozen, starts its own |
 
 Merge rule over matched ids: frozen if any is frozen (checked first, even at delay 0); delay = max; start = max(schedule
-time, latest `configuredAt`); ready at start + delay; window = min non-zero, expired after start + delay + window; void
-if scheduled before any id's `frozenUntil`, unless the schedule is a configuration change; consumed on pass.
+time, latest `configuredAt`); ready at start + delay; window = min non-zero over ids with a delay (a kill switch's
+window is ignored), expired after start + delay + window; void if scheduled before any id's `frozenUntil`, unless the
+schedule is a configuration change; consumed on pass.
 
-State machine per attachment: `ACTIVE -> FROZEN (now + F) -> COOLDOWN (frozenUntil + C) -> ACTIVE`; `lift` jumps to
-COOLDOWN at once. No extension. `configure` never resets freeze state.
+Cancel: an owner-path hash, once cancelled, can never be scheduled again (`CancelledTransaction`, `isCancelled`): its
+signatures are public calldata. It binds the nonce, so the owners still sign a new transaction at that nonce. A module
+hash is not retired (the module re-schedules; freeze or detach is the durable stop). A configuration change is never
+cancelled by a listed canceller, only by `cancelAsOwners` or its own module.
+
+State machine per attachment: `ACTIVE -> FROZEN -> COOLDOWN (frozenUntil + C) -> ACTIVE`; `lift` jumps to COOLDOWN at
+once. No extension. Per guardian and `(engine, safe)`: its first freeze opens a window ending F later; each of its
+freezes ends with the window (joins, never extends); when the window ends, or lifts leave it nothing frozen, the
+guardian freezes nothing in that Safe for C (`guardianWindow`). Bound: **one guardian freezes any attachment at most F
+per F + C**, however many attachments it guards. Several colluding guardians can chain windows (documented below).
+`configure`, detach and re-attach never reset freeze state (they never shorten a freeze or a cooldown).
 
 Invariant `TimelockNotCoveringConfiguration`: a delay at actor `OWNERS` or `ANY` needs an attached Timelock of this
-policy, at least as long, covering that actor's call to `engine.configure` (`*`, `engine.*` or `engine.configure`, at
-the actor or `ANY`). Narrow owner timelocks (Spark) therefore cannot be detached faster than they delay.
+policy at `(actor, *)` or `(ANY, *)`, at least as long, with CALL in its mask. A cover at `engine.*` or
+`engine.configure` does not count: it would not delay `setGuard(0)`. Narrow owner timelocks (Spark) therefore sit under
+an owners-wide one and cannot be escaped faster than they delay.
 
 Sees: the transaction hash, the matched ids, the calls (for `isConfiguration`). Cannot see: anything off-chain.
 
-Timelines (T = 24 h owners, R = 72 h recovery, F = 7 d, C = 12 h; T < R < F):
+Timelines (T = 24 h owners, R = 72 h recovery, F = 7 d, C = 12 h; C < T < R < F):
 
 | Compromise | What happens | Bound |
 | --- | --- | --- |
 | Owner keys | Attacker schedules; G freezes `(Owners, *)`; their queue is void or blocked; recovery schedules `swapOwner` (R, unfrozen); new owners `cancelAsOwners` the attacker's configuration schedules; G or recovery lifts | R < F |
-| Guardian | G freezes; owners schedule `configure(replace the attachment without G)`, exempt from voiding, ready at T, blocked until F (or a lift by recovery), executed in the cooldown; G cannot re-freeze during C | F + C per cycle, T < F |
+| Owner keys, after the window | G's window ends; the attacker schedules again; G cools down C, then freezes before it is ready, voiding it | C < T |
+| Guardian | G freezes; owners schedule `configure(replace the attachments without G)`, exempt from voiding and from listed cancellers, ready at T, blocked until G's window ends (or a lift by recovery), executed in G's cooldown; G cannot freeze anything in the Safe during C, even a second attachment matching `configure` | F + C per cycle, T < F |
 | Recovery key | It schedules `swapOwner`, visible for R; owners schedule `configure(detach recovery)` and execute at T | T < R |
-| Two colluding | Lost, as in rev 2 | documented |
+| Two colluding guardians | They chain their windows over attachments matching `configure` | k guardians: k·F; documented |
+| Two colluding (guardian + recovery) | Lost, as in rev 2 | documented |
 
 ### 5.2 ArgsPolicy (conditions, absorbs Recipients)
 
 Settings `{constraints[], strict}`, constraint `{selector, target, index, op, values[]}`; at most 16 constraints, 32
 values; selector `0xffffffff` = any call. Targets WORD (static head word `index`), CALL_TO, VALUE. Ops EQ, NEQ, IN,
 NOT_IN, LTE, GTE, EQ_SAFE. Merge rule: each (call, attachment) judged alone; all constraints that apply must hold; none
-applies and `strict` denies (`NoConstraint`). Who: engine only. Sees head words, `to`, `value`. Cannot see dynamic
-arguments, nested calls, state. App presets: Recipients (`transfer` word 0 IN, `transferFrom` word 1 IN, empty
+applies and `strict` denies (`NoConstraint`). A call to the engine (`configure`) is never judged: it moves nothing,
+and a strict Args at `(Owners, *)` must not lock the owners out of their configuration. Who: engine only. Sees head
+words, `to`, `value`. Cannot see dynamic arguments, nested calls, state. Words are compared in full: use allowlists
+(`IN`, `EQ`, `EQ_SAFE`) for addresses; a denylist (`NEQ`, `NOT_IN`) passes an address word with dirty upper bits, which
+a pre-0.8 token masks and pays. App presets: Recipients (`transfer` word 0 IN, `transferFrom` word 1 IN, empty
 calldata CALL_TO IN), Spenders (`approve` word 0 IN, word 1 LTE cap), Receiver-is-the-Safe (EQ_SAFE on the receiver
 word). Dropped from rev 2 Recipients: `approve(x, 0)` passing for any spender.
 
@@ -173,13 +192,17 @@ Windows are a fixed grid anchored at configure; configure resets spending. Who: 
 | empty calldata, zero value | 0 |
 | a spend above of an unlisted token | `Unpriced`, even with `passUnpriced`: list the token |
 | any other selector, any DELEGATECALL | unpriced: `Unpriced` unless `passUnpriced` |
+| any call to the engine (only `configure` gets through, without value) | not judged: a Limit cannot lock the owners out of `configure` |
 
 Merge rule: each attachment prices the calls it matched, summed over the batch; all must fit (`LimitExceeded` names
 the call). Out of scope: swap outputs and slippage, USD caps (no oracle), pulls through allowances given before the
-Limit, operator rights (`setApprovalForAll`, Morpho `setAuthorization`, Aave `approveDelegation`), debt from
-borrowing, fee-on-transfer and rebasing tokens, Universal Router `execute`, CoW order contents (`setPreSignature`
-carries only a hash: the approval to the vault relayer is the budget), off-chain permits. List only ERC-20s: ERC-721
-shares `transferFrom` and `approve`.
+Limit or by someone else, `transferFrom` from a third party (free: an actor granted `transferFrom` moves allowances
+given to the Safe; pair it with Args Recipients on word 1), operator rights (`setApprovalForAll`, Morpho
+`setAuthorization`, Aave `approveDelegation`), debt from borrowing, fee-on-transfer and rebasing tokens, Universal
+Router `execute`, CoW order contents (`setPreSignature` carries only a hash: every allowance to the vault relayer,
+whoever gave it, is the bound), off-chain permits; with `passUnpriced`, non-standard spend selectors (DAI `push`,
+ERC-1363 `transferAndCall`, Permit2 `approve`) and DELEGATECALLs. List only ERC-20s: ERC-721 shares `transferFrom` and
+`approve`.
 
 ### 5.4 CoSignerPolicy (M-of-N approvals)
 
@@ -201,7 +224,11 @@ same-Safe use.
 
 No settings. `submitAttestation(engine, safe, txHash, deadline, attestation)` by anyone: deadline 0 means the owner
 path (signed over the Safe transaction hash), otherwise the module path (signed over `attestationDigest`, expires at
-the deadline). Merge rule: one credit per transaction, consumed by the check. Epochs as V1 (`updateEpoch`, anyone).
+the deadline). Each attestation can be submitted once per `(engine, safe)`: the owner-path message does not bind
+them, so a spent set keyed by the signature alone would let a front-run under a wrong engine burn it. Validators sign a
+bare hash (deadline 0) only for Safe transaction hashes: on a module call hash it would be a credit that never expires
+(the contract cannot tell the two apart). Merge rule: one credit per transaction, consumed by the check. Epochs as V1
+(`updateEpoch`, anyone).
 
 ## 6. Security
 
@@ -209,23 +236,24 @@ the deadline). Merge rule: one credit per transaction, consumed by the check. Ep
 | --- | --- | --- |
 | Freeze is a policy; configuration an ordinary call | Owners detach the policy to escape it | Detach is a `configure` call: delayed by the same Timelock, blocked while frozen, announced by `Scheduled`; narrow timelocks need a covering one |
 | Freeze state per attachment | A guardian of `(Owners, *)` cannot stop `(Ops, *)` | By design; templates list G on every non-recovery attachment; lint "actor without a guardian" |
-| Rogue guardian | Permanent freeze | F and C immutable, no extension, skip while frozen or cooling; the owners' `configure` schedule survives the freeze and runs in the cooldown; recovery as lifter shortens it |
+| Rogue guardian | Permanent freeze, or staggered freezes over several attachments | F and C immutable; per-guardian window and cooldown per Safe, no extension, skip while frozen or cooling; the owners' `configure` schedule survives the freeze and runs in the cooldown; recovery as lifter shortens it |
+| Cancellers | A canceller vetoes the owners' way out | Never on a configuration change; an owner-path cancel is final, so it is a real veto on one transaction, not a clock reset |
 | Compromised owners during a freeze | Their `configure` schedule survives too | Same exposure as rev 2's surviving request; recovery (R < F) replaces them and `cancelAsOwners` removes it |
 | Owners could cancel recovery | Compromised owners block the way back | `cancelAsOwners` works on owner-path schedules only (`NotOwnersQueue`) |
 | No rising owner cancel threshold | One honest owner cannot stall a compromised threshold | The guardian's freeze voids the owners' queue: freeze, then recover |
 | No engine delay | A Safe without an owners' Timelock reconfigures at once | Their choice; lint warns; every template attaches `(Owners, *)` Timelock |
 | One contract holds T, the freeze and R | One bug hits all three | Recovery is still a separate actor; timeline tests on T < R < F; audit priority |
-| Policies run on `configure`, DENY applies | A deny-all rule or a dead co-signer locks configuration | Lint blocks; recovery with `(Recovery, engine.configure)` after R is the way back |
+| Policies run on `configure`, DENY applies | A deny-all rule or a dead co-signer locks configuration | Limit and Args never judge a call to the engine, so neither can; lint blocks the others; recovery with `(Recovery, engine.configure)` after R is the way back |
 | Safe in a role list | An actor with an ALLOW on the policy makes the Safe freeze, cancel or approve | `configure` rejects the Safe as guardian, lifter, canceller or approver |
 | Restrictions default to both ops | A CALL-only Timelock would miss a granted DELEGATECALL | Zero mask on DENY and POLICY means both ops; ALLOW stays CALL unless asked |
 | One check per transaction | A policy that forgets some matches | `PolicyBase._forEachMatch`; batch tests for every policy |
 | Approvals pushed early | An approval sits until used | `validUntil`, `revoke`, consumed on pass; a digest is usable once |
 | Full-amount approvals | Re-approvals over-count | Accepted: removes the reservation and refill bug class (rev 2 D-4, D-17) |
-| `passUnpriced` for protocol calls | It could hide an unbounded spend | It passes only selectors that are not a spend shape; a spend of an unlisted token (native included) always denies |
-| CoW pre-sign | Receiver and amounts unseen | Budget-bounded by the approval; a `CowOrderHelper` is a later add-on |
+| `passUnpriced` for protocol calls | It could hide an unbounded spend | It passes anything that is not one of the four ERC-20 spend shapes, DELEGATECALLs and non-standard spend selectors included: bound the actor with exact Allows; a known spend of an unlisted token (native included) always denies |
+| CoW pre-sign | Sell token, receiver and amounts unseen | Bounded by every allowance to the vault relayer, the owners' own included (keep those at zero next to an agent); a `CowOrderHelper` is a later add-on |
 | Preview off-chain | TS drifts from the engine; RPC refuses `eth_call` from a contract | The app never matches in TS (`matches` view); state-override call as fallback |
 | Quorum dropped | Same-Safe tiers by amount | Committee Safe as a module actor with its own Limit, or CoSigner with owners as approvers |
-| ERC-1271 dropped | Owners' off-chain signatures (permits, Permit2, CoW orders) bypass every policy | Install leaves the fallback handler alone; the app recommends Safe's `TokenCallbackHandler` and shows a notice; one documented test keeps the attack visible |
+| ERC-1271 dropped | Owners' off-chain signatures (permits, Permit2, CoW orders) bypass every policy, the Timelock and the freeze included | Install sets Safe's `TokenCallbackHandler` (no ERC-1271) unless the owners opt out; every timeline in §5.1 assumes it; with an ERC-1271 handler kept the app shows a notice; one documented test keeps the attack visible |
 | WA-4014, WA-4016 | | Unchanged: every matching scope runs; the actor is in the key |
 
 ## 7. Removed from rev 2 and why

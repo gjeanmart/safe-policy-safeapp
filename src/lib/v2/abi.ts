@@ -525,6 +525,11 @@ export const timelockPolicyAbi = [
     name: 'AttachmentFrozen',
     type: 'error',
   },
+  {
+    inputs: [{ internalType: 'bytes32', name: 'txHash', type: 'bytes32' }],
+    name: 'CancelledTransaction',
+    type: 'error',
+  },
   { inputs: [], name: 'GasFieldsNotZero', type: 'error' },
   { inputs: [], name: 'InvalidSettings', type: 'error' },
   {
@@ -880,6 +885,32 @@ export const timelockPolicyAbi = [
         type: 'tuple',
       },
     ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'address', name: 'engine', type: 'address' },
+      { internalType: 'address', name: 'safe', type: 'address' },
+      { internalType: 'address', name: 'guardian', type: 'address' },
+    ],
+    name: 'guardianWindow',
+    outputs: [
+      { internalType: 'uint64', name: 'end', type: 'uint64' },
+      { internalType: 'uint64', name: 'cooldownUntil', type: 'uint64' },
+      { internalType: 'uint32', name: 'frozen', type: 'uint32' },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'address', name: 'engine', type: 'address' },
+      { internalType: 'address', name: 'safe', type: 'address' },
+      { internalType: 'bytes32', name: 'txHash', type: 'bytes32' },
+    ],
+    name: 'isCancelled',
+    outputs: [{ internalType: 'bool', name: '', type: 'bool' }],
     stateMutability: 'view',
     type: 'function',
   },
@@ -1630,6 +1661,8 @@ export const safenetPolicyAbi = [
   },
   {
     inputs: [
+      { internalType: 'address', name: 'engine', type: 'address' },
+      { internalType: 'address', name: 'safe', type: 'address' },
       {
         components: [
           {
@@ -1844,6 +1877,11 @@ export const policyErrorsAbi = [
       { internalType: 'uint64', name: 'until', type: 'uint64' },
     ],
     name: 'AttachmentFrozen',
+    type: 'error',
+  },
+  {
+    inputs: [{ internalType: 'bytes32', name: 'txHash', type: 'bytes32' }],
+    name: 'CancelledTransaction',
     type: 'error',
   },
   { inputs: [], name: 'GasFieldsNotZero', type: 'error' },

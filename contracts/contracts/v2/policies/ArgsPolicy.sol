@@ -10,7 +10,8 @@ import {PolicyBase} from "./PolicyBase.sol";
  * @title ArgsPolicy
  * @notice Conditions on a call's static arguments, target and value ("Allow + conditions"); the
  *         app's Recipients, Spenders and Receiver-is-the-Safe presets are settings of this
- *         policy. SPEC.md §5.2, merge rule in {IArgsPolicy}.
+ *         policy. Calls to the engine (`configure`) are not judged. SPEC.md §5.2, merge rule in
+ *         {IArgsPolicy}.
  * @dev Constraints live under a versioned key, so `configure` replaces them without deleting the
  *      old ones (no unbounded loop over stale storage).
  */
@@ -74,6 +75,10 @@ contract ArgsPolicy is PolicyBase, IArgsPolicy {
 
     /// @dev One `(call, attachment)` pair, judged alone with the attachment's own constraints.
     function _checkMatch(address engine, Context calldata ctx, Call calldata call, Match calldata m) private view {
+        // A call that reaches a policy with the engine as target is `configure` (zero value, the
+        // engine denies anything else): it moves nothing, and judging it would let a strict Args
+        // at `(Owners, *)` lock the owners out of their own configuration.
+        if (call.to == engine) return;
         (address safe, uint16 callIndex, bytes32 attachmentId) = (ctx.safe, m.callIndex, m.attachmentId);
         bytes calldata data = call.data;
         // Empty calldata reads as selector 0 (the engine rejects 1 to 3 bytes before any policy).

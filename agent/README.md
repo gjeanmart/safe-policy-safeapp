@@ -169,6 +169,7 @@ safe-role signer
   "policies": {
     "timelock": "0x…",
     "timelockQueue": "0x…",
+    "timelockFreeze": "0x…",
     "args": "0x…",
     "limit": "0x…",
     "coSigner": "0x…",

@@ -104,7 +104,7 @@ export const STORIES: Story[] = [
     problem: 'ERC-1271 bypasses the guard',
     scenario: 'Owners sign a USDC permit off-chain (off-chain permit attack)',
     v1: 'isValidSignature valid: permit + transferFrom drain, no guard call',
-    v2: 'Same in rev 3 (ERC-1271 handling dropped): the app recommends TokenCallbackHandler and shows a notice',
+    v2: 'Same engine-side (ERC-1271 handling dropped); the install batch sets TokenCallbackHandler (no ERC-1271) unless the owners opt out',
     v2Wins: false,
   },
 ]

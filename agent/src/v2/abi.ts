@@ -6,7 +6,7 @@
 export const POLICY_GUARD_INTERFACE_ID = '0x0f8d6033'
 
 /** `type(ITimelockPolicy).interfaceId`: the only policy that reports its own interface. */
-export const TIMELOCK_POLICY_INTERFACE_ID = '0xc8de6ca0'
+export const TIMELOCK_POLICY_INTERFACE_ID = '0xa46bc64f'
 
 /** IPolicyGuard: hooks, configure, matches, views. */
 export const policyGuardAbi = [
@@ -1113,6 +1113,16 @@ export const timelockPolicyAbi = [
     type: 'error',
   },
   {
+    inputs: [
+      {
+        name: 'txHash',
+        type: 'bytes32',
+      },
+    ],
+    name: 'CancelledTransaction',
+    type: 'error',
+  },
+  {
     inputs: [],
     name: 'GasFieldsNotZero',
     type: 'error',
@@ -1868,6 +1878,64 @@ export const timelockPolicyAbi = [
             type: 'address[]',
           },
         ],
+      },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      {
+        name: 'engine',
+        type: 'address',
+      },
+      {
+        name: 'safe',
+        type: 'address',
+      },
+      {
+        name: 'guardian',
+        type: 'address',
+      },
+    ],
+    name: 'guardianWindow',
+    outputs: [
+      {
+        name: 'end',
+        type: 'uint64',
+      },
+      {
+        name: 'cooldownUntil',
+        type: 'uint64',
+      },
+      {
+        name: 'frozen',
+        type: 'uint32',
+      },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [
+      {
+        name: 'engine',
+        type: 'address',
+      },
+      {
+        name: 'safe',
+        type: 'address',
+      },
+      {
+        name: 'txHash',
+        type: 'bytes32',
+      },
+    ],
+    name: 'isCancelled',
+    outputs: [
+      {
+        name: '',
+        type: 'bool',
       },
     ],
     stateMutability: 'view',
@@ -3504,6 +3572,16 @@ export const v2ErrorsAbi = [
       },
     ],
     name: 'AttachmentFrozen',
+    type: 'error',
+  },
+  {
+    inputs: [
+      {
+        name: 'txHash',
+        type: 'bytes32',
+      },
+    ],
+    name: 'CancelledTransaction',
     type: 'error',
   },
   {

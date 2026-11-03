@@ -161,7 +161,7 @@ function SettingsFields({
           {text(
             'cancellers',
             'Cancellers',
-            'May cancel a schedule this attachment matched (e.g. another Safe).',
+            "May cancel a schedule this attachment matched (e.g. another Safe), without limit; never an owners' engine.configure.",
             '0x…',
             true,
           )}

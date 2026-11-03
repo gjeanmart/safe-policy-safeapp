@@ -18,8 +18,8 @@ import {PolicyBase} from "./PolicyBase.sol";
  * @title LimitPolicy ("Transfer budget")
  * @notice Per-token budgets on a fixed window grid. One check per Safe transaction prices every
  *         matched call in order and debits each matched attachment, so a batch sums. Approvals
- *         count in full, revocations are free. SPEC.md §5.3, pricing and merge rule in
- *         {ILimitPolicy}.
+ *         count in full, revocations are free. Calls to the engine (`configure`) are not judged.
+ *         SPEC.md §5.3, pricing and merge rule in {ILimitPolicy}.
  * @dev Budgets live under a versioned key: `configure` starts fresh budgets (nothing spent,
  *      windows anchored at configure time) without iterating the old ones. Debits are written as
  *      the check goes; a deny reverts them all, so they persist only when the whole check passes.
@@ -122,6 +122,10 @@ contract LimitPolicy is PolicyBase, ILimitPolicy {
     /// @dev Prices one matched call and debits the attachment. Matches come in call order, so
     ///      the calls of a batch are debited one after the other and sum.
     function _checkMatch(address engine, Context calldata ctx, Call calldata call, Match calldata m) private {
+        // A call that reaches a policy with the engine as target is `configure` (zero value, the
+        // engine denies anything else): it moves nothing, and judging it would let a Limit at
+        // `(Owners, *)` lock the owners out of their own configuration.
+        if (call.to == engine) return;
         bytes32 key = _settingsKey(engine, ctx.safe, m.attachmentId);
         bool passUnpriced = $configs[key].passUnpriced;
         bytes4 selector = bytes4(call.data);

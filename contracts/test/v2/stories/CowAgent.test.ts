@@ -44,7 +44,9 @@ import type { MetaTx } from '../fixtures/safe'
  * Story: an AI agent trades on CoW Protocol (COOKBOOK "CoW agent"). The agent (a module key)
  * approves the CoW vault relayer, capped, and pre-signs orders with `setPreSignature`. Every agent
  * transaction needs the co-signer service's approval, consumed on use; the guardian's kill switch
- * stops the agent and nobody else.
+ * stops the agent and nobody else. A pre-signed order can sell any token the Safe has approved to
+ * the vault relayer: the bound is every allowance to the relayer, the owners' own included, not
+ * only the agent's budget.
  *
  * Agent: Timelock(0, guardian G), Limit 50,000 USDC a week (passUnpriced), CoSigner 1-of-1 at
  * `(Agent, *)`; Allow `USDC.approve` + Args (spender EQ relayer, amount LTE 20,000); Allow
@@ -202,7 +204,7 @@ describe('Story: a CoW Protocol agent with a co-signer and a kill switch', () =>
   })
 
   describe('what the policies cannot see', () => {
-    it('the order contents: a pre-signature of an order paying the attacker passes; the approval is the bound', async () => {
+    it('the order contents: a pre-signature of an order paying the attacker passes; the allowance to the relayer is the bound', async () => {
       const w = await loadFixture(world)
       await agentDoes(w, approve(w, w.relayerAddress, usdc(5_000)))
       // The uid hides sell amount, buy amount and receiver: the policies see only `setPreSignature(uid, true)`.
@@ -217,6 +219,20 @@ describe('Story: a CoW Protocol agent with a co-signer and a kill switch', () =>
         pulledMore = false
       }
       expect(pulledMore).to.equal(false)
+    })
+
+    it("the bound is every allowance to the vault relayer, whoever gave it: the owners' own approval is in the agent's reach", async () => {
+      const w = await loadFixture(world)
+      // The owners trade on CoW Swap themselves and approve the relayer for 80,000: no agent budget sees it.
+      await execOwners(w, approve(w, w.relayerAddress, usdc(80_000)))
+      // The agent spends nothing of its budget: it only pre-signs an order selling all of it to the attacker.
+      await agentDoes(w, preSign(w, orderUid(w)))
+      await w.relayer.settle(w.tokenAddress, w.safeAddress, w.attacker.address, usdc(80_000))
+      expect(await w.token.balanceOf(w.attacker.address)).to.equal(usdc(80_000))
+      const limitId = attachmentId(anyCall(w.agent.address), Kind.POLICY, addrOf(w.limit))
+      expect(
+        (await w.limit.remaining(w.engineAddress, w.safeAddress, limitId, w.tokenAddress)).spent,
+      ).to.equal(0n)
     })
 
     it('the reviewed transaction: the co-signer approves a hash; it must decode the call itself', async () => {

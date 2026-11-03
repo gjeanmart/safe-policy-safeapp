@@ -178,6 +178,8 @@ export function errorText(e: DecodedError, ctx: ErrorContext): string {
       return `the schedule was voided by a freeze of ${ctx.attachment(a[1] as Hex)}`
     case 'AlreadyScheduled':
       return 'already scheduled'
+    case 'CancelledTransaction':
+      return 'the owners cancelled this signed transaction for good: it can never be scheduled again (sign a new one at another nonce)'
     case 'NoTimelock':
       return 'no Timelock applies to this call'
     case 'NotCanceller':

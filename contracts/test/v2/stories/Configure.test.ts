@@ -3,12 +3,15 @@ import { expect } from 'chai'
 import { ZeroAddress } from 'ethers'
 import {
   Kind,
+  MONTH,
   OWNERS,
   Op,
   SEL,
   type World,
   allow,
   anyCall,
+  argsSettings,
+  attach,
   attachmentId,
   batchTx,
   call,
@@ -19,8 +22,11 @@ import {
   execModule,
   execOwners,
   expectEngineError,
+  expectPolicyDenied,
   install,
+  limitSettings,
   onFunction,
+  recipientsPreset,
   safeCall,
   transfer,
   usdc,
@@ -31,7 +37,8 @@ import { guardsOf } from '../fixtures/safe'
  * Story: configuration is an ordinary Safe transaction to `engine.configure` (SPEC §3.3, COOKBOOK
  * "Configure"). The owners' call is granted without an Allow, so they can never lock themselves
  * out by forgetting one; a module needs the exact Allow `(module, engine.configure)`; it never runs
- * inside a batch, with value or as a DELEGATECALL; DENYs and policies apply to it as to any call.
+ * inside a batch, with value or as a DELEGATECALL; DENYs and policies apply to it as to any call,
+ * except Limit and Args, which never judge a call to the engine (it moves nothing).
  */
 
 async function world() {
@@ -109,6 +116,47 @@ describe('Story: configuration is an ordinary transaction', () => {
       0,
       attachmentId(lock.scope, Kind.DENY),
     ])
+  })
+
+  describe('Limit and Args never judge configure (they cannot lock the owners out)', () => {
+    it('a Limit at (Owners, *) without passUnpriced: payments are priced, configure passes, Safe admin calls stay Unpriced', async () => {
+      const w = await deployWorld()
+      const budget = attach(
+        anyCall(OWNERS),
+        w.limit,
+        limitSettings([{ token: w.tokenAddress, amount: usdc(1000), period: MONTH }]),
+      )
+      await install(w, [allow(anyCall(OWNERS)), budget])
+      await execOwners(w, transfer(w, w.vendorA.address, usdc(10)))
+      await expectPolicyDenied(execOwners(w, safeCall(w, 'setGuard', [ZeroAddress])), w, w.limit, 'Unpriced')
+      await expectPolicyDenied(
+        execOwners(w, safeCall(w, 'setModuleGuard', [ZeroAddress])),
+        w,
+        w.limit,
+        'Unpriced',
+      )
+      // The call to the engine moves nothing: the owners can always detach the culprit.
+      await execOwners(w, configureCall(w, [detach(anyCall(OWNERS), Kind.POLICY, w.limit)]))
+      expect(await ids(w)).to.deep.equal([attachmentId(anyCall(OWNERS), Kind.ALLOW)])
+      await execOwners(w, safeCall(w, 'setGuard', [ZeroAddress]))
+    })
+
+    it('a strict Args at (Owners, *) (Recipients preset): configure passes, Safe admin calls stay NoConstraint', async () => {
+      const w = await deployWorld()
+      await install(w, [
+        allow(anyCall(OWNERS)),
+        attach(anyCall(OWNERS), w.args, argsSettings(recipientsPreset([w.vendorA.address]), true)),
+      ])
+      await execOwners(w, transfer(w, w.vendorA.address, usdc(10)))
+      await expectPolicyDenied(
+        execOwners(w, safeCall(w, 'setGuard', [ZeroAddress])),
+        w,
+        w.args,
+        'NoConstraint',
+      )
+      await execOwners(w, configureCall(w, [detach(anyCall(OWNERS), Kind.POLICY, w.args)]))
+      await execOwners(w, safeCall(w, 'setGuard', [ZeroAddress]))
+    })
   })
 
   describe('leftovers at install', () => {

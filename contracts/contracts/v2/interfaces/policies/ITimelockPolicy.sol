@@ -17,25 +17,34 @@ import {IPolicy} from "../IPolicy.sol";
  *      - frozen if any id is frozen (`AttachmentFrozen`), checked first, even when `delay == 0`;
  *      - delay = max delay; if 0, pass without a schedule;
  *      - start = max(schedule time, max `configuredAt` over ids): re-configuring restarts the wait;
- *      - ready at start + delay (`NotReady`); window = min non-zero window, expired after
- *        start + delay + window (`ScheduleExpired`);
+ *      - ready at start + delay (`NotReady`); window = min non-zero window over the ids with
+ *        `delay > 0` (a kill switch's window is ignored), expired after start + delay + window
+ *        (`ScheduleExpired`);
  *      - void if scheduled before the `frozenUntil` of any id (`VoidedByFreeze`), unless the
  *        schedule is a configuration change (a top-level CALL to `IPolicyGuard.configure`);
- *      - cancellers: the union of the cancellers of the ids matched at schedule time.
+ *      - cancellers: the union of the cancellers of the ids matched at schedule time, except on a
+ *        configuration change (only the owners, or the module that scheduled it, cancel those).
+ *      A cancelled owner-path hash can never be scheduled again (`CancelledTransaction`).
  *      On pass the schedule is deleted (consumed) and `Executed` is emitted.
  *
  *      Configuration invariant (`TimelockNotCoveringConfiguration`): an attachment with
  *      `delay > 0` whose actor is `ScopeLib.OWNERS` or `ScopeLib.ANY` needs an attached Timelock
- *      attachment of this policy, with `delay >=` its delay and CALL in its op mask, that matches
- *      that actor's call to `engine.configure`: at actor `actor` or `ANY`, scope `*`, `engine.*`
- *      or `engine.configure`. The attachment itself qualifies when it covers `configure`. So the
- *      owners can never remove a delay faster than the delay itself. Module-actor attachments
- *      are exempt: the owners remove them through their own delay.
+ *      attachment of this policy at `(actor, *)` or `(ANY, *)`, with `delay >=` its delay and
+ *      CALL in its op mask (the attachment itself qualifies when it is that one). Only an
+ *      actor-wide delay also delays `setGuard(0)` and `setModuleGuard(0)`, so the owners can
+ *      never remove a delay faster than the delay itself. Module-actor attachments are exempt:
+ *      the owners remove them through their own delay.
  *
- *      Freeze state per attachment: `ACTIVE -> FROZEN (until now + MAX_FREEZE) -> COOLDOWN (until
- *      frozenUntil + COOLDOWN) -> ACTIVE`; `lift` ends FROZEN at once and starts the cooldown.
+ *      Freeze state per attachment: `ACTIVE -> FROZEN (until the guardian's window end) -> COOLDOWN
+ *      (until frozenUntil + COOLDOWN) -> ACTIVE`; `lift` ends FROZEN at once and starts the cooldown.
  *      No extension: freezing a frozen or cooling attachment is skipped (`FreezeSkipped`).
- *      `configure` keeps the freeze state of an id (it never shortens a freeze or a cooldown).
+ *      Freeze window per guardian and `(engine, safe)`: its first freeze opens a window ending
+ *      MAX_FREEZE later; its later freezes end with the window (they join it, never extend it);
+ *      when the window ends, or a lift leaves the guardian nothing frozen, the guardian cannot
+ *      freeze anything in that Safe for COOLDOWN. So one guardian freezes any attachment at most
+ *      F per F + C. Several colluding guardians can chain their windows (documented).
+ *      Freeze state is keyed by attachment id and guardian: `configure`, detach and re-attach keep
+ *      it (they never shorten a freeze or a cooldown).
  */
 interface ITimelockPolicy is IPolicy {
     /**
@@ -155,6 +164,9 @@ interface ITimelockPolicy is IPolicy {
     /// @notice Owner path: the nonce was already used.
     error StaleNonce(uint256 nonce, uint256 current);
 
+    /// @notice Owner path: this transaction was cancelled; its signatures cannot schedule it again.
+    error CancelledTransaction(bytes32 txHash);
+
     // --- check ---
     error AttachmentFrozen(bytes32 attachmentId, uint64 until);
     /// @notice No schedule for `txHash`, or one made by another actor.
@@ -205,7 +217,9 @@ interface ITimelockPolicy is IPolicy {
     /**
      * @notice Cancels a schedule. Who: a canceller of one of the schedule's `attachmentIds` (read
      *         from the current settings), or, for a module-path schedule, the module that made it.
-     *         Reverts `NotScheduled`, `NotCanceller`. Emits `Cancelled`.
+     *         A configuration change (`isConfiguration`) is never cancelled by a listed canceller.
+     *         An owner-path cancel is final (`CancelledTransaction` on a re-schedule); a module may
+     *         re-schedule its own call. Reverts `NotScheduled`, `NotCanceller`. Emits `Cancelled`.
      */
     function cancel(address engine, address safe, bytes32 txHash) external;
 
@@ -213,27 +227,32 @@ interface ITimelockPolicy is IPolicy {
      * @notice Cancels an owner-path schedule with `threshold` owner signatures over
      *         {cancelDigest} (`ISafe.checkNSignatures(msg.sender, digest, signatures, threshold)`).
      *         Who: anyone relaying the signatures. Module-path schedules (recovery included) cannot
-     *         be cancelled this way (`NotOwnersQueue`). Emits `Cancelled` with `by == safe`.
+     *         be cancelled this way (`NotOwnersQueue`). Final: the hash can never be scheduled
+     *         again. Emits `Cancelled` with `by == safe`.
      */
     function cancelAsOwners(address engine, address safe, bytes32 txHash, bytes calldata signatures) external;
 
     /**
-     * @notice Freezes each listed attachment for `MAX_FREEZE`. Who: a guardian of every listed id
-     *         (`NotGuardian` otherwise). Ids already frozen or cooling down are skipped
-     *         (`FreezeSkipped`), never extended. Emits `Frozen` per frozen id.
+     * @notice Freezes each listed attachment until the end of the caller's freeze window (opened
+     *         by its first freeze, `MAX_FREEZE` long). Who: a guardian of every listed id
+     *         (`NotGuardian` otherwise). Ids already frozen or cooling down, and every id while the
+     *         guardian itself cools down, are skipped (`FreezeSkipped`), never extended. Emits
+     *         `Frozen` per frozen id.
      */
     function freeze(address engine, address safe, bytes32[] calldata attachmentIds) external;
 
     /**
-     * @notice Ends a freeze early and starts its cooldown. Who: a guardian or lifter of the id
+     * @notice Ends a freeze early and starts its cooldown; the guardian that froze it, if left
+     *         with nothing frozen, starts its own cooldown too. Who: a guardian or lifter of the id
      *         (`NotGuardianOrLifter`). Reverts `NotFrozen` when not frozen. Emits `Lifted`.
      */
     function lift(address engine, address safe, bytes32 attachmentId) external;
 
-    /// @notice F: the longest a freeze lasts (immutable).
+    /// @notice F: the longest a guardian's freeze window lasts (immutable).
     function MAX_FREEZE() external view returns (uint256);
 
-    /// @notice C: after a freeze ends, no new freeze of that attachment for this long (immutable).
+    /// @notice C: after a freeze ends, no new freeze of that attachment, nor by that guardian in
+    ///         that Safe, for this long (immutable).
     function COOLDOWN() external view returns (uint256);
 
     function getSettings(address engine, address safe, bytes32 attachmentId) external view returns (Settings memory);
@@ -250,6 +269,19 @@ interface ITimelockPolicy is IPolicy {
         address safe,
         bytes32 attachmentId
     ) external view returns (uint64 frozenUntil, uint64 cooldownUntil);
+
+    /**
+     * @notice A guardian's freeze window in `safe`: its freezes end at `end`; it cannot freeze
+     *         from `end` until `cooldownUntil`; `frozen` ids it froze in the window are not lifted.
+     */
+    function guardianWindow(
+        address engine,
+        address safe,
+        address guardian
+    ) external view returns (uint64 end, uint64 cooldownUntil, uint32 frozen);
+
+    /// @notice True once an owner-path `txHash` was cancelled: it can never be scheduled again.
+    function isCancelled(address engine, address safe, bytes32 txHash) external view returns (bool);
 
     /**
      * @notice EIP-712 digest the owners sign to cancel: domain `("TimelockPolicy", "1", chainid,

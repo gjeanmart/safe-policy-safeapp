@@ -1,5 +1,15 @@
 import { expect } from 'chai'
-import { AbiCoder, Interface, ZeroAddress, ZeroHash, getAddress, id, toBeHex, zeroPadValue } from 'ethers'
+import {
+  AbiCoder,
+  Interface,
+  ZeroAddress,
+  ZeroHash,
+  concat,
+  getAddress,
+  id,
+  toBeHex,
+  zeroPadValue,
+} from 'ethers'
 import { ethers } from 'hardhat'
 import type { ArgsLimitEngineStub, ArgsPolicy } from '../../../typechain-types'
 import { expectAnyRevert, expectRevert } from '../helpers'
@@ -301,6 +311,30 @@ describe('V2 rev 3 ArgsPolicy (WP C)', () => {
       await configure(A, { constraints: [], strict: true })
       await expectRevert(check1(call(alice)), policy, 'NoConstraint', [0, A])
       await expectRevert(check1(transfer(alice)), policy, 'NoConstraint', [0, A])
+    })
+
+    it('address words are compared in full: dirty upper bits fail an allowlist (IN) but pass a denylist (NEQ, NOT_IN)', async () => {
+      // A pre-0.8 token that masks the address would pay `eve` here: denylists are not reliable, use IN.
+      const dirtyEve = concat([TRANSFER, '0xff' + word(eve).slice(4), word(1n)])
+      await configure(A, { constraints: [c(TRANSFER, Target.WORD, 0, Op.IN, [eve, alice])], strict: true })
+      await expectRevert(check1(call(usdc, dirtyEve)), policy, 'ConstraintFailed', [0, A, 0])
+      await configure(A, { constraints: [c(TRANSFER, Target.WORD, 0, Op.NEQ, [eve])], strict: true })
+      await expectRevert(check1(transfer(eve)), policy, 'ConstraintFailed', [0, A, 0])
+      await check1(call(usdc, dirtyEve))
+      await configure(A, { constraints: [c(TRANSFER, Target.WORD, 0, Op.NOT_IN, [eve])], strict: true })
+      await check1(call(usdc, dirtyEve))
+    })
+
+    it('a call to the engine (configure) is not judged: neither strict nor a failing constraint denies it', async () => {
+      const configureData = sel(
+        'configure((bool,(address,address,bytes4,uint8),uint8,address,uint8,bytes)[])',
+      )
+      await configure(A, { constraints: [], strict: true })
+      await check1(call(engineAddr, configureData))
+      await expectRevert(check1(call(alice, configureData)), policy, 'NoConstraint', [0, A])
+      await configure(B, { constraints: [c(ANY_SELECTOR, Target.CALL_TO, 0, Op.EQ, [alice])], strict: true })
+      await check1(call(engineAddr, configureData), [A, B])
+      await expectRevert(check1(call(bob, configureData), [B]), policy, 'ConstraintFailed', [0, B, 0])
     })
 
     it('every constraint of an attachment that applies must hold (AND)', async () => {

@@ -20,7 +20,7 @@ import {
  * Deploys the Policy Engine V2 prototype (rev 3, SPEC.md) on Sepolia, one contract per transaction:
  *
  *   PolicyGuardConfig → PolicyGuard(trusted batches, config)
- *   → TimelockPolicyQueue → TimelockPolicy(MAX_FREEZE 7 d, COOLDOWN 12 h, queue)
+ *   → TimelockPolicyQueue → TimelockPolicyFreeze(F, C) → TimelockPolicy(MAX_FREEZE 7 d, COOLDOWN 12 h, queue, freezer)
  *   → ArgsPolicy → LimitPolicy → CoSignerPolicy → SafenetPolicy (only with every SAFENET_* variable)
  *
  *   npx hardhat vars set SEPOLIA_DEPLOYER_KEY      # read by hardhat.config.ts, never by this script

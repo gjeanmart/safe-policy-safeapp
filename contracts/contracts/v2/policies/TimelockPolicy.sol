@@ -7,8 +7,9 @@ import {IPolicyGuard} from "../interfaces/IPolicyGuard.sol";
 import {ITimelockPolicy} from "../interfaces/policies/ITimelockPolicy.sol";
 import {MAX_ROLE_MEMBERS} from "../libraries/Constants.sol";
 import {ScopeLib} from "../libraries/Scope.sol";
-import {AttachmentView, Call, Context, Kind, Match, Scope} from "../libraries/Types.sol";
+import {AttachmentView, Call, CallMatch, Context, Kind, Match, Scope} from "../libraries/Types.sol";
 import {PolicyBase} from "./PolicyBase.sol";
+import {TimelockPolicyFreeze} from "./TimelockPolicyFreeze.sol";
 import {TimelockPolicyStorage} from "./TimelockPolicyQueue.sol";
 
 /**
@@ -16,8 +17,9 @@ import {TimelockPolicyStorage} from "./TimelockPolicyQueue.sol";
  * @notice Matched transactions wait `delay` after a schedule pushed on-chain; guardians freeze an
  *         attachment for at most `MAX_FREEZE`; guardians or lifters lift; cancellers, the
  *         scheduling module or the owners cancel. Rules and merge: {ITimelockPolicy}, SPEC.md §5.1.
- * @dev Scheduling and cancelling run in {TimelockPolicyQueue}, deployed separately and passed in, and
- *      reached by DELEGATECALL on this storage, so each contract stays under 10,000 bytes.
+ * @dev Scheduling and cancelling run in {TimelockPolicyQueue}, freeze and lift in
+ *      {TimelockPolicyFreeze}, each deployed separately, passed in, and reached by DELEGATECALL on
+ *      this storage, so each contract stays under 10,000 bytes.
  */
 contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
     uint256 public immutable override MAX_FREEZE;
@@ -25,14 +27,25 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
 
     /// @dev {TimelockPolicyQueue}: `schedule`, `scheduleModuleTx`, `cancel`, `cancelAsOwners`.
     address private immutable _QUEUE;
+    /// @dev {TimelockPolicyFreeze}: `freeze`, `lift`.
+    address private immutable _FREEZER;
 
     /// @param queue A deployed {TimelockPolicyQueue}, deployed on its own: a child create would
-    ///        push this deployment over the 2^24 per-transaction gas cap. `InvalidSettings` if it has no code.
-    constructor(uint256 maxFreeze, uint256 cooldown, address queue) {
-        require(queue.code.length != 0, InvalidSettings());
+    ///        push this deployment over the 2^24 per-transaction gas cap.
+    /// @param freezer A deployed {TimelockPolicyFreeze} built with the same `maxFreeze` and `cooldown`.
+    /// @dev `InvalidSettings` if a module has no code or the freezer's F or C differ.
+    constructor(uint256 maxFreeze, uint256 cooldown, address queue, address freezer) {
+        require(
+            queue.code.length != 0 &&
+                freezer.code.length != 0 &&
+                TimelockPolicyFreeze(freezer).MAX_FREEZE() == maxFreeze &&
+                TimelockPolicyFreeze(freezer).COOLDOWN() == cooldown,
+            InvalidSettings()
+        );
         MAX_FREEZE = maxFreeze;
         COOLDOWN = cooldown;
         _QUEUE = queue;
+        _FREEZER = freezer;
     }
 
     /// @inheritdoc PolicyBase
@@ -92,7 +105,7 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
 
     /// @inheritdoc ITimelockPolicy
     function schedule(address, address, SafeTransaction calldata, bytes calldata) external returns (bytes32) {
-        _delegateToQueue();
+        _delegate(_QUEUE);
     }
 
     /// @inheritdoc ITimelockPolicy
@@ -104,17 +117,17 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
         bytes calldata,
         Operation
     ) external returns (bytes32) {
-        _delegateToQueue();
+        _delegate(_QUEUE);
     }
 
     /// @inheritdoc ITimelockPolicy
     function cancel(address, address, bytes32) external {
-        _delegateToQueue();
+        _delegate(_QUEUE);
     }
 
     /// @inheritdoc ITimelockPolicy
     function cancelAsOwners(address, address, bytes32, bytes calldata) external {
-        _delegateToQueue();
+        _delegate(_QUEUE);
     }
 
     /// @notice The scheduling module this policy DELEGATECALLs.
@@ -122,9 +135,13 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
         return _QUEUE;
     }
 
-    /// @dev Forwards the current call to {TimelockPolicyQueue} and returns or reverts with its result.
-    function _delegateToQueue() private {
-        address target = _QUEUE;
+    /// @notice The freeze module this policy DELEGATECALLs.
+    function freezer() external view returns (address) {
+        return _FREEZER;
+    }
+
+    /// @dev Forwards the current call to `target` and returns or reverts with its result.
+    function _delegate(address target) private {
         assembly ("memory-safe") {
             calldatacopy(0, 0, calldatasize())
             let ok := delegatecall(gas(), target, 0, calldatasize(), 0, 0)
@@ -137,43 +154,17 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
     }
 
     // =============================================================================================
-    // Freeze and lift
+    // Freeze and lift: run by {TimelockPolicyFreeze} on this storage
     // =============================================================================================
 
-    /**
-     * @inheritdoc ITimelockPolicy
-     * @dev A detached attachment has no guardians: otherwise a guardian removed by a detach could
-     *      freeze it, and a later re-attach (same id) would inherit that freeze.
-     */
-    function freeze(address engine, address safe, bytes32[] calldata attachmentIds) external {
-        for (uint256 i = 0; i < attachmentIds.length; i++) {
-            bytes32 id = attachmentIds[i];
-            Attachment storage a = _attachments[_keyOf(engine, safe, id)];
-            (bool attached, ) = IPolicyGuard(engine).getAttachment(safe, id);
-            require(attached && _contains(a.guardians, msg.sender), NotGuardian(id));
-            (uint64 frozenUntil, uint64 cooldownUntil) = (a.frozenUntil, a.cooldownUntil);
-            if (block.timestamp < cooldownUntil) {
-                uint64 until = block.timestamp < frozenUntil ? frozenUntil : cooldownUntil;
-                emit FreezeSkipped(engine, safe, id, msg.sender, until);
-                continue;
-            }
-            frozenUntil = uint64(block.timestamp + MAX_FREEZE);
-            (a.frozenUntil, a.cooldownUntil) = (frozenUntil, uint64(frozenUntil + COOLDOWN));
-            emit Frozen(engine, safe, id, msg.sender, frozenUntil);
-        }
+    /// @inheritdoc ITimelockPolicy
+    function freeze(address, address, bytes32[] calldata) external {
+        _delegate(_FREEZER);
     }
 
     /// @inheritdoc ITimelockPolicy
-    function lift(address engine, address safe, bytes32 attachmentId) external {
-        Attachment storage a = _attachments[_keyOf(engine, safe, attachmentId)];
-        require(
-            _contains(a.guardians, msg.sender) || _contains(a.lifters, msg.sender),
-            NotGuardianOrLifter(attachmentId)
-        );
-        require(block.timestamp < a.frozenUntil, NotFrozen(attachmentId));
-        uint64 cooldownUntil = uint64(block.timestamp + COOLDOWN);
-        (a.frozenUntil, a.cooldownUntil) = (uint64(block.timestamp), cooldownUntil);
-        emit Lifted(engine, safe, attachmentId, msg.sender, cooldownUntil);
+    function lift(address, address, bytes32) external {
+        _delegate(_FREEZER);
     }
 
     // =============================================================================================
@@ -207,6 +198,21 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
     }
 
     /// @inheritdoc ITimelockPolicy
+    function guardianWindow(
+        address engine,
+        address safe,
+        address guardian
+    ) external view returns (uint64 end, uint64 cooldownUntil, uint32 frozen) {
+        GuardianWindow storage w = _windows[engine][safe][guardian];
+        return (w.end, w.end == 0 ? 0 : uint64(w.end + COOLDOWN), w.frozen);
+    }
+
+    /// @inheritdoc ITimelockPolicy
+    function isCancelled(address engine, address safe, bytes32 txHash) external view returns (bool) {
+        return _cancelled[engine][safe][txHash];
+    }
+
+    /// @inheritdoc ITimelockPolicy
     function cancelDigest(address engine, address safe, bytes32 txHash) external view returns (bytes32) {
         return _cancelDigest(engine, safe, txHash);
     }
@@ -221,10 +227,10 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
     // =============================================================================================
 
     /**
-     * @dev `TimelockNotCoveringConfiguration` unless an attachment of this policy with CALL in its
-     *      mask and a delay of at least `delay` matches `actor`'s call to `engine.configure`: the
-     *      new attachment itself, or an attached one at a level of that call (0..2 only for actor
-     *      ANY, whose keys at 3..5 are the same).
+     * @dev `TimelockNotCoveringConfiguration` unless an attachment of this policy at `(actor, *)`
+     *      or `(ANY, *)`, with CALL in its mask and a delay of at least `delay`, is attached (or is
+     *      the new attachment itself). Only an actor-wide delay covers `engine.configure` and every
+     *      other way out (`setGuard`, `setModuleGuard`) alike.
      */
     function _requireCovered(
         address engine,
@@ -234,19 +240,20 @@ contract TimelockPolicy is PolicyBase, TimelockPolicyStorage, ITimelockPolicy {
         uint8 opMask,
         uint256 delay
     ) private view {
-        uint8 levels = actor == ScopeLib.ANY ? ScopeLib.ACTOR_LEVEL_OFFSET : ScopeLib.LEVEL_COUNT;
-        for (uint8 lvl = 0; lvl < levels; lvl++) {
-            bytes32 key = ScopeLib.keyAt(lvl, actor, engine, IPolicyGuard.configure.selector);
-            bytes32 id = ScopeLib.attachmentId(key, Kind.POLICY, address(this));
+        for (address a = actor; ; a = ScopeLib.ANY) {
+            bytes32 id = ScopeLib.attachmentId(
+                ScopeLib.key(a, address(0), bytes4(0), CallMatch.ANY),
+                Kind.POLICY,
+                address(this)
+            );
             if (id == attachmentId) {
                 if (opMask & ScopeLib.OP_CALL != 0) return;
-                continue;
+            } else if (_attachments[_keyOf(engine, safe, id)].delay >= delay) {
+                (bool attached, AttachmentView memory v) = IPolicyGuard(engine).getAttachment(safe, id);
+                if (attached && v.opMask & ScopeLib.OP_CALL != 0) return;
             }
-            if (_attachments[_keyOf(engine, safe, id)].delay < delay) continue;
-            (bool attached, AttachmentView memory v) = IPolicyGuard(engine).getAttachment(safe, id);
-            if (attached && v.opMask & ScopeLib.OP_CALL != 0) return;
+            if (a == ScopeLib.ANY) revert TimelockNotCoveringConfiguration();
         }
-        revert TimelockNotCoveringConfiguration();
     }
 
     /// @dev `InvalidSettings`: over the cap (0 with `empty`), a zero address, the Safe, a duplicate.

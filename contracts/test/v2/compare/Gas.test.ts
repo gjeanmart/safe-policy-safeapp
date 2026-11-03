@@ -369,7 +369,9 @@ describe('Gas: plain Safe vs V1 vs V2 rev 3 (real Safe 1.5.0)', () => {
     // `Match[](n - s)` and `check` payload per distinct policy, so memory cost grew quadratically.
     // Fixed in WP E1: the payload is encoded once and each run rewrites its `matches` tail in place.
     for (let i = 0; i < shapes.length; i++) {
-      expect(results[i], shapes[i][0]).to.not.equal(undefined)
+      // A boolean, not `.not.equal(undefined)`: hardhat-chai-matchers turns `.equal` on a bigint into a
+      // BigInt comparison and throws on `undefined`.
+      expect(results[i] !== undefined, `${shapes[i][0]} fits in one transaction`).to.equal(true)
       expect(Number(results[i]), shapes[i][0]).to.be.lessThan(16_000_000)
     }
   })

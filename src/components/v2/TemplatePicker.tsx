@@ -103,7 +103,12 @@ const FORMS: TemplateForm[] = [
         info: 'May freeze the owners for at most MAX_FREEZE (F), then a cooldown C. Never the Safe itself.',
       },
       { key: 'lifters', label: 'Lifters (optional)', kind: 'addresses', info: 'May lift a freeze only.' },
-      { key: 'cancellers', label: 'Cancellers (optional)', kind: 'addresses', info: 'E.g. another Safe.' },
+      {
+        key: 'cancellers',
+        label: 'Cancellers (optional)',
+        kind: 'addresses',
+        info: "E.g. another Safe. A canceller here can cancel every owners' schedule except engine.configure, at any time and without limit: prefer narrower scopes such as (Owners, USDC.*).",
+      },
     ],
     build: (d, v, context) => {
       const guardians = list(v.guardians!, 'the guardians', true)

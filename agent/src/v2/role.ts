@@ -15,6 +15,7 @@ import {
   EXACT_LEVEL,
   Kind,
   NOT_DEPLOYED_HINT,
+  OWNERS,
   type PolicyKind,
   type Rev3Deployment,
   type Schedule,
@@ -94,6 +95,7 @@ export async function detectV2(
 const DEPLOYMENT_NAMES: Record<string, string> = {
   timelock: 'TimelockPolicy',
   timelockQueue: 'TimelockPolicyQueue',
+  timelockFreeze: 'TimelockPolicyFreeze',
   args: 'ArgsPolicy',
   limit: 'LimitPolicy',
   coSigner: 'CoSignerPolicy',
@@ -472,10 +474,11 @@ export async function v2Simulate(
   let blocked = !!engineError
   const add = (s: string) => !next.includes(s) && next.push(s)
   if (engineError) add(engineNext(engineError, config, tx, ctx))
+  const timelockRun = runs.find((r) => r.kind === 'timelock')
   for (const run of denied) {
     const need = run.error && NEEDS[run.error.name]
     if (need && !needs.includes(need)) needs.push(need)
-    const step = await policyNext(config, ctx, model, run, { planId, callHash, now })
+    const step = await policyNext(config, ctx, model, run, { planId, callHash, now, timelock: timelockRun })
     if (step.blocking) blocked = true
     add(step.text)
   }
@@ -489,7 +492,6 @@ export async function v2Simulate(
   if (blocked && needs.length)
     add('Something else also denies it: satisfying the needs alone will not be enough.')
 
-  const timelockRun = runs.find((r) => r.kind === 'timelock')
   return {
     engine: ctx.engine,
     callHash,
@@ -533,10 +535,16 @@ function engineNext(e: DecodedError, config: Config, tx: ModuleTx, ctx: V2Contex
   }
 }
 
-/** The merged Timelock settings for the ids of a call (SPEC §5.1): max delay, min non-zero window. */
+/**
+ * The merged Timelock settings for the ids of a call (SPEC §5.1): max delay, min non-zero window of
+ * the delayed attachments (a kill switch's window is ignored, rev 3 fix T5).
+ */
 async function mergedTimelock(config: Config, ctx: V2Context, timelock: Address, ids: Hex[]) {
   const states = await Promise.all(ids.map((id) => readTimelock(timelock, ctx.engine, config.safe, id)))
-  const windows = states.map((s) => s.window).filter((w) => w > 0)
+  const windows = states
+    .filter((s) => s.delay > 0)
+    .map((s) => s.window)
+    .filter((w) => w > 0)
   return {
     states,
     delay: BigInt(Math.max(0, ...states.map((s) => s.delay))),
@@ -547,14 +555,29 @@ async function mergedTimelock(config: Config, ctx: V2Context, timelock: Address,
   }
 }
 
-const PROOF_LIFETIME = 3600n
+/** Default life of a suggested approval / attestation beyond any Timelock wait (`proofLifetime`). */
+const DEFAULT_PROOF_LIFETIME = 3600
+
+/**
+ * How long a suggested co-signer approval or Safenet attestation should stay valid: the margin alone,
+ * or, when a Timelock delays the call, its delay plus the longer of its window and the margin, so the
+ * proof still counts when the schedule is ready (an approval pushed at schedule time would otherwise
+ * expire first).
+ */
+async function proofLifetime(config: Config, ctx: V2Context, timelock?: PolicyRun): Promise<bigint> {
+  const margin = BigInt(config.proofLifetime ?? DEFAULT_PROOF_LIFETIME)
+  if (!timelock) return margin
+  const t = await mergedTimelock(config, ctx, timelock.policy, timelock.ids)
+  if (t.delay === 0n) return margin
+  return t.delay + (t.window > margin ? t.window : margin)
+}
 
 async function policyNext(
   config: Config,
   ctx: V2Context,
   model: Model,
   run: PolicyRun,
-  at: { planId: string; callHash: Hex; now: bigint },
+  at: { planId: string; callHash: Hex; now: bigint; timelock?: PolicyRun },
 ): Promise<{ text: string; blocking: boolean }> {
   const e = run.error
   const { planId, callHash, now } = at
@@ -631,19 +654,19 @@ async function policyNext(
         s.approvers.map((ap) => readApprovedUntil(run.policy, ctx.engine, config.safe, callHash, ap)),
       )
       const pending = s.approvers.filter((_, i) => until[i]! < now)
-      const validUntil = now + PROOF_LIFETIME
+      const validUntil = now + (await proofLifetime(config, ctx, at.timelock))
       const digest = await readApprovalDigest(run.policy, ctx.engine, config.safe, callHash, validUntil)
       return need(
         `Co-signer: needs ${Number(a[1]) - Number(a[2])} more approval(s) of callHash ${callHash} from ` +
           `${pending.map(ctx.names).join(', ')}. Tell the user; an approver approves with ` +
-          `\`safe-role approve ${callHash}\` (if it runs safe-role) or CoSignerPolicy(${run.policy}).approve(engine ${ctx.engine}, ` +
+          `\`safe-role approve ${callHash} --valid-until ${validUntil}\` (if it runs safe-role) or CoSignerPolicy(${run.policy}).approve(engine ${ctx.engine}, ` +
           `safe ${config.safe}, ${callHash}, validUntil), or signs the EIP-712 digest ${digest} (validUntil ${validUntil} = ` +
           `${isoTime(validUntil)}) for anyone to relay with approveWithSig. Then simulate again.`,
       )
     }
     case 'MissingAttestation':
     case 'AttestationExpired': {
-      const deadline = now + PROOF_LIFETIME
+      const deadline = now + (await proofLifetime(config, ctx, at.timelock))
       const digest = await readAttestationDigest(run.policy, ctx.engine, config.safe, callHash, deadline)
       return need(
         `Safenet: needs an attestation of digest ${digest} (deadline ${deadline} = ${isoTime(deadline)}), submitted with ` +
@@ -1137,6 +1160,12 @@ export async function prepareAction(
             'This role neither made this schedule nor is a canceller of the attachments it matched.',
             'Only the scheduling module or a listed canceller can cancel it.',
           )
+        if (!own && s.isConfiguration)
+          return fail(
+            "This schedule is an owners' configuration change: listed cancellers cannot cancel it.",
+            'Only the owners cancel their own engine.configure (cancelAsOwners).',
+          )
+        const ownersPath = isAddressEqual(s.actor, OWNERS)
         const what = await describeScheduled(config, ctx, model, action.txHash)
         return {
           ok: true,
@@ -1146,6 +1175,7 @@ export async function prepareAction(
             `Schedule  ${action.txHash}, made ${isoTime(s.scheduledAt)} by ${isAddressEqual(s.actor, ANY) ? 'everyone' : ctx.names(s.actor)}`,
             `Call      ${what ?? '(event not found in the scanned blocks)'}`,
             `As        ${own ? 'the module that scheduled it' : 'a canceller'}`,
+            `Effect    ${ownersPath ? "final: the owners' signed transaction can never be scheduled again" : 'the module can schedule it again later'}`,
           ],
           call: {
             address: timelock,

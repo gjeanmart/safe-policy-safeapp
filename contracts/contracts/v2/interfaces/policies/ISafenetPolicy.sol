@@ -26,7 +26,7 @@ interface ISafenetPolicy is IPolicy {
     error MissingAttestation();
     error MalformedAttestation();
     error UntrustedAttestationKey();
-    /// @notice The attestation (by its FROST signature) was already submitted.
+    /// @notice The attestation (by its FROST signature) was already submitted for this engine and Safe.
     error AttestationAlreadySpent();
     /// @notice Submitted or consumed after its `deadline`.
     error AttestationExpired(uint256 deadline);
@@ -36,7 +36,10 @@ interface ISafenetPolicy is IPolicy {
      * @param deadline 0: owner path, `attestation` is over `txHash` itself (the Safe transaction
      *        hash, nonce-bound), no expiry. Non-zero: module path, `attestation` is over
      *        {attestationDigest}`(engine, safe, txHash, deadline)` and the credit expires after
-     *        `deadline` (several credits of one hash share the earliest deadline).
+     *        `deadline` (several credits of one hash share the earliest deadline). The contract
+     *        cannot tell a Safe transaction hash from a module call hash: Safenet signs bare hashes
+     *        (deadline 0) only for Safe transactions, never for a module call hash, which has no
+     *        nonce and would give a credit that never expires.
      * @param attestation V1's 256-byte encoding:
      *        `abi.encode(uint64 epoch, address oracle, bytes32 oracleDataHash, Point groupKey, Signature)`.
      */
@@ -77,5 +80,10 @@ interface ISafenetPolicy is IPolicy {
 
     function getConsensusDomainSeparator() external view returns (bytes32);
 
-    function isAttestationSpent(FROST.Signature calldata signature) external view returns (bool);
+    /// @notice Whether the attestation with `signature` was submitted for `(engine, safe)`.
+    function isAttestationSpent(
+        address engine,
+        address safe,
+        FROST.Signature calldata signature
+    ) external view returns (bool);
 }

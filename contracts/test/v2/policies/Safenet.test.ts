@@ -160,12 +160,34 @@ describe('SafenetPolicy (rev 3)', () => {
       const tx = await policy.submitAttestation(e, safe, txHash, 0, encoded)
       await expectEvent(tx, policy, 'Attested', [e, safe, txHash, 0])
       expect(await policy.isAttested(e, safe, txHash)).to.equal(true)
-      expect(await policy.isAttestationSpent(signature)).to.equal(true)
+      expect(await policy.isAttestationSpent(e, safe, signature)).to.equal(true)
 
       // No expiry on the owner path.
       await time.increase(365 * 24 * 3600)
       await check(txHash)
       expect(await policy.isAttested(e, safe, txHash)).to.equal(false)
+      await expectRevert(check(txHash), policy, 'MissingAttestation')
+      await expectRevert(
+        policy.submitAttestation(e, safe, txHash, 0, encoded),
+        policy,
+        'AttestationAlreadySpent',
+      )
+    })
+
+    it('a front-run under a wrong engine or Safe does not burn the attestation: spent is keyed by (engine, safe)', async () => {
+      const { policy, otherEngine, e, safe, attest, check } = await loadFixture(fixture)
+      const txHash = randomHash()
+      const { encoded, signature } = await attest(txHash)
+      // The owner-path message is the Safe transaction hash alone: engine and Safe come from the caller.
+      const wrongEngine = await otherEngine.getAddress()
+      const wrongSafe = randomAddress()
+      await policy.submitAttestation(wrongEngine, safe, txHash, 0, encoded)
+      await policy.submitAttestation(e, wrongSafe, txHash, 0, encoded)
+      expect(await policy.isAttestationSpent(wrongEngine, safe, signature)).to.equal(true)
+      expect(await policy.isAttestationSpent(e, safe, signature)).to.equal(false)
+      // The real submission still works and the real transaction passes once.
+      await policy.submitAttestation(e, safe, txHash, 0, encoded)
+      await check(txHash)
       await expectRevert(check(txHash), policy, 'MissingAttestation')
       await expectRevert(
         policy.submitAttestation(e, safe, txHash, 0, encoded),

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import {
+  type Abi,
   type Address,
   type Hex,
   type PublicClient,
@@ -84,6 +85,7 @@ export type Rev3Deployment = {
   policies: {
     timelock: Address
     timelockQueue?: Address
+    timelockFreeze?: Address
     args?: Address
     limit?: Address
     coSigner?: Address
@@ -116,6 +118,7 @@ function asDeployment(value: unknown, parentFromBlock?: unknown): Rev3Deployment
     policies: {
       timelock: getAddress(policies.timelock),
       timelockQueue: address(policies.timelockQueue),
+      timelockFreeze: address(policies.timelockFreeze),
       args: address(policies.args),
       limit: address(policies.limit),
       coSigner: address(policies.coSigner),
@@ -161,7 +164,7 @@ function envDeployments(): Rev3Deployment[] {
   if (!found.length)
     throw new CliError(
       'SAFE_ROLE_V2_DEPLOYMENT has no rev 3 deployment.',
-      'Pass { "engine", "engineConfig", "policies": { "timelock", "timelockQueue", "args", "limit", "coSigner", "safenet" } }.',
+      'Pass { "engine", "engineConfig", "policies": { "timelock", "timelockQueue", "timelockFreeze", "args", "limit", "coSigner", "safenet" } }.',
     )
   return found
 }
@@ -273,11 +276,23 @@ export function revertDataOf(error: unknown): Hex | undefined {
   return undefined
 }
 
+/**
+ * TODO(rev 3 fix T2): errors the contracts add in this round, until `abi.ts` is regenerated.
+ * Decoding takes the first match, so a duplicate after regeneration is harmless; delete it then.
+ */
+const PENDING_ERRORS = [
+  {
+    type: 'error',
+    name: 'CancelledTransaction',
+    inputs: [{ name: 'txHash', type: 'bytes32', internalType: 'bytes32' }],
+  },
+] as const satisfies Abi
+
 /** Decodes a rev 3 engine or policy error; `PolicyDenied` is unwrapped into its policy's reason. */
 export function decodeV2Error(data: Hex | undefined): DecodedError | undefined {
   if (!data || data === '0x') return undefined
   try {
-    const { errorName, args } = decodeErrorResult({ abi: v2ErrorsAbi, data })
+    const { errorName, args } = decodeErrorResult({ abi: [...v2ErrorsAbi, ...PENDING_ERRORS], data })
     return { name: errorName, args: args ?? [] }
   } catch {
     try {
@@ -365,10 +380,11 @@ export async function policyKinds(
   await Promise.all(
     [...new Set(policies.map((p) => p.toLowerCase()))].map(async (key) => {
       const address = getAddress(key)
-      const known = (Object.entries(named) as [PolicyKind | 'timelockQueue', Address | undefined][]).find(
-        ([, a]) => a && isAddressEqual(a, address),
-      )
-      if (known && known[0] !== 'timelockQueue') return kinds.set(key, known[0])
+      const known = (
+        Object.entries(named) as [PolicyKind | 'timelockQueue' | 'timelockFreeze', Address | undefined][]
+      ).find(([, a]) => a && isAddressEqual(a, address))
+      if (known && known[0] !== 'timelockQueue' && known[0] !== 'timelockFreeze')
+        return kinds.set(key, known[0])
       const read = (abi: readonly unknown[], functionName: string, args: unknown[]) =>
         succeeds(
           client().readContract({ address, abi: abi as typeof policyAbi, functionName, args } as never),

@@ -120,7 +120,13 @@ async function deploy() {
   const stub = await ethers.deployContract('TimelockEngineStub')
   // Deployed on its own: a child create in the policy constructor would exceed the 2^24 gas cap.
   const queue = await ethers.deployContract('TimelockPolicyQueue')
-  const timelock = await ethers.deployContract('TimelockPolicy', [F, C, await queue.getAddress()])
+  const freezer = await ethers.deployContract('TimelockPolicyFreeze', [F, C])
+  const timelock = await ethers.deployContract('TimelockPolicy', [
+    F,
+    C,
+    await queue.getAddress(),
+    await freezer.getAddress(),
+  ])
   const safe = await ethers.deployContract('TimelockMockSafe', [
     [o1.address, o2.address, o3.address],
     2,
@@ -384,18 +390,9 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
         await attach(fx, scope(fx.ops.address, fx.target), tl(T))
       })
 
-      it('accepts it under a covering attachment at least as long, at every covering scope', async () => {
+      it('accepts it under an actor-wide attachment at least as long: (Owners, *) or (ANY, *)', async () => {
         const fx = await loadFixture(deploy)
-        const configureSel = fx.stub.interface.getFunction('configure').selector
-        const covering = [
-          scope(OWNERS),
-          scope(OWNERS, fx.engine),
-          scope(OWNERS, fx.engine, configureSel),
-          scope(ANY),
-          scope(ANY, fx.engine),
-          scope(ANY, fx.engine, configureSel),
-        ]
-        for (const cover of covering) {
+        for (const cover of [scope(OWNERS), scope(ANY)]) {
           await attach(fx, cover, tl(T))
           await attach(fx, scope(OWNERS, fx.target), tl(T))
           await fx.stub.configureFor(fx.safeAddress, [change(cover, Kind.POLICY, fx.policy, '0x', 0, true)])
@@ -407,6 +404,34 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
             'TimelockNotCoveringConfiguration',
           )
         }
+      })
+
+      it('no longer accepts a cover at engine.* or engine.configure: it would not delay setGuard(0) (rev 3 review P2)', async () => {
+        const fx = await loadFixture(deploy)
+        const configureSel = fx.stub.interface.getFunction('configure').selector
+        // Such a cover is itself a narrow delay: it needs an actor-wide one, so it can never stand alone.
+        for (const cover of [
+          scope(OWNERS, fx.engine),
+          scope(OWNERS, fx.engine, configureSel),
+          scope(ANY, fx.engine),
+          scope(ANY, fx.engine, configureSel),
+        ]) {
+          await expectConfigError(
+            fx.stub.configureFor(fx.safeAddress, [change(cover, Kind.POLICY, fx.policy, tl(T))]),
+            fx,
+            'TimelockNotCoveringConfiguration',
+          )
+        }
+        // Next to (Owners, *) T, an engine.configure delay is fine up to T: a longer one is not covered.
+        await attach(fx, scope(OWNERS), tl(T))
+        await attach(fx, scope(OWNERS, fx.engine, configureSel), tl(T))
+        await expectConfigError(
+          fx.stub.configureFor(fx.safeAddress, [
+            change(scope(OWNERS, fx.engine, configureSel), Kind.POLICY, fx.policy, tl(2 * T)),
+          ]),
+          fx,
+          'TimelockNotCoveringConfiguration',
+        )
       })
 
       it('rejects a shorter, DELEGATECALL-only or detached covering attachment', async () => {
@@ -428,9 +453,9 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
           fx,
           'TimelockNotCoveringConfiguration',
         )
-        // A DELEGATECALL-only attachment at (Owners, engine.*) does not cover a CALL to configure.
+        // A DELEGATECALL-only attachment at (Owners, *) does not cover a CALL to configure.
         await attach(fx, scope(ANY), tl(T))
-        await attach(fx, scope(OWNERS, fx.engine), tl(T), OP_DELEGATECALL)
+        await attach(fx, scope(OWNERS), tl(T), OP_DELEGATECALL)
         await fx.stub.configureFor(fx.safeAddress, [detachAny])
         await expectConfigError(
           fx.stub.configureFor(fx.safeAddress, [narrow]),
@@ -460,7 +485,7 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
           fx,
           'TimelockNotCoveringConfiguration',
         )
-        await attach(fx, scope(ANY, fx.engine), tl(T))
+        await attach(fx, scope(ANY), tl(T))
         await fx.stub.configureFor(fx.safeAddress, [anyNarrow])
       })
     })
@@ -562,6 +587,9 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
         'NotScheduled',
         [hash],
       )
+      // A module hash has no nonce and is not retired: the module may schedule its call again.
+      expect(await fx.timelock.isCancelled(fx.engine, fx.safeAddress, hash)).to.equal(false)
+      expect((await scheduleModule(fx, fx.ops, call(fx.target))).hash).to.equal(hash)
     })
 
     it('flags a top-level CALL to engine.configure as a configuration schedule, and nothing else', async () => {
@@ -719,6 +747,18 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
         hash,
         reconfigured + 2 * T + HOUR,
       ])
+    })
+
+    it('ignores the window of a kill switch (delay 0): it never expires the schedule of a delayed one (rev 3 review fable P3)', async () => {
+      const fx = await loadFixture(deploy)
+      await attach(fx, scope(fx.ops.address), tl(0, { window: 60, guardians: [fx.guardian.address] }))
+      await attach(fx, scope(fx.ops.address, fx.target), tl(HOUR))
+      await allow(fx, scope(fx.ops.address))
+      const c = call(fx.target)
+      const { hash, tx } = await scheduleModule(fx, fx.ops, c)
+      await at((await timestampOf(tx)) + HOUR + 61)
+      const exec = await execModule(fx, fx.ops, c)
+      await expectEvent(exec, fx.timelock, 'Executed', [fx.engine, fx.safeAddress, hash])
     })
 
     it('passes a delay-0 attachment without a schedule (kill switch only)', async () => {
@@ -888,6 +928,137 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
       await fx.timelock.connect(fx.guardian).lift(fx.engine, fx.safeAddress, id)
     })
 
+    it('bounds one guardian per Safe: a second id joins its window and thaws with it, then the guardian cools down (rev 3 review P3)', async () => {
+      const fx = await loadFixture(deploy)
+      const g = { guardians: [fx.guardian.address] }
+      const a = await attach(fx, scope(fx.ops.address), tl(0, g))
+      const b = await attach(fx, scope(fx.recovery.address, fx.target), tl(0, g))
+      const freeze = (ids: string[]) =>
+        fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, ids)
+      const window = async () =>
+        normalize([...(await fx.timelock.guardianWindow(fx.engine, fx.safeAddress, fx.guardian.address))])
+      expect(await window()).to.deep.equal(normalize([0, 0, 0]))
+      const t0 = await timestampOf(await freeze([a]))
+      expect(await window()).to.deep.equal(normalize([t0 + F, t0 + F + C, 1]))
+      // Just before A thaws, B joins the window: it ends with A, it is not frozen for a fresh F.
+      await at(t0 + F - 60)
+      await expectEvent(await freeze([b]), fx.timelock, 'Frozen', [
+        fx.engine,
+        fx.safeAddress,
+        b,
+        fx.guardian.address,
+        t0 + F,
+      ])
+      expect(await window()).to.deep.equal(normalize([t0 + F, t0 + F + C, 2]))
+      // At the window end both thaw, and the guardian freezes nothing in this Safe for C.
+      await at(t0 + F)
+      const cooling = await freeze([a, b])
+      expect((await eventsOf(cooling, fx.timelock, 'Frozen')).length).to.equal(0)
+      expect(
+        (await eventsOf(cooling, fx.timelock, 'FreezeSkipped')).map((l) => Number(l.args.until)),
+      ).to.deep.equal([t0 + F + C, t0 + F + C])
+      // After C, a new window.
+      await at(t0 + F + C)
+      await expectEvent(await freeze([b]), fx.timelock, 'Frozen', [
+        fx.engine,
+        fx.safeAddress,
+        b,
+        fx.guardian.address,
+        t0 + 2 * F + C,
+      ])
+    })
+
+    it('a lift that leaves the guardian nothing frozen starts its cooldown; a lifted id cannot be re-frozen in its window', async () => {
+      const fx = await loadFixture(deploy)
+      const roles = { guardians: [fx.guardian.address], lifters: [fx.lifter.address] }
+      const a = await attach(fx, scope(fx.ops.address), tl(0, roles))
+      const b = await attach(fx, scope(fx.recovery.address, fx.target), tl(0, roles))
+      const c = await attach(fx, scope(fx.ops.address, fx.target), tl(0, roles))
+      const freeze = (ids: string[]) =>
+        fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, ids)
+      const lift = (id: string) => fx.timelock.connect(fx.lifter).lift(fx.engine, fx.safeAddress, id)
+      const window = async () =>
+        normalize([...(await fx.timelock.guardianWindow(fx.engine, fx.safeAddress, fx.guardian.address))])
+      const t0 = await timestampOf(await freeze([a, b]))
+      const t1 = await timestampOf(await lift(a))
+      expect(await window()).to.deep.equal(normalize([t0 + F, t0 + F + C, 1]))
+      // The lifted id cools down on its own; another id still joins the open window.
+      const tx = await freeze([a, c])
+      expect(
+        (await eventsOf(tx, fx.timelock, 'FreezeSkipped')).map((l) => Number(l.args.until)),
+      ).to.deep.equal([t1 + C])
+      await expectEvent(tx, fx.timelock, 'Frozen', [
+        fx.engine,
+        fx.safeAddress,
+        c,
+        fx.guardian.address,
+        t0 + F,
+      ])
+      await lift(b)
+      const t3 = await timestampOf(await lift(c))
+      // Nothing frozen left: the guardian's cooldown starts now, not at t0 + F.
+      expect(await window()).to.deep.equal(normalize([t3, t3 + C, 0]))
+      await expectEvent(await freeze([b]), fx.timelock, 'FreezeSkipped', [
+        fx.engine,
+        fx.safeAddress,
+        b,
+        fx.guardian.address,
+        t3 + C,
+      ])
+    })
+
+    it('keeps guardians independent: one cooling does not stop another, which never extends a frozen id', async () => {
+      const fx = await loadFixture(deploy)
+      const a = await attach(
+        fx,
+        scope(fx.ops.address),
+        tl(0, { guardians: [fx.guardian.address, fx.n1.address] }),
+      )
+      const b = await attach(fx, scope(fx.recovery.address, fx.target), tl(0, { guardians: [fx.n1.address] }))
+      const t0 = await timestampOf(
+        await fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, [a]),
+      )
+      await at(t0 + DAY)
+      const tx = await fx.timelock.connect(fx.n1).freeze(fx.engine, fx.safeAddress, [a, b])
+      await expectEvent(tx, fx.timelock, 'FreezeSkipped', [
+        fx.engine,
+        fx.safeAddress,
+        a,
+        fx.n1.address,
+        t0 + F,
+      ])
+      await expectEvent(tx, fx.timelock, 'Frozen', [
+        fx.engine,
+        fx.safeAddress,
+        b,
+        fx.n1.address,
+        t0 + DAY + F,
+      ])
+    })
+
+    it('keeps the freeze state across detach and re-attach of the same id (rev 3 review fable P5, by design)', async () => {
+      const fx = await loadFixture(deploy)
+      const s = scope(fx.ops.address)
+      const settings = tl(0, { guardians: [fx.guardian.address], lifters: [fx.lifter.address] })
+      const id = await attach(fx, s, settings)
+      await fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, [id])
+      const frozen = [...(await fx.timelock.freezeState(fx.engine, fx.safeAddress, id))]
+      await fx.stub.configureFor(fx.safeAddress, [change(s, Kind.POLICY, fx.policy, '0x', 0, true)])
+      await attach(fx, s, settings)
+      // A re-attach never shortens a freeze...
+      expect([...(await fx.timelock.freezeState(fx.engine, fx.safeAddress, id))]).to.deep.equal(frozen)
+      const t = await timestampOf(await fx.timelock.connect(fx.lifter).lift(fx.engine, fx.safeAddress, id))
+      await fx.stub.configureFor(fx.safeAddress, [change(s, Kind.POLICY, fx.policy, '0x', 0, true)])
+      await attach(fx, s, settings)
+      // ...nor a cooldown: the guardian's next freeze is still skipped until t + C.
+      await expectEvent(
+        await fx.timelock.connect(fx.guardian).freeze(fx.engine, fx.safeAddress, [id]),
+        fx.timelock,
+        'FreezeSkipped',
+        [fx.engine, fx.safeAddress, id, fx.guardian.address, t + C],
+      )
+    })
+
     it('keeps the freeze state when the attachment is re-configured', async () => {
       const fx = await loadFixture(deploy)
       const id = await attach(fx, scope(fx.ops.address), tl(0, { guardians: [fx.guardian.address] }))
@@ -974,6 +1145,41 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
       await expectPolicyError(execOwner(fx, call(fx.target), [fx.o1, fx.o2]), fx, 'NotScheduled', [hash])
     })
 
+    it('makes the cancel of an owner-path schedule by a canceller final too (CancelledTransaction)', async () => {
+      const fx = await loadFixture(deploy)
+      await attach(fx, scope(OWNERS), tl(T, { cancellers: [fx.canceller.address] }))
+      const c = call(fx.target)
+      const { hash } = await scheduleOwner(fx, c, [fx.o1, fx.o2])
+      await fx.timelock.connect(fx.canceller).cancel(fx.engine, fx.safeAddress, hash)
+      expect(await fx.timelock.isCancelled(fx.engine, fx.safeAddress, hash)).to.equal(true)
+      await expectRevert(scheduleOwner(fx, c, [fx.o1, fx.o2]), fx.timelock, 'CancelledTransaction', [hash])
+    })
+
+    it('never lets a listed canceller cancel a configuration change; the owners and its module can (rev 3 review fable P4)', async () => {
+      const fx = await loadFixture(deploy)
+      await attach(fx, scope(OWNERS), tl(T, { cancellers: [fx.canceller.address] }))
+      await attach(fx, scope(fx.ops.address), tl(T, { cancellers: [fx.canceller.address] }))
+      const config = call(fx.engine, configureData(fx, []))
+      const { hash } = await scheduleOwner(fx, config, [fx.o1, fx.o2])
+      await expectRevert(
+        fx.timelock.connect(fx.canceller).cancel(fx.engine, fx.safeAddress, hash),
+        fx.timelock,
+        'NotCanceller',
+        [fx.canceller.address],
+      )
+      const sigs = await sign(await fx.timelock.cancelDigest(fx.engine, fx.safeAddress, hash), [fx.o1, fx.o2])
+      await fx.timelock.cancelAsOwners(fx.engine, fx.safeAddress, hash, sigs)
+      // A module's configuration schedule: not by the canceller, by the module itself.
+      const own = await scheduleModule(fx, fx.ops, config)
+      await expectRevert(
+        fx.timelock.connect(fx.canceller).cancel(fx.engine, fx.safeAddress, own.hash),
+        fx.timelock,
+        'NotCanceller',
+        [fx.canceller.address],
+      )
+      await fx.timelock.connect(fx.ops).cancel(fx.engine, fx.safeAddress, own.hash)
+    })
+
     it('cancels an owner-path schedule with threshold owner signatures over cancelDigest', async () => {
       const fx = await loadFixture(deploy)
       await attach(fx, scope(OWNERS), tl(T))
@@ -1012,20 +1218,18 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
       )
     })
 
-    it('does not replay a cancel signature on a later re-schedule of the same transaction', async () => {
+    it('retires the transaction for good: its signatures cannot schedule it again (CancelledTransaction)', async () => {
       const fx = await loadFixture(deploy)
       await attach(fx, scope(OWNERS), tl(T))
       const c = call(fx.target)
       const { hash } = await scheduleOwner(fx, c, [fx.o1, fx.o2])
+      expect(await fx.timelock.isCancelled(fx.engine, fx.safeAddress, hash)).to.equal(false)
       const sigs = await sign(await fx.timelock.cancelDigest(fx.engine, fx.safeAddress, hash), [fx.o1, fx.o2])
       await fx.timelock.cancelAsOwners(fx.engine, fx.safeAddress, hash, sigs)
-      await scheduleOwner(fx, c, [fx.o1, fx.o2])
-      await expectRevert(
-        fx.timelock.cancelAsOwners(fx.engine, fx.safeAddress, hash, sigs),
-        fx.safe,
-        'InvalidSignatures',
-      )
-      expect((await scheduleOf(fx, hash)).scheduledAt).to.not.equal(0n)
+      expect(await fx.timelock.isCancelled(fx.engine, fx.safeAddress, hash)).to.equal(true)
+      await expectRevert(scheduleOwner(fx, c, [fx.o1, fx.o2]), fx.timelock, 'CancelledTransaction', [hash])
+      // A new transaction at the same nonce (another hash) schedules as usual.
+      await scheduleOwner(fx, call(fx.target, '0x01'), [fx.o1, fx.o2])
     })
 
     it('refuses cancelAsOwners on a module-path schedule (NotOwnersQueue)', async () => {
@@ -1046,8 +1250,37 @@ describe('TimelockPolicy (rev 3, WP B)', () => {
     it('is passed to the constructor, which refuses an address without code (InvalidSettings)', async () => {
       const fx = await loadFixture(deploy)
       const factory = await ethers.getContractFactory('TimelockPolicy')
-      await expectRevert(factory.deploy(F, C, fx.outsider.address), fx.timelock, 'InvalidSettings')
-      await expectRevert(factory.deploy(F, C, ZeroAddress), fx.timelock, 'InvalidSettings')
+      const freezer = await fx.timelock.freezer()
+      await expectRevert(factory.deploy(F, C, fx.outsider.address, freezer), fx.timelock, 'InvalidSettings')
+      await expectRevert(factory.deploy(F, C, ZeroAddress, freezer), fx.timelock, 'InvalidSettings')
+    })
+
+    it('refuses a freeze module without code or built with other F or C (InvalidSettings)', async () => {
+      const fx = await loadFixture(deploy)
+      const factory = await ethers.getContractFactory('TimelockPolicy')
+      const queue = await fx.timelock.queue()
+      await expectRevert(factory.deploy(F, C, queue, fx.outsider.address), fx.timelock, 'InvalidSettings')
+      const other = await ethers.deployContract('TimelockPolicyFreeze', [F, C + 1])
+      await expectRevert(
+        factory.deploy(F, C, queue, await other.getAddress()),
+        fx.timelock,
+        'InvalidSettings',
+      )
+      const longer = await ethers.deployContract('TimelockPolicyFreeze', [F + 1, C])
+      await expectRevert(
+        factory.deploy(F, C, queue, await longer.getAddress()),
+        fx.timelock,
+        'InvalidSettings',
+      )
+    })
+
+    it('freeze module refuses direct calls (NotDelegated)', async () => {
+      const fx = await loadFixture(deploy)
+      const freezer = await ethers.getContractAt('TimelockPolicyFreeze', await fx.timelock.freezer())
+      expect(await freezer.MAX_FREEZE()).to.equal(BigInt(F))
+      expect(await freezer.COOLDOWN()).to.equal(BigInt(C))
+      await expectRevert(freezer.freeze(fx.engine, fx.safeAddress, []), freezer, 'NotDelegated')
+      await expectRevert(freezer.lift(fx.engine, fx.safeAddress, ethers.ZeroHash), freezer, 'NotDelegated')
     })
 
     it('refuses direct calls (NotDelegated)', async () => {

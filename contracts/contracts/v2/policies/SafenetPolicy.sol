@@ -14,9 +14,13 @@ import {PolicyBase} from "./PolicyBase.sol";
  * @notice Port of V1 `SafenetPolicy` (8ee68a8) and rev 2 `SafenetPolicyV2`: same constructor,
  *         epoch forest, message and attestation encoding. Every attestation is submitted with
  *         {submitAttestation} before execution, on both paths. SPEC.md §5.5.
- * @dev Each attestation can be submitted once (`AttestationAlreadySpent`, keyed by its FROST
- *      signature): FROST sessions use fresh nonces, so a second attestation of the same hash is a
- *      different signature, while a submitted one can never be replayed for another credit.
+ * @dev Each attestation can be submitted once per (engine, Safe) (`AttestationAlreadySpent`,
+ *      keyed by its FROST signature, the engine and the Safe): FROST sessions use fresh nonces, so
+ *      a second attestation of the same hash is a different signature, while a submitted one can
+ *      never be replayed for another credit of the same Safe. The engine and the Safe are in the
+ *      key because the owner-path message (the Safe transaction hash) does not bind them: keyed by
+ *      the signature alone, a front-run under a wrong engine would burn the attestation. A credit
+ *      under another engine is harmless: only the Safe's own engine consumes its credits.
  */
 contract SafenetPolicy is PolicyBase, ISafenetPolicy {
     using EpochRollover for EpochRollover.T;
@@ -45,8 +49,8 @@ contract SafenetPolicy is PolicyBase, ISafenetPolicy {
 
     mapping(address engine => mapping(address safe => mapping(bytes32 txHash => Credit))) private _credits;
 
-    /// @dev FROST signatures already submitted (`keccak256(abi.encode(signature))`).
-    mapping(bytes32 signatureHash => bool) private _spent;
+    /// @dev Attestations already submitted (`keccak256(abi.encode(engine, safe, signature))`).
+    mapping(bytes32 spentKey => bool) private _spent;
 
     /**
      * @param consensusChainId The chain id hosting the Consensus contract.
@@ -77,9 +81,9 @@ contract SafenetPolicy is PolicyBase, ISafenetPolicy {
         bytes32 signed = deadline == 0 ? txHash : _attestationDigest(engine, safe, txHash, deadline);
         FROST.Signature memory signature = _verify(attestation, signed);
         require(deadline == 0 || deadline >= block.timestamp, AttestationExpired(deadline));
-        bytes32 signatureHash = keccak256(abi.encode(signature));
-        require(!_spent[signatureHash], AttestationAlreadySpent());
-        _spent[signatureHash] = true;
+        bytes32 spentKey = _spentKey(engine, safe, signature);
+        require(!_spent[spentKey], AttestationAlreadySpent());
+        _spent[spentKey] = true;
 
         uint64 end = deadline == 0 || deadline > type(uint64).max ? type(uint64).max : uint64(deadline);
         Credit storage credit = _credits[engine][safe][txHash];
@@ -142,8 +146,12 @@ contract SafenetPolicy is PolicyBase, ISafenetPolicy {
     }
 
     /// @inheritdoc ISafenetPolicy
-    function isAttestationSpent(FROST.Signature calldata signature) external view override returns (bool) {
-        return _spent[keccak256(abi.encode(signature))];
+    function isAttestationSpent(
+        address engine,
+        address safe,
+        FROST.Signature calldata signature
+    ) external view override returns (bool) {
+        return _spent[_spentKey(engine, safe, signature)];
     }
 
     function _configure(
@@ -191,6 +199,14 @@ contract SafenetPolicy is PolicyBase, ISafenetPolicy {
         );
         FROST.verify(groupKey, signature, message);
         return signature;
+    }
+
+    function _spentKey(
+        address engine,
+        address safe,
+        FROST.Signature memory signature
+    ) private pure returns (bytes32) {
+        return keccak256(abi.encode(engine, safe, signature));
     }
 
     function _attestationDigest(

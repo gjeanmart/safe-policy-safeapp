@@ -1,7 +1,7 @@
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
 import { ZeroAddress } from 'ethers'
-import { guardsOf } from '../fixtures/safe'
+import { completeTx, guardsOf, safeTxHash, signSafeTx } from '../fixtures/safe'
 import { expectAnyRevert, expectEvent } from '../helpers'
 import {
   HOUR,
@@ -63,7 +63,7 @@ async function world() {
 const ownersTimelockId = (w: World) => attachmentId(anyCall(OWNERS), Kind.POLICY, addrOf(w.timelock))
 
 /** NotScheduled, then NotReady after scheduling, then it executes after T. */
-async function waitsT(w: World, tx: ReturnType<typeof safeCall>) {
+async function waitsT(w: World, tx: Parameters<typeof execOwners>[1]) {
   const hash = await ownerTxHash(w, tx)
   await expectPolicyDenied(execOwners(w, tx), w, w.timelock, 'NotScheduled', [hash])
   await scheduleOwners(w, tx)
@@ -163,6 +163,64 @@ describe('Story: the owners wait T for everything, configuration included (WA-40
       await expectPolicyDenied(execOwners(w, tx), w, w.timelock, 'NotScheduled', [hash])
     })
 
+    it('a cancelled transaction is retired for good: its public signatures cannot schedule it again (rev 3 review P1, fable P6)', async () => {
+      const w = await loadFixture(world)
+      // The owners sign a payment; anyone relays the schedule, so the signatures are now public.
+      const full = await completeTx(w.safe, transfer(w, w.attacker.address, usdc(50_000)))
+      const sigs = await signSafeTx(w.safe, full, w.quorum)
+      await w.timelock.connect(w.stranger).schedule(w.engineAddress, w.safeAddress, full, sigs)
+      const hash = await safeTxHash(w.safe, full)
+      // They change their minds and cancel.
+      await w.timelock.cancelAsOwners(
+        w.engineAddress,
+        w.safeAddress,
+        hash,
+        await signCancel(w, hash, w.quorum),
+      )
+      expect(await w.timelock.isCancelled(w.engineAddress, w.safeAddress, hash)).to.equal(true)
+      // A stranger replaying the first schedule's calldata is refused, and the payment never runs.
+      await expectPolicyError(
+        w.timelock.connect(w.attacker).schedule(w.engineAddress, w.safeAddress, full, sigs),
+        w.timelock,
+        'CancelledTransaction',
+        [hash],
+      )
+      await time.increase(T)
+      await expectPolicyDenied(execOwners(w, full), w, w.timelock, 'NotScheduled', [hash])
+      expect(await w.token.balanceOf(w.attacker.address)).to.equal(0n)
+      // The nonce is not burnt: another transaction at the same nonce schedules and runs.
+      await waitsT(w, { ...transfer(w, w.vendorA.address, usdc(1)), nonce: full.nonce })
+    })
+
+    it('a canceller listed on (Owners, *) cancels payments for good, never the owners configure (rev 3 review fable P4)', async () => {
+      const w = await deployWorld()
+      const tl = (cancellers: string[]) =>
+        attach(
+          anyCall(OWNERS),
+          w.timelock,
+          timelockSettings({ delay: T, guardians: [w.guardian.address], cancellers }),
+        )
+      await install(w, [allow(anyCall(OWNERS)), tl([w.attacker.address])])
+      const pay = transfer(w, w.vendorA.address, usdc(1))
+      const payHash = await scheduleOwners(w, pay)
+      await w.timelock.connect(w.attacker).cancel(w.engineAddress, w.safeAddress, payHash)
+      await expectPolicyError(scheduleOwners(w, pay), w.timelock, 'CancelledTransaction', [payHash])
+      // The owners' way out: a configure removing the canceller. The canceller cannot touch it.
+      const fix = configureCall(w, [tl([])])
+      const fixHash = await scheduleOwners(w, fix)
+      await expectPolicyError(
+        w.timelock.connect(w.attacker).cancel(w.engineAddress, w.safeAddress, fixHash),
+        w.timelock,
+        'NotCanceller',
+        [w.attacker.address],
+      )
+      await time.increase(T)
+      await execOwners(w, fix)
+      expect(
+        (await w.timelock.getSettings(w.engineAddress, w.safeAddress, ownersTimelockId(w))).cancellers,
+      ).to.deep.equal([])
+    })
+
     it('one owner signature is not enough (threshold 2)', async () => {
       const w = await loadFixture(world)
       const hash = await scheduleOwners(w, transfer(w, w.vendorA.address, 1n))
@@ -243,6 +301,32 @@ describe('Story: the owners wait T for everything, configuration included (WA-40
         attachmentId(onContract(OWNERS, w.tokenAddress), Kind.POLICY, addrOf(w.timelock)),
       )
       expect(exists).to.equal(true)
+    })
+
+    it('a cover at (Owners, engine.configure) no longer counts: setGuard(0) cannot escape a narrow owners Timelock (rev 3 review P2)', async () => {
+      const w = await deployWorld()
+      await install(w, [allow(anyCall(OWNERS))])
+      const cfg = attach(
+        onFunction(OWNERS, w.engineAddress, SEL.configure),
+        w.timelock,
+        timelockSettings({ delay: T }),
+      )
+      const narrow = attach(onContract(OWNERS, w.tokenAddress), w.timelock, timelockSettings({ delay: T }))
+      // The review's set-up: cover at engine.configure, narrow delay on the token. Refused.
+      await configureFailsWith(w, [cfg, narrow], 'TimelockNotCoveringConfiguration')
+      await configureFailsWith(w, [cfg], 'TimelockNotCoveringConfiguration')
+      // Only an owners-wide delay covers, and then setGuard(0) waits T like everything else.
+      await execOwners(
+        w,
+        configureCall(w, [attach(anyCall(OWNERS), w.timelock, timelockSettings({ delay: T })), cfg, narrow]),
+      )
+      await expectPolicyDenied(
+        execOwners(w, transfer(w, w.attacker.address, 1n)),
+        w,
+        w.timelock,
+        'NotScheduled',
+      )
+      await waitsT(w, safeCall(w, 'setGuard', [ZeroAddress]))
     })
 
     it('a module actor Timelock is exempt (the owners remove it through their own delay)', async () => {

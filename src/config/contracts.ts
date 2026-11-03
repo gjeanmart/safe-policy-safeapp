@@ -100,6 +100,7 @@ export const V2_ENGINES: readonly V2Engine[] = [
       policies: {
         timelock: V2_ZERO,
         timelockQueue: V2_ZERO,
+        timelockFreeze: V2_ZERO,
         args: V2_ZERO,
         limit: V2_ZERO,
         coSigner: V2_ZERO,

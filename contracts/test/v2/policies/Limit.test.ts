@@ -323,6 +323,17 @@ describe('V2 rev 3 LimitPolicy (WP C)', () => {
       await check([c, call(alice, '0x', 0n, DELEGATECALL)], [B])
     })
 
+    it('a call to the engine (configure) is not judged, without passUnpriced; the same call elsewhere is Unpriced', async () => {
+      const data = id('configure((bool,(address,address,bytes4,uint8),uint8,address,uint8,bytes)[])').slice(
+        0,
+        10,
+      )
+      await check([call(engineAddr, data)])
+      await check([call(engineAddr, data), tok('transfer', [alice, 10n])])
+      expect(await spent()).to.equal(10n)
+      await expectRevert(check([call(alice, data)]), policy, 'Unpriced', [0, A, ZeroAddress, data])
+    })
+
     it('over budget is LimitExceeded(call, attachment, token, requested, available)', async () => {
       await check([tok('transfer', [alice, 900n])])
       await expectRevert(check([tok('transfer', [alice, 101n])]), policy, 'LimitExceeded', [

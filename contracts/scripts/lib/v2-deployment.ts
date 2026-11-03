@@ -8,7 +8,7 @@ import type { IPolicyGuard } from '../../typechain-types'
  * Sepolia prices deployed code at ~1,542 gas per byte (plus ~210k per create) and caps a
  * transaction at 2^24 gas (EIP-7825), so no contract may exceed ~10 KB of runtime and every
  * contract is its own transaction: the engine is `PolicyGuard` plus the `PolicyGuardConfig` it
- * DELEGATECALLs, and TimelockPolicy a policy plus its `TimelockPolicyQueue`.
+ * DELEGATECALLs, and TimelockPolicy a policy plus its `TimelockPolicyQueue` and `TimelockPolicyFreeze`.
  */
 
 /** Fully qualified names: some V1 vendor names (ISafe, IERC165) clash in the artifact namespace. */
@@ -16,6 +16,7 @@ export const FQN = {
   engineConfig: 'contracts/v2/PolicyGuardConfig.sol:PolicyGuardConfig',
   engine: 'contracts/v2/PolicyGuard.sol:PolicyGuard',
   timelockQueue: 'contracts/v2/policies/TimelockPolicyQueue.sol:TimelockPolicyQueue',
+  timelockFreeze: 'contracts/v2/policies/TimelockPolicyFreeze.sol:TimelockPolicyFreeze',
   timelock: 'contracts/v2/policies/TimelockPolicy.sol:TimelockPolicy',
   args: 'contracts/v2/policies/ArgsPolicy.sol:ArgsPolicy',
   limit: 'contracts/v2/policies/LimitPolicy.sol:LimitPolicy',
@@ -28,6 +29,7 @@ export const DEPLOYED: readonly string[] = [
   FQN.engineConfig,
   FQN.engine,
   FQN.timelockQueue,
+  FQN.timelockFreeze,
   FQN.timelock,
   FQN.args,
   FQN.limit,
@@ -90,6 +92,7 @@ export type V2Deployment = {
   policies: {
     timelock: string
     timelockQueue: string
+    timelockFreeze: string
     args: string
     limit: string
     coSigner: string
@@ -125,7 +128,8 @@ export type PolicyOptions = {
 }
 
 /**
- * The policies: `TimelockPolicyQueue` then the `TimelockPolicy` that DELEGATECALLs it, `ArgsPolicy`,
+ * The policies: `TimelockPolicyQueue` and `TimelockPolicyFreeze` (built with F and C), then the
+ * `TimelockPolicy` that DELEGATECALLs both, `ArgsPolicy`,
  * `LimitPolicy`, `CoSignerPolicy`, and `SafenetPolicy` when given its arguments. Policies key their
  * state by engine (msg.sender), so they do not depend on the engine's address.
  */
@@ -134,13 +138,19 @@ export async function deployPolicies(
   { timelock = TIMELOCK, safenet }: PolicyOptions = {},
 ): Promise<V2Deployment['policies']> {
   const timelockQueue = await deploy(nameOf(FQN.timelockQueue), FQN.timelockQueue, [])
+  const timelockFreeze = await deploy(nameOf(FQN.timelockFreeze), FQN.timelockFreeze, [
+    timelock.maxFreeze,
+    timelock.cooldown,
+  ])
   return {
     timelock: await deploy(nameOf(FQN.timelock), FQN.timelock, [
       timelock.maxFreeze,
       timelock.cooldown,
       timelockQueue,
+      timelockFreeze,
     ]),
     timelockQueue,
+    timelockFreeze,
     args: await deploy(nameOf(FQN.args), FQN.args, []),
     limit: await deploy(nameOf(FQN.limit), FQN.limit, []),
     coSigner: await deploy(nameOf(FQN.coSigner), FQN.coSigner, []),

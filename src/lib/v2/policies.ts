@@ -28,6 +28,8 @@ export type V2Deployment = {
     timelock: Address
     /** `TimelockPolicyQueue`, reached by the policy's DELEGATECALL (never called directly). */
     timelockQueue: Address
+    /** `TimelockPolicyFreeze` (freeze and lift), reached by the policy's DELEGATECALL (never called directly). */
+    timelockFreeze: Address
     args: Address
     limit: Address
     coSigner: Address
@@ -37,6 +39,19 @@ export type V2Deployment = {
   /** First block worth scanning for events (the deployment block). */
   fromBlock?: bigint
 }
+
+/**
+ * Safe 1.5.0 fallback handlers, canonical deployments (same address on Ethereum mainnet and Sepolia),
+ * from safe-global/safe-deployments@685f22be940739259cfc4148db3df7048f39a4e8,
+ * `src/assets/v1.5.0/{token_callback,compatibility_fallback}_handler.json`.
+ * TokenCallbackHandler receives ERC-721 / ERC-1155 but does not implement ERC-1271, so the owners'
+ * off-chain signatures (Permit, Permit2, CoW orders) are not valid for the Safe and cannot bypass the
+ * policies; CompatibilityFallbackHandler (the Safe{Wallet} default) does implement it.
+ */
+export const SAFE_HANDLERS = {
+  tokenCallback: '0x54e86d004d71a8D2112ec75FaCE57D730b0433F3',
+  compatibility: '0x3EfCBb83A4A7AfcB4F68D501E2c2203a38be77f4',
+} as const satisfies Record<string, Address>
 
 /** The policies a Safe can attach (the queue is part of the Timelock). */
 export const POLICY_NAMES = ['timelock', 'args', 'limit', 'coSigner', 'safenet'] as const
@@ -87,6 +102,7 @@ export function parseV2Deployment(json: unknown): V2Deployment {
     policies: {
       timelock: address(p.timelock, 'policies.timelock'),
       timelockQueue: address(p.timelockQueue, 'policies.timelockQueue'),
+      timelockFreeze: address(p.timelockFreeze, 'policies.timelockFreeze'),
       args: address(p.args, 'policies.args'),
       limit: address(p.limit, 'policies.limit'),
       coSigner: address(p.coSigner, 'policies.coSigner'),
@@ -167,6 +183,7 @@ export const deploymentNames = (deployment: V2Deployment): ((address: Address) =
     [getAddress(deployment.engine), 'Policy engine'],
     [getAddress(deployment.engineConfig), 'PolicyGuardConfig'],
     [getAddress(deployment.policies.timelockQueue), 'TimelockPolicyQueue'],
+    [getAddress(deployment.policies.timelockFreeze), 'TimelockPolicyFreeze'],
     ...deployment.trustedBatches.map((batch, i): [string, string] => [
       getAddress(batch),
       `MultiSendCallOnly #${i + 1}`,

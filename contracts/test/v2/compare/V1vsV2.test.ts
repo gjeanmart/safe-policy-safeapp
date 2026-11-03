@@ -1,6 +1,6 @@
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers'
 import { expect } from 'chai'
-import { AbiCoder, type Interface, TypedDataEncoder, ZeroAddress } from 'ethers'
+import { AbiCoder, type Interface, TypedDataEncoder, ZeroAddress, dataSlice, getAddress, id } from 'ethers'
 import { ethers } from 'hardhat'
 import {
   type MetaTx,
@@ -66,11 +66,14 @@ import {
  * V1 vs V2 rev 3, side by side, on real Safes 1.5.0: every row of the design doc's §1 table ("what
  * V1 cannot express") that rev 3 still covers, plus the batch row of §4. Each `it` runs the same
  * scenario on the vendored V1 `SafePolicyGuard` (71b9cb0) and on the rev 3 engine, and asserts
- * both outcomes. The results are tabulated in contracts/contracts/v2/COMPARISON.md. Rev 3 dropped
- * the ERC-1271 handler: the last test keeps that gap visible on both.
+ * both outcomes. The results are tabulated in contracts/contracts/v2/COMPARISON.md. Rev 3 has no
+ * ERC-1271 handler and its install sets Safe's `TokenCallbackHandler`; the last test keeps the gap
+ * visible for a Safe that keeps an ERC-1271 handler.
  */
 
 const coder = AbiCoder.defaultAbiCoder()
+/** Safe's `FallbackManager` slot: `keccak256("fallback_manager.handler.address")`. */
+const FALLBACK_HANDLER_SLOT = id('fallback_manager.handler.address')
 
 async function deploy() {
   const w = await deployWorld()
@@ -493,25 +496,31 @@ describe('V1 vs V2 rev 3 (design doc §1, on real Safes 1.5.0)', () => {
     })
   })
 
-  describe('gap kept on purpose: ERC-1271 (rev 3 decision 12)', () => {
-    it('an off-chain owner signature on a permit: V1 drained, V2 drained too (off-chain owner signatures bypass every policy)', async () => {
+  describe('ERC-1271: off-chain owner signatures (rev 3 decision 12)', () => {
+    /** V1 and V2 Safes with the same rules; V2 installed with `fallbackHandler` (undefined: the default). */
+    async function permitWorld(fallbackHandler?: null) {
       const w = await loadFixture(deploy)
       const v1 = await deployV1(w, [
         v1Rule(w.tokenAddress, SEL.transfer, addrOf(w.v1p.transfer), recipientList([w.vendorA.address])),
       ])
       // V2 with a tight budget and a recipients list on the owners: none of it sees a permit.
       const ownersTransfer = onFunction(OWNERS, w.tokenAddress, SEL.transfer)
-      await install(w, [
-        allow(anyCall(OWNERS)),
-        attach(ownersTransfer, w.args, argsSettings(recipientsPreset([w.vendorA.address]))),
-        attach(
-          anyCall(OWNERS),
-          w.limit,
-          limitSettings([{ token: w.tokenAddress, amount: usdc(1), period: MONTH }], true),
-        ),
-      ])
+      await install(
+        w,
+        [
+          allow(anyCall(OWNERS)),
+          attach(ownersTransfer, w.args, argsSettings(recipientsPreset([w.vendorA.address]))),
+          attach(
+            anyCall(OWNERS),
+            w.limit,
+            limitSettings([{ token: w.tokenAddress, amount: usdc(1), period: MONTH }], true),
+          ),
+        ],
+        { fallbackHandler },
+      )
       const { chainId } = await ethers.provider.getNetwork()
       const deadline = BigInt(await time.latest()) + 3600n
+      /** The owners sign a permit of the whole balance to the attacker off-chain; the attacker uses it. */
       const drainWithPermit = async (safe: typeof w.safe) => {
         const owner = await safe.getAddress()
         const digest = TypedDataEncoder.hash(
@@ -527,14 +536,37 @@ describe('V1 vs V2 rev 3 (design doc §1, on real Safes 1.5.0)', () => {
           },
           { owner, spender: w.attacker.address, value: usdc(100_000), nonce: 0n, deadline },
         )
-        // The Safe's CompatibilityFallbackHandler answers isValidSignature from the owners' signatures.
         const sig = await signHashOffchain(safe, digest, w.quorum)
         await w.token.connect(w.attacker).permit(owner, w.attacker.address, usdc(100_000), deadline, sig)
         await w.token.connect(w.attacker).transferFrom(owner, w.attacker.address, usdc(100_000))
-        expect(await w.token.balanceOf(owner)).to.equal(0n)
       }
+      return { w, v1, drainWithPermit }
+    }
+
+    it('an off-chain owner signature on a permit: V1 drained, V2 refused (its install sets TokenCallbackHandler, no ERC-1271)', async () => {
+      const { w, v1, drainWithPermit } = await permitWorld()
+      // V1 keeps the CompatibilityFallbackHandler: it answers isValidSignature from the owners' signatures.
+      await drainWithPermit(v1.safe)
+      expect(await w.token.balanceOf(v1.safeAddress)).to.equal(0n)
+      // V2's install replaced it with Safe's TokenCallbackHandler: nothing answers isValidSignature.
+      const handler = await ethers.provider.getStorage(w.safeAddress, FALLBACK_HANDLER_SLOT)
+      expect(getAddress(dataSlice(handler, 12))).to.equal(w.tokenCallbackHandler)
+      let drained = true
+      try {
+        await drainWithPermit(w.safe)
+      } catch (e) {
+        drained = false
+        expect(w.token.interface.parseError(revertData(e)!)?.name).to.equal('InvalidSignature')
+      }
+      expect(drained).to.equal(false)
+      expect(await w.token.balanceOf(w.safeAddress)).to.equal(usdc(100_000))
+    })
+
+    it('the documented gap: V2 installed keeping the CompatibilityFallbackHandler is drained by the same permit', async () => {
+      const { w, v1, drainWithPermit } = await permitWorld(null)
       await drainWithPermit(v1.safe)
       await drainWithPermit(w.safe)
+      expect(await w.token.balanceOf(w.safeAddress)).to.equal(0n)
       // The same transfer as a Safe transaction is denied: only the off-chain path bypasses.
       await w.token.mint(w.safeAddress, usdc(10))
       await expectPolicyDenied(

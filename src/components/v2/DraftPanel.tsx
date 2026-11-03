@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Address } from 'viem'
+import { type Address, isAddressEqual } from 'viem'
 import { useSandbox } from '../../context'
 import { isModuleEnabled, safeTxs } from '../../lib/safe'
 import {
@@ -9,6 +9,7 @@ import {
   type LintFinding,
   OWNERS,
   type OwnerCall,
+  SAFE_HANDLERS,
   type V2Deployment,
   changeAttachmentId,
   configureCall,
@@ -28,23 +29,30 @@ import { Card, CopyButton, Notice } from '../ui'
 import { LintPanel, findingKey } from './LintPanel'
 import { toSafeTxs } from './ownerCalls'
 
-/** Before V2 is installed: `[configure, setModuleGuard, setGuard]` in one batch (leftovers detached first). */
+/**
+ * Before V2 is installed: `[configure, setFallbackHandler, setModuleGuard, setGuard]` in one batch
+ * (leftovers detached first; the handler switch can be opted out of).
+ */
 function InstallActions({
   deployment,
   draft,
   leftovers,
+  handler,
   blocked,
   onDone,
 }: {
   deployment: V2Deployment
   draft: readonly Change[]
   leftovers: readonly Attachment[]
+  /** The Safe's current fallback handler, once read. */
+  handler?: Address
   blocked: boolean
   onDone: () => void
 }) {
   const { safe, state } = useSandbox()
   const roles = rolesStore.use()
   const [enable, setEnable] = useState<Address[]>([])
+  const [keepHandler, setKeepHandler] = useState(false)
   if (!state) return null
   if (!supportsV2(state.version))
     return (
@@ -53,9 +61,13 @@ function InstallActions({
         Safe 1.5.0. Use a 1.5.0 Safe.
       </Notice>
     )
-  const [configure, moduleGuard, guard] = installCalls(safe, deployment, draft, leftovers)
+  const [configure, ...admin] = installCalls(safe, deployment, draft, leftovers, {
+    fallbackHandler: keepHandler ? null : SAFE_HANDLERS.tokenCallback,
+    currentHandler: handler,
+  })
   const enableTxs = enable.map((m) => safeTxs.enableModule(safe, m))
-  const batch = [...toSafeTxs([configure!]), ...enableTxs, ...toSafeTxs([moduleGuard!, guard!])]
+  const batch = [...toSafeTxs([configure!]), ...enableTxs, ...toSafeTxs(admin)]
+  const hasTokenHandler = handler !== undefined && isAddressEqual(handler, SAFE_HANDLERS.tokenCallback)
   const disabledRoles = roles.filter((r) => !isModuleEnabled(state, r.address))
   return (
     <div className="stack">
@@ -99,10 +111,30 @@ function InstallActions({
           </div>
         </div>
       )}
+      {!hasTokenHandler && (
+        <label className="row">
+          <input type="checkbox" checked={keepHandler} onChange={(e) => setKeepHandler(e.target.checked)} />
+          Keep the current fallback handler (do not switch to TokenCallbackHandler)
+          <InfoTip>
+            By default the install batch sets Safe&apos;s TokenCallbackHandler ({SAFE_HANDLERS.tokenCallback}
+            ): it receives ERC-721 / ERC-1155 but does not implement ERC-1271. Keeping an ERC-1271 handler
+            (CompatibilityFallbackHandler) lets the owners&apos; off-chain signatures (Permit, Permit2, CoW
+            orders) move funds with no policy running: the owners&apos; Timelock, the guardians&apos; freeze
+            and recovery no longer bound a key compromise. Only keep it if this Safe must sign messages
+            off-chain.
+          </InfoTip>
+        </label>
+      )}
+      {keepHandler && !hasTokenHandler && (
+        <Notice tone="warn">
+          The fallback handler stays as it is: if it implements ERC-1271, off-chain owner signatures bypass
+          every policy.
+        </Notice>
+      )}
       <ProposeButton
         label="Propose install batch"
         txs={blocked ? [] : batch}
-        info="One owner transaction, batched by Safe{Wallet} through MultiSendCallOnly: configure (before any guard, so nothing checks it), then setModuleGuard and setGuard. The fallback handler is left alone."
+        info={`One owner transaction, batched by Safe{Wallet} through MultiSendCallOnly: configure (before any guard, so nothing checks it), ${keepHandler || hasTokenHandler ? '' : 'setFallbackHandler(TokenCallbackHandler), '}then setModuleGuard and setGuard.`}
         onProposed={onDone}
       />
     </div>
@@ -132,7 +164,8 @@ function ConfigureActions({
           The owners&apos; Timelock covers engine.configure: this change must be <strong>scheduled</strong>{' '}
           and waits {durationLabel(ownersDelay)} (frozen while a guardian freezes the owners; a configure
           schedule is never voided by a freeze). Propose it in Safe{'{Wallet}'}, collect the signatures, then
-          schedule it in the queue below; or sign it here with local owner keys.
+          schedule it in the queue below; or sign it here with local owner keys. Keep safeTxGas and gasPrice
+          at 0 in Safe{'{Wallet}'} (V2 refuses any other value).
         </Notice>
       ) : (
         <Notice tone="warn">
@@ -171,6 +204,7 @@ export function DraftPanel({
   setDraft,
   findings,
   ctx,
+  handler,
   onSchedule,
 }: {
   deployment: V2Deployment
@@ -179,6 +213,8 @@ export function DraftPanel({
   setDraft: (next: Change[]) => void
   findings: readonly LintFinding[]
   ctx: LabelContext
+  /** The Safe's current fallback handler, once read. */
+  handler?: Address
   onSchedule: (call: OwnerCall) => void
 }) {
   const { safe, v2Installed } = useSandbox()
@@ -269,6 +305,7 @@ export function DraftPanel({
           deployment={deployment}
           draft={draft}
           leftovers={current}
+          handler={handler}
           blocked={blocked && !(empty && problems.length === 0 && unconfirmed.length === 0)}
           onDone={clear}
         />

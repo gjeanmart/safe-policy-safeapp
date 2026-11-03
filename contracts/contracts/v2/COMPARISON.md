@@ -24,26 +24,28 @@ it behaves as the "fallback timelock" of WA-4014).
 | §1.6 limits only cover transfers             | 5,000 USDC a month; `approve(attacker, 100,000)`                                  | Executes; the attacker pulls 100,000                                    | `LimitExceeded` (an approval costs its full amount)                         | `approve(attacker, 100,000) under a 5,000 limit: V1 executes (unlimited allowance), V2 LimitExceeded (full amount priced)`             |
 | §1.6                                         | Same; send 10 ETH                                                                 | Executes                                                                | `LimitExceeded` (native value always counted)                               | `10 ETH sent under a token limit: V1 executes, V2 LimitExceeded (native value counted)`                                                |
 | §4 batches                                   | Transfer limit + an Allow on MultiSend; a batch of two 50,000 transfers           | Executes: 71b9cb0 does not look inside a batch; the Safe is drained     | `LimitExceeded` (every sub-call is checked, summed over the batch)          | `transfers inside a MultiSend: V1 (71b9cb0) lets an allowed batch through unchecked, V2 checks every sub-call (LimitExceeded)`         |
-| Gap kept (rev 3 decision 12)                 | Owners sign a USDC permit off-chain                                               | Drained: the fallback handler validates it, no guard call               | Drained too: rev 3 has no ERC-1271 handler; off-chain owner signatures bypass every policy | `an off-chain owner signature on a permit: V1 drained, V2 drained too (off-chain owner signatures bypass every policy)`    |
+| ERC-1271 (rev 3 decision 12)                 | Owners sign a USDC permit off-chain                                               | Drained: the fallback handler validates it, no guard call               | Refused (`InvalidSignature`): the install sets Safe's `TokenCallbackHandler`, which has no ERC-1271 | `an off-chain owner signature on a permit: V1 drained, V2 refused (its install sets TokenCallbackHandler, no ERC-1271)`    |
+| Gap kept (opt-out)                           | Same, V2 installed keeping the `CompatibilityFallbackHandler`                     | Drained                                                                 | Drained too: off-chain owner signatures bypass every policy                  | `the documented gap: V2 installed keeping the CompatibilityFallbackHandler is drained by the same permit`                             |
 
-Dropped from the rev 2 table: the ERC-1271 row (rev 2's `PolicyFallbackHandler` answered `0xffffffff`; rev 3 removed the
-handler, so the last row documents the gap instead: the app recommends Safe's `TokenCallbackHandler` and warns the owners).
+Changed from the rev 2 table: the ERC-1271 row. Rev 2's `PolicyFallbackHandler` answered `0xffffffff`; rev 3 removed
+that handler and its install sets Safe's own `TokenCallbackHandler` instead (token callbacks, no ERC-1271). The last row
+keeps the gap visible for owners who opt out and keep an ERC-1271 handler (the app warns them).
 Not testable on-chain: the §1.5 half about Safe's AllowanceModule (not vendored; approximated by a module with its own
 payee above), and the UI / indexer rows.
 
 ## Also proven end to end (V2 rev 3 only)
 
 `test/v2/stories/*.test.ts` runs one story per use case on the real engine and a real Safe 1.5.0, installed with
-`[configure, setModuleGuard, setGuard]` in one owners' batch. The exact `Change[]` of each is in `COOKBOOK.md`.
+`[configure, enableModule..., setFallbackHandler(TokenCallbackHandler), setModuleGuard, setGuard]` in one owners' batch. The exact `Change[]` of each is in `COOKBOOK.md`.
 
 | File                         | Story                                                                                                   |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `Erc20Payments.test.ts`      | Ops pays vendors within a monthly budget; wrong recipient, over budget, batch of 5 summed, `approve(attacker, max)`, the refill attack |
 | `Erc721.test.ts`             | Transfers to listed recipients; `setApprovalForAll` denied; the Limit placed per token contract          |
-| `CowAgent.test.ts`           | An agent approves the vault relayer (capped) and pre-signs; a co-signer approval required and consumed; freezing the agent stops only the agent |
+| `CowAgent.test.ts`           | An agent approves the vault relayer (capped) and pre-signs; a co-signer approval required and consumed; freezing the agent stops only the agent; the bound is every allowance to the relayer, the owners' own included |
 | `Aave.test.ts`               | Supply / withdraw; wrong `onBehalfOf` or receiver denied by Args                                         |
-| `Morpho.test.ts`             | Supply / withdraw; wrong receiver or onBehalf denied by Args; no `setAuthorization`                     |
-| `Uniswap.test.ts`            | `exactInputSingle`; wrong recipient denied by Args                                                      |
+| `Morpho.test.ts`             | Supply / withdraw in one pinned market (all five `MarketParams` words); wrong receiver or onBehalf denied by Args; no `setAuthorization` |
+| `Uniswap.test.ts`            | `exactInputSingle` with tokenIn, tokenOut, fee and recipient pinned; wrong recipient or pool denied by Args |
 | `Ens.test.ts`                | `register` with native value priced; wrong owner denied by Args                                         |
 | `OwnersTimelock.test.ts`     | WA-4014: `setGuard(0)`, `addOwnerWithThreshold` and `configure` wait T; future nonce; owners' cancel; `TimelockNotCoveringConfiguration` |
 | `Recovery.test.ts`           | WA-4016: a payment allowlist never blocks `swapOwner`; recovery after R; owners detach a rogue recovery within T |
@@ -51,5 +53,5 @@ payee above), and the UI / indexer rows.
 | `Spark.test.ts`              | Another Safe as a canceller                                                                             |
 | `Committee.test.ts`          | A 2-of-3 sub-Safe as a module actor with its own higher Limit (replaces Quorum)                          |
 | `Batches.test.ts`            | Transparent wrapper, nesting denied, the 8-call cap, one Timelock schedule per batch                     |
-| `Configure.test.ts`          | Implicit grant on the owner path, exact Allow on the module path, denied in a batch, leftovers at install |
+| `Configure.test.ts`          | Implicit grant on the owner path, exact Allow on the module path, denied in a batch, leftovers at install; Limit and Args never judge `configure` |
 | `Preview.test.ts`            | `matches` + an `eth_call` of each policy from the engine address gives the real verdict, byte for byte, in 14 scenarios |

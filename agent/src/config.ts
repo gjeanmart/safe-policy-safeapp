@@ -32,6 +32,11 @@ export type Config = {
   addressBook: Record<string, Address>
   /** How far back `policies` scans guard events by default. */
   lookbackBlocks: number
+  /**
+   * Seconds a suggested co-signer approval / Safenet attestation stays valid beyond any Timelock
+   * wait on the call (default 3600). Edit config.json to change it.
+   */
+  proofLifetime?: number
 }
 
 export function loadConfig(): Config {
@@ -51,6 +56,7 @@ export function loadConfig(): Config {
       Object.entries(raw.addressBook ?? {}).map(([name, address]) => [name, getAddress(address)]),
     ),
     lookbackBlocks: raw.lookbackBlocks ?? 200_000,
+    ...(raw.proofLifetime !== undefined ? { proofLifetime: Number(raw.proofLifetime) } : {}),
   }
 }
 

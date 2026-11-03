@@ -20,6 +20,8 @@ import {
   type SafeV2Model,
   actorLabel,
   callPhrase,
+  cancelOutcome,
+  cancellersOf,
   durationLabel,
   freezePhase,
   isOwnerEntry,
@@ -176,9 +178,12 @@ function EntryRow({
     owners && currentNonce !== undefined ? ownerNonceState(entry.nonce, currentNonce) : undefined
   const relayRole = roles.find((r) => r.address === relayer)
   const scheduledIds = new Set(data.schedule.attachmentIds)
-  const cancellers = model.attachments
-    .filter((a) => scheduledIds.has(a.attachmentId) && a.settings?.policy === 'timelock')
-    .flatMap((a) => (a.settings?.policy === 'timelock' ? a.settings.settings.cancellers : []))
+  const cancellers = cancellersOf(
+    entry,
+    model.attachments
+      .filter((a) => scheduledIds.has(a.attachmentId) && a.settings?.policy === 'timelock')
+      .flatMap((a) => (a.settings?.policy === 'timelock' ? a.settings.settings.cancellers : [])),
+  )
   const cancellerRole = roles.find(
     (r) => roleKind(r) === 'eoa' && cancellers.some((c) => isAddressEqual(c, r.address)),
   )
@@ -305,9 +310,9 @@ function EntryRow({
             variant="danger"
             disabled={!relayRole || localOwners.length === 0}
             onClick={cancelAsOwners}
-            title="threshold owner signatures over the policy's Cancel digest (bound to this schedule), from local owner keys"
+            title="Threshold owner signatures over the policy's Cancel digest (bound to this schedule), from local owner keys. Final: this signed transaction can never be scheduled again (sign a new one to retry)."
           >
-            Cancel as owners
+            Cancel for good as owners
           </AsyncButton>
         )}
         {!owners && actorRole && roleKind(actorRole) === 'eoa' && (
@@ -397,7 +402,7 @@ function ScheduleOwnerTx({
       text: !r.ok
         ? `Preview failed: ${r.reason}`
         : r.outcome.allowed
-          ? `Allowed at nonce ${nonce}`
+          ? `Allowed at nonce ${nonce} (with safeTxGas = gasPrice = 0)`
           : `At nonce ${nonce}: ${r.outcome.deciding?.reasonText ?? 'denied'}`,
     })
   }
@@ -408,8 +413,14 @@ function ScheduleOwnerTx({
     onScheduled()
   }
 
+  // The guard rejects non-zero gas fields first (GasFieldsNotZero at schedule, NonZeroSafeTxGas /
+  // NonZeroGasPrice at execution); the gate preview cannot see them, it only judges to/value/data.
+  const badGas = !!queued.data && (queued.data.safeTxGas !== 0n || queued.data.gasPrice !== 0n)
+
   const scheduleQueued = async () => {
     const q = queued.data!
+    if (q.safeTxGas !== 0n || q.gasPrice !== 0n)
+      throw new Error('safeTxGas and gasPrice must be 0 under V2: propose it again with both at 0')
     if (q.signatures.length < threshold)
       throw new Error(`${q.signatures.length} of ${threshold} signatures so far`)
     await schedule(
@@ -473,7 +484,9 @@ function ScheduleOwnerTx({
           <p className="small muted">
             Propose the transaction in Safe{'{Wallet}'}, collect the owners&apos; signatures, then paste its
             Safe transaction hash: the same signatures schedule it. Execute it from the Safe{'{Wallet}'} queue
-            once ready.
+            once ready. V2 requires <strong>safeTxGas = 0 and gasPrice = 0</strong>: set them in Safe
+            {'{Wallet}'}&apos;s advanced parameters before signing (the gate preview does not see them; a
+            proposal with an estimated safeTxGas is refused at schedule and at execution).
           </p>
           <Field label="Safe transaction hash">
             <input
@@ -492,14 +505,21 @@ function ScheduleOwnerTx({
               {currentNonce !== undefined && queued.data.nonce < currentNonce && (
                 <Badge tone="bad">nonce already used</Badge>
               )}
-              {(queued.data.safeTxGas !== 0n || queued.data.gasPrice !== 0n) && (
-                <Badge tone="bad">safeTxGas / gasPrice must be 0 under V2</Badge>
+              {badGas && (
+                <Badge tone="bad">
+                  safeTxGas {queued.data.safeTxGas.toString()} / gasPrice {queued.data.gasPrice.toString()}:
+                  both must be 0 under V2, propose it again
+                </Badge>
               )}
             </div>
           )}
           <div className="row wrap align-end">
             <RelayerSelect value={relayer} onChange={setRelayer} />
-            <AsyncButton variant="primary" disabled={!queued.data || !relayRole} onClick={scheduleQueued}>
+            <AsyncButton
+              variant="primary"
+              disabled={!queued.data || !relayRole || badGas}
+              onClick={scheduleQueued}
+            >
               Schedule
             </AsyncButton>
           </div>
@@ -768,9 +788,12 @@ export function Queue({
             {closed.map((e) => (
               <li key={e.txHash}>
                 {actorLabel(e.actor, ctx.nameOf)} ·{' '}
-                {selectorName(e.data.slice(0, 10) as Hex) ?? e.data.slice(0, 10)} · {e.state}
+                {selectorName(e.data.slice(0, 10) as Hex) ?? e.data.slice(0, 10)} ·{' '}
+                {cancelOutcome(e) === 'final' ? 'cancelled for good' : e.state}
                 {e.cancelledBy &&
                   ` by ${isAddressEqual(e.cancelledBy, safe) ? 'the owners' : (ctx.nameOf?.(e.cancelledBy) ?? shortAddress(e.cancelledBy))}`}
+                {cancelOutcome(e) === 'final' && ': this signed transaction can never be scheduled again'}
+                {cancelOutcome(e) === 'reschedulable' && ': the module may schedule it again'}
               </li>
             ))}
           </ul>

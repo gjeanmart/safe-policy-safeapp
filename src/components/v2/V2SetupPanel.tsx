@@ -44,12 +44,19 @@ function V2Screens() {
   const projected = projectAttachments(base, sortForApply(deployment, draft), deployment)
   const previewed = preview ? projectAttachments([], preview, deployment) : []
   const items = diffAttachments(model.attachments, projected, previewed)
-  const findings = lint({ safe, deployment, attachments: projected, modules: state.modules, ctx: view.ctx })
+  const findings = lint({
+    safe,
+    deployment,
+    attachments: projected,
+    modules: state.modules,
+    ctx: view.ctx,
+    cooldown: view.freezeLimits?.cooldown,
+  })
   const add = (changes: Change[]) => setDraft(mergeChanges(draft, changes, isAttached))
 
   return (
     <>
-      <Erc1271Notice handler={handler.data} />
+      <Erc1271Notice handler={handler.data} installed={v2Installed} />
       {!v2Installed && (
         <Notice>
           V2 is not installed on this Safe yet. Build the configuration (start with the Owners template), then
@@ -76,6 +83,7 @@ function V2Screens() {
         setDraft={setDraft}
         findings={findings}
         ctx={view.ctx}
+        handler={handler.data}
         onSchedule={setPrefill}
       />
       {v2Installed && (

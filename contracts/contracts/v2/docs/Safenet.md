@@ -26,7 +26,16 @@ with `updateEpoch` and a rollover signed by a trusted group, as in V1.
 `deadline > 0`: module path, the attestation is over `attestationDigest(engine, safe, txHash, deadline)` and the credit
 expires after the deadline. `attestation` is V1's 256-byte encoding
 `abi.encode(uint64 epoch, address oracle, bytes32 oracleDataHash, Point groupKey, Signature)`. Each FROST signature
-can be submitted once.
+can be submitted once per `(engine, safe)`.
+
+Why `(engine, safe)` is in the spent key: the owner-path message is the Safe transaction hash alone, so `engine` and
+`safe` come from the caller. Keyed by the signature alone, anyone who saw the attestation could submit it first under a
+wrong engine and burn it (the real transaction would fail `MissingAttestation` until Safenet signs again). A credit
+under another engine or Safe is harmless: only the Safe's own engine consumes the Safe's credits.
+
+Validator-side rule: Safenet attests a bare hash (`deadline = 0`) only for Safe transaction hashes. The contract cannot
+tell a Safe transaction hash from a module call hash; a module call hash attested with `deadline = 0` would be a credit
+that never expires on a hash with no nonce (one execution, but at any time).
 
 ## The check
 
@@ -44,7 +53,8 @@ One credit of `ctx.txHash` per Safe transaction, however many attachments matche
 | --- | --- |
 | `InvalidSettings` | non-empty settings |
 | `InvalidAddress` | constructor: zero Consensus address |
-| `MalformedAttestation`, `UntrustedAttestationKey`, `AttestationAlreadySpent` | `submitAttestation` |
+| `MalformedAttestation`, `UntrustedAttestationKey` | `submitAttestation` |
+| `AttestationAlreadySpent` | `submitAttestation` of an attestation already submitted for this engine and Safe |
 | `AttestationExpired(deadline)` | submitted or consumed after the deadline |
 | `MissingAttestation` | the check finds no credit |
 

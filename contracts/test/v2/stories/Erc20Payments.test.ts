@@ -261,4 +261,31 @@ describe('Story: ERC-20 payments by an ops actor within a monthly budget', () =>
       [0, attachmentId(s, Kind.POLICY, addrOf(w.args)), 3],
     )
   })
+
+  it('transferFrom from a third party is free for the Limit: the Recipients preset bounds where it goes', async () => {
+    const w = await loadFixture(world)
+    // Ops also collects allowances customers give the Safe: Allow transferFrom + the Recipients preset there.
+    const s = onFunction(w.ops.address, w.tokenAddress, SEL.transferFrom)
+    await execOwners(
+      w,
+      configureCall(w, [allow(s), attach(s, w.args, argsSettings(recipientsPreset([w.safeAddress])))]),
+    )
+    await w.token.mint(w.stranger.address, usdc(50_000))
+    await w.token.connect(w.stranger).approve(w.safeAddress, usdc(50_000))
+    const pull = (to: string) =>
+      execModule(w, w.ops, {
+        to: w.tokenAddress,
+        data: w.token.interface.encodeFunctionData('transferFrom', [w.stranger.address, to, usdc(50_000)]),
+      })
+    // Without the preset this would pass: the Limit prices transferFrom only from the Safe.
+    await expectPolicyDenied(pull(w.attacker.address), w, w.args, 'ConstraintFailed', [
+      0,
+      attachmentId(s, Kind.POLICY, addrOf(w.args)),
+      1,
+    ])
+    await pull(w.safeAddress)
+    expect(await w.token.balanceOf(w.safeAddress)).to.equal(usdc(150_000))
+    const left = await w.limit.remaining(w.engineAddress, w.safeAddress, limitId(w), w.tokenAddress)
+    expect(left.spent).to.equal(0n)
+  })
 })

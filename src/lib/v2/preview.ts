@@ -91,7 +91,15 @@ export function revertDataOf(error: unknown): Hex | undefined {
   return typeof data === 'string' ? data : data?.data
 }
 
-const reasonErrorsAbi = [...policyErrorsAbi, ...parseAbi(['error Error(string)'])]
+/**
+ * TODO(rev 3 fix T2): errors the contracts add in this round, until `abi.ts` is regenerated; the
+ * filter drops each one once the generated ABI has it, so this list can be deleted then.
+ */
+const PENDING_ERRORS = parseAbi(['error CancelledTransaction(bytes32 txHash)']).filter(
+  (e) => !policyErrorsAbi.some((x) => x.type === 'error' && (x.name as string) === e.name),
+)
+
+const reasonErrorsAbi = [...policyErrorsAbi, ...PENDING_ERRORS, ...parseAbi(['error Error(string)'])]
 
 const time = (seconds: unknown): string =>
   new Date(Number(seconds) * 1000).toISOString().replace('.000Z', 'Z')
@@ -185,6 +193,10 @@ export function describeReason(
       return text('No Timelock applies to this call: nothing to schedule')
     case 'AlreadyScheduled':
       return text(`Already scheduled (${shortHash(a(0))})`)
+    case 'CancelledTransaction':
+      return text(
+        `The owners cancelled this signed transaction (${shortHash(a(0))}) for good: it can never be scheduled again`,
+      )
     case 'GasFieldsNotZero':
       return text('safeTxGas and gasPrice must be 0')
     case 'StaleNonce':
@@ -308,7 +320,9 @@ async function simulateCheck(
 /**
  * Runs `matches` and each matched policy's `check` (see the module doc). `actor` is `OWNERS` or a
  * module. Owner path: the policies see the Safe tx hash at `ownerNonce` (default: the current
- * nonce), so a schedule or approval made for that nonce counts.
+ * nonce), so a schedule or approval made for that nonce counts. It judges `(to, value, data,
+ * operation)` only: the guard also refuses an owner transaction with `safeTxGas` or `gasPrice` other
+ * than 0 before any policy runs, so callers importing a signed Safe{Wallet} proposal check those.
  */
 export async function runPreview(
   client: PublicClient,

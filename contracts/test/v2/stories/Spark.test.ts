@@ -87,6 +87,8 @@ describe('Story: another Safe cancels queued transactions (Spark)', () => {
     ])
     await time.increase(T)
     await expectPolicyDenied(execOwners(w, tx), w, w.timelock, 'NotScheduled', [hash])
+    // The cancel is final: the same signed transaction can never be scheduled again.
+    await expectPolicyError(scheduleOwners(w, tx), w.timelock, 'CancelledTransaction', [hash])
   })
 
   it("the spark Safe cancels the ops actor's queued transfer", async () => {
@@ -96,6 +98,8 @@ describe('Story: another Safe cancels queued transactions (Spark)', () => {
     await sparkCancels(w, hash)
     await time.increase(HOUR)
     await expectPolicyDenied(execModule(w, w.ops, tx), w, w.timelock, 'NotScheduled', [hash])
+    // A module call has no nonce: the cancel resets the clock, the ops actor may schedule it again.
+    expect(await scheduleModule(w, w.ops, tx)).to.equal(hash)
   })
 
   it('without a cancel the queued transfers execute after their delays', async () => {

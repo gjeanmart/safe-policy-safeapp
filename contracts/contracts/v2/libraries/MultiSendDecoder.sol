@@ -16,7 +16,14 @@ import {Call} from "./Types.sol";
  *      - selector `0x8d80ff0a`, ABI head offset exactly `0x20`, the `bytes` payload in bounds;
  *      - each entry `uint8 op | address to | uint256 value | uint256 dataLength | bytes data`
  *        (packed, 85-byte header), fully inside the payload; `op` 0 or 1;
- *      - `to == address(0)` resolves to the Safe (MultiSend's `address()` under DELEGATECALL);
+ *      - `to == address(0)` resolves to the Safe. MultiSend / MultiSendCallOnly 1.5.0 do the same
+ *        (`address()` under DELEGATECALL); 1.4.1 does not, it calls `address(0)` (checked against
+ *        the v1.4.1 source). Judging such a sub-call as a call to the Safe is the safe side:
+ *        module calls to the Safe need a level-5 Allow (F5) and Safe-scoped DENYs and policies
+ *        apply. If an Allow on the Safe grants it, a call to `address(0)` runs no code, so the
+ *        worst case is its value burnt at `address(0)`, priced by Limit like any value (the
+ *        preview labels it "to the Safe"). Never resolve the other way: a Safe call judged as a
+ *        call to `address(0)` would dodge F5;
  *      - between 1 and `ScopeLib.MAX_BATCH_CALLS` entries (`tooMany` reports the cap separately).
  *      Adapted from V1 `MultiSendPolicy` (safe-research/policy-engine 8ee68a8).
  */
