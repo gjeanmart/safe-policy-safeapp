@@ -200,11 +200,10 @@ export function Playground() {
 
             {action === 'cow' && v2Installed && (
               <Notice tone="warn">
-                Policy Engine V2: an order made live with setPreSignature is opaque to the transfer budget
-                (unpriced, so denied unless the budget lets unpriced calls pass). The V2 agent template grants
-                PolicySignLib.signCowOrder instead, which approves the order on-chain with its fields priced;
-                this playground does not build that call yet (use a custom DELEGATECALL). Off-chain order
-                signatures by the owners are refused by PolicyFallbackHandler.
+                Policy Engine V2: setPreSignature carries only the order hash, so the budget cannot price the
+                order; the approval to the vault relayer is the spend (Agent CoW template: capped approval + a
+                budget with &quot;other calls pass&quot;). Off-chain order signatures by the owners bypass the
+                policies (see the ERC-1271 notice in the setup tab).
               </Notice>
             )}
 

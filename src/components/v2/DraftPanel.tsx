@@ -1,74 +1,75 @@
 import { useState } from 'react'
 import type { Address } from 'viem'
-import { publicClient } from '../../config/client'
 import { useSandbox } from '../../context'
-import { useAsync } from '../../hooks/useAsync'
-import { useNow } from '../../hooks/useNow'
-import { formatDuration } from '../../lib/format'
 import { isModuleEnabled, safeTxs } from '../../lib/safe'
 import {
-  type ChangeSet,
-  type EngineInfo,
+  type Attachment,
+  type Change,
   type LabelContext,
   type LintFinding,
-  type SafeV2Model,
+  OWNERS,
+  type OwnerCall,
   type V2Deployment,
   changeAttachmentId,
-  changeSetRoot,
+  configureCall,
+  configureCoverIds,
   describeChange,
-  describeRoleChange,
-  emptyChangeSet,
-  engineCalls,
+  durationLabel,
   installCalls,
-  readRootValidFrom,
-  rootStatus,
+  sortForApply,
   supportsV2,
-  validateChangeSet,
+  validateChanges,
 } from '../../lib/v2'
-import { rolesStore, v2PendingStore } from '../../store'
+import { rolesStore } from '../../store'
 import { ConfirmIconButton } from '../ConfirmIconButton'
 import { ProposeButton } from '../ProposeButton'
 import { InfoTip } from '../Tooltip'
-import { Card, Notice } from '../ui'
+import { Card, CopyButton, Notice } from '../ui'
 import { LintPanel, findingKey } from './LintPanel'
 import { toSafeTxs } from './ownerCalls'
 
-const ROOT_REFRESH_MS = 5_000
-
-/** Before V2 is installed: one batch (or four steps) that configures, sets the handler and both guards. */
+/** Before V2 is installed: `[configure, setModuleGuard, setGuard]` in one batch (leftovers detached first). */
 function InstallActions({
   deployment,
   draft,
+  leftovers,
   blocked,
   onDone,
 }: {
   deployment: V2Deployment
-  draft: ChangeSet
+  draft: readonly Change[]
+  leftovers: readonly Attachment[]
   blocked: boolean
   onDone: () => void
 }) {
   const { safe, state } = useSandbox()
   const roles = rolesStore.use()
-  const [stepByStep, setStepByStep] = useState(false)
   const [enable, setEnable] = useState<Address[]>([])
   if (!state) return null
   if (!supportsV2(state.version))
     return (
       <Notice tone="bad">
-        Safe {state.version} cannot run V2: the module guard (and so any check of module transactions) needs
+        Safe {state.version} cannot run V2: the module guard (the check of every module transaction) needs
         Safe 1.5.0. Use a 1.5.0 Safe.
       </Notice>
     )
-  const [configure, handler, moduleGuard, guard] = installCalls(safe, deployment, draft)
+  const [configure, moduleGuard, guard] = installCalls(safe, deployment, draft, leftovers)
   const enableTxs = enable.map((m) => safeTxs.enableModule(safe, m))
-  const batch = [...toSafeTxs([configure!, handler!]), ...enableTxs, ...toSafeTxs([moduleGuard!, guard!])]
+  const batch = [...toSafeTxs([configure!]), ...enableTxs, ...toSafeTxs([moduleGuard!, guard!])]
   const disabledRoles = roles.filter((r) => !isModuleEnabled(state, r.address))
   return (
     <div className="stack">
-      {draft.changes.length === 0 && (
+      {draft.length === 0 && (
         <Notice tone="warn">
           Installing with an empty configuration denies every owner and module transaction except
-          configuration changes (deny by default). Start from the Owners template.
+          engine.configure (deny by default). Start from the Owners template.
+        </Notice>
+      )}
+      {leftovers.length > 0 && (
+        <Notice tone="warn">
+          This Safe has {leftovers.length} attachment{leftovers.length === 1 ? '' : 's'} from an earlier
+          install (shown on the chart). The install batch detaches the ones the draft does not keep, in the
+          same configure.
         </Notice>
       )}
       {disabledRoles.length > 0 && (
@@ -76,9 +77,8 @@ function InstallActions({
           <span className="field-label">
             Also enable these roles as modules in the install batch
             <InfoTip>
-              Once V2 guards the owners, enableModule is an owner transaction like any other (Allow +
-              Timelock). Enabling now avoids the wait; a new module can still do nothing until something is
-              attached to it.
+              Once V2 guards the owners, enableModule is an owner transaction like any other (Allow, then the
+              owners&apos; Timelock). A new module can still do nothing until something is attached to it.
             </InfoTip>
           </span>
           <div className="checklist">
@@ -99,209 +99,132 @@ function InstallActions({
           </div>
         </div>
       )}
-      <label className="row small">
-        <input type="checkbox" checked={stepByStep} onChange={(e) => setStepByStep(e.target.checked)} />
-        Step by step (one owner transaction each, in this order)
-      </label>
-      {stepByStep ? (
-        <ol className="stack">
-          <li>
-            <ProposeButton
-              label="1 · Configure"
-              txs={toSafeTxs([configure!])}
-              preview={false}
-              title={configure!.description}
-            />
-          </li>
-          <li>
-            <ProposeButton
-              label="2 · Fallback handler"
-              txs={toSafeTxs([handler!])}
-              preview={false}
-              title={handler!.description}
-            />
-          </li>
-          {enableTxs.length > 0 && (
-            <li>
-              <ProposeButton label="3 · Enable modules" txs={enableTxs} preview={false} />
-            </li>
-          )}
-          <li>
-            <ProposeButton
-              label="Module guard"
-              txs={toSafeTxs([moduleGuard!])}
-              preview={false}
-              title={moduleGuard!.description}
-            />
-          </li>
-          <li>
-            <ProposeButton
-              label="Guard (last)"
-              txs={toSafeTxs([guard!])}
-              preview={false}
-              title={guard!.description}
-              info="Last: once the transaction guard is set, every owner transaction is checked, so the steps above would need an Allow and wait the owners' Timelock. configureImmediately only works before either guard is set."
-              onProposed={onDone}
-            />
-          </li>
-        </ol>
-      ) : (
-        <ProposeButton
-          label="Propose install batch"
-          txs={blocked ? [] : batch}
-          info="One owner transaction, batched by Safe{Wallet} through MultiSendCallOnly: configureImmediately first (refused once a guard is set), the PolicyFallbackHandler, the module guard, the guard last. No unguarded window."
-          onProposed={onDone}
-        />
-      )}
+      <ProposeButton
+        label="Propose install batch"
+        txs={blocked ? [] : batch}
+        info="One owner transaction, batched by Safe{Wallet} through MultiSendCallOnly: configure (before any guard, so nothing checks it), then setModuleGuard and setGuard. The fallback handler is left alone."
+        onProposed={onDone}
+      />
     </div>
   )
 }
 
-/** Once installed: request the draft's root, wait DELAY, then apply the same set (two owner transactions). */
+/** Once installed: `engine.configure(draft)` as one owner transaction, delayed by the owners' Timelock. */
 function ConfigureActions({
   deployment,
-  info,
-  model,
-  draft,
+  call,
+  ownersDelay,
   blocked,
   onDone,
+  onSchedule,
 }: {
   deployment: V2Deployment
-  info: EngineInfo
-  model: SafeV2Model
-  draft: ChangeSet
+  call: OwnerCall
+  ownersDelay: number
   blocked: boolean
   onDone: () => void
+  onSchedule: (call: OwnerCall) => void
 }) {
-  const { safe } = useSandbox()
-  const now = BigInt(useNow())
-  const root = changeSetRoot(draft)
-  const validFrom = useAsync(
-    () => readRootValidFrom(publicClient, deployment.engine, safe, root),
-    `${deployment.engine}:${safe}:${root}`,
-    ROOT_REFRESH_MS,
-  )
-  const status = validFrom.data === undefined ? 'none' : rootStatus(validFrom.data, info.expiry, now)
-  const remember = () =>
-    v2PendingStore.set((list) => [
-      ...list.filter((p) => p.root !== root),
-      { root, safe, engine: deployment.engine, set: draft, createdAt: Date.now() },
-    ])
-  const nonceNote =
-    'A configuration call skips every policy (no Timelock) but is still an owner transaction: it uses the next Safe nonce, so an owner schedule waiting at that nonce can never execute (Timelock queue).'
   return (
     <div className="stack">
-      {status === 'pending' && (
+      {ownersDelay > 0 ? (
         <Notice>
-          Already requested: applicable in {formatDuration(validFrom.data! - now)} (engine DELAY{' '}
-          {formatDuration(info.delay)}).
+          The owners&apos; Timelock covers engine.configure: this change must be <strong>scheduled</strong>{' '}
+          and waits {durationLabel(ownersDelay)} (frozen while a guardian freezes the owners; a configure
+          schedule is never voided by a freeze). Propose it in Safe{'{Wallet}'}, collect the signatures, then
+          schedule it in the queue below; or sign it here with local owner keys.
         </Notice>
-      )}
-      {status === 'ready' && model.freeze.phase === 'frozen' && (
-        <Notice tone="bad">
-          The Safe is frozen: applying is refused (ConfigFrozen) until the freeze ends or is lifted.
+      ) : (
+        <Notice tone="warn">
+          No owners&apos; Timelock covers engine.configure: this change applies as soon as the owners execute
+          it.
         </Notice>
       )}
       <div className="row wrap">
-        {(status === 'none' || status === 'expired') && (
-          <ProposeButton
-            label="Propose configuration request"
-            txs={blocked ? [] : toSafeTxs([engineCalls.requestConfiguration(deployment.engine, root)])}
-            info={`requestConfiguration(root): the set applies after DELAY (${formatDuration(info.delay)}), never sooner, whatever the owners' Timelock. ${nonceNote}`}
-            onProposed={() => {
-              remember()
-              onDone()
-            }}
-          />
+        <ProposeButton
+          label="Propose configure"
+          txs={blocked ? [] : toSafeTxs([call])}
+          info="engine.configure(changes): an ordinary owner transaction, alone (never inside a batch), judged by the owners' policies like any other call. It uses the next Safe nonce: an owner schedule waiting at that nonce dies."
+          onProposed={onDone}
+        />
+        {ownersDelay > 0 && (
+          <button type="button" className="btn" disabled={blocked} onClick={() => onSchedule(call)}>
+            Schedule with local owner keys…
+          </button>
         )}
-        {status === 'ready' && (
-          <ProposeButton
-            label="Propose apply"
-            txs={blocked ? [] : toSafeTxs([engineCalls.applyConfiguration(deployment.engine, draft)])}
-            info={`applyConfiguration with this exact set. ${nonceNote}`}
-            onProposed={() => {
-              v2PendingStore.set((list) => list.filter((p) => p.root !== root))
-              onDone()
-            }}
-          />
-        )}
+        <span className="small muted">
+          to {deployment.engine.slice(0, 10)}… · calldata <CopyButton value={call.data} />
+        </span>
       </div>
     </div>
   )
 }
 
 /**
- * The draft (attachment and role changes), what the engine would refuse, the lint findings over the
- * result, and the next owner transaction: install, request or apply.
+ * The draft, what the engine would refuse, the lint findings over the result, and the next owner
+ * transaction: install or configure.
  */
 export function DraftPanel({
   deployment,
-  info,
-  model,
+  current,
   draft,
   setDraft,
   findings,
   ctx,
+  onSchedule,
 }: {
   deployment: V2Deployment
-  info: EngineInfo | undefined
-  model: SafeV2Model
-  draft: ChangeSet
-  setDraft: (next: ChangeSet) => void
+  current: readonly Attachment[]
+  draft: Change[]
+  setDraft: (next: Change[]) => void
   findings: readonly LintFinding[]
   ctx: LabelContext
+  onSchedule: (call: OwnerCall) => void
 }) {
-  const { v2Installed } = useSandbox()
+  const { safe, v2Installed } = useSandbox()
   const [confirmed, setConfirmed] = useState<ReadonlySet<string>>(new Set())
-  const problems = info
-    ? validateChangeSet(model.attachments, draft, { deployment, delay: info.delay, roles: model.roles })
-    : []
+  const ordered = sortForApply(deployment, draft)
+  // Before install, leftovers the draft does not touch are detached by the install batch.
+  const touched = new Set(draft.map(changeAttachmentId))
+  const base = v2Installed ? current : current.filter((a) => touched.has(a.attachmentId))
+  const problems = validateChanges(base, ordered, { deployment, safe })
   const unconfirmed = findings.filter((f) => f.severity === 'block' && !confirmed.has(findingKey(f)))
-  const empty = draft.changes.length === 0 && draft.roles.length === 0
-  // `configureImmediately` refuses a Safe that already has attachments or roles (D-25).
-  const leftover =
-    model.attachments.length > 0 || model.roles.guardians.length > 0 || model.roles.lifters.length > 0
+  const empty = draft.length === 0
   const blocked = empty || problems.length > 0 || unconfirmed.length > 0
-  const clear = () => setDraft(emptyChangeSet())
-  const remove = (i: number) => setDraft({ ...draft, changes: draft.changes.filter((_, j) => j !== i) })
-  const removeRole = (i: number) => setDraft({ ...draft, roles: draft.roles.filter((_, j) => j !== i) })
+  const clear = () => setDraft([])
+  const covers = new Set(configureCoverIds(deployment, OWNERS))
+  const ownersDelay = Math.max(
+    0,
+    ...current
+      .filter((a) => covers.has(a.attachmentId))
+      .map((a) => (a.settings?.policy === 'timelock' ? a.settings.settings.delay : 0)),
+  )
 
   return (
     <Card
-      title={`Draft (${draft.changes.length + draft.roles.length})`}
+      title={`Draft (${draft.length})`}
       actions={!empty && <ConfirmIconButton title="Clear the draft" onConfirm={clear} />}
     >
       {empty ? (
-        <p className="muted">Add attachments from the scope builder, or × a chip to queue a detach.</p>
+        <p className="muted">Add rules from the scope builder, or × a chip to queue a detach.</p>
       ) : (
         <ol className="stack draft-list">
-          {draft.changes.map((c, i) => {
-            const own = problems.filter((p) => !p.role && p.index === i)
-            return (
-              <li key={`c${i}`} className="row wrap">
-                <span>
-                  {describeChange(
-                    c,
-                    deployment,
-                    ctx,
-                    model.attachments.some((a) => a.attachmentId === changeAttachmentId(c)),
-                  )}
-                </span>
-                <ConfirmIconButton title="Remove from the draft" onConfirm={() => remove(i)} />
-                {own.map((p) => (
-                  <span key={p.message} className="error-text">
-                    {p.message}
-                  </span>
-                ))}
-              </li>
-            )
-          })}
-          {draft.roles.map((r, i) => (
-            <li key={`r${i}`} className="row wrap">
-              <span>{describeRoleChange(r, ctx)}</span>
-              <ConfirmIconButton title="Remove from the draft" onConfirm={() => removeRole(i)} />
+          {ordered.map((c, i) => (
+            <li key={`${changeAttachmentId(c)}:${c.detach}`} className="row wrap">
+              <span>
+                {describeChange(
+                  c,
+                  deployment,
+                  ctx,
+                  current.some((a) => a.attachmentId === changeAttachmentId(c)),
+                )}
+              </span>
+              <ConfirmIconButton
+                title="Remove from the draft"
+                onConfirm={() => setDraft(draft.filter((d) => d !== c))}
+              />
               {problems
-                .filter((p) => p.role && p.index === i)
+                .filter((p) => p.index === i)
                 .map((p) => (
                   <span key={p.message} className="error-text">
                     {p.message}
@@ -311,6 +234,9 @@ export function DraftPanel({
           ))}
         </ol>
       )}
+      <p className="muted small">
+        Applied in this order: detaches first, Timelocks on any call before narrower ones.
+      </p>
 
       <LintPanel
         findings={findings}
@@ -329,28 +255,24 @@ export function DraftPanel({
         <Notice tone="bad">The engine would refuse this draft: fix the changes marked in red.</Notice>
       )}
 
-      {!v2Installed && leftover && (
-        <Notice tone="warn">
-          This Safe already has a configuration on this engine (from an earlier install, or added by a module
-          before the module guard was set). Installing configures only an empty Safe (SPEC §14 D-25), so
-          change it through the delay first: request this draft, wait the delay, apply. Then set the handler
-          and the guards.
-        </Notice>
+      {v2Installed ? (
+        <ConfigureActions
+          deployment={deployment}
+          call={configureCall(deployment.engine, ordered)}
+          ownersDelay={ownersDelay}
+          blocked={blocked}
+          onDone={clear}
+          onSchedule={onSchedule}
+        />
+      ) : (
+        <InstallActions
+          deployment={deployment}
+          draft={draft}
+          leftovers={current}
+          blocked={blocked && !(empty && problems.length === 0 && unconfirmed.length === 0)}
+          onDone={clear}
+        />
       )}
-
-      {info &&
-        (v2Installed || leftover ? (
-          <ConfigureActions
-            deployment={deployment}
-            info={info}
-            model={model}
-            draft={draft}
-            blocked={blocked}
-            onDone={clear}
-          />
-        ) : (
-          <InstallActions deployment={deployment} draft={draft} blocked={blocked && !empty} onDone={clear} />
-        ))}
     </Card>
   )
 }

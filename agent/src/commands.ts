@@ -1,8 +1,7 @@
-import { type Hex, parseAbi, parseEventLogs } from 'viem'
+import { type Abi, type Hex, parseAbi, parseEventLogs } from 'viem'
 import { publicClient } from '../../src/config/client'
 import type { ModuleTx } from '../../src/lib/moduleTx'
 import { fetchSafeState } from '../../src/lib/safe'
-import { durationLabel, timelockPolicyAbi } from '../../src/lib/v2'
 import { balances, connect, policies, simulate, status, txLink } from './chain'
 import type { Config } from './config'
 import { CliError } from './output'
@@ -18,19 +17,21 @@ import {
   savePlan,
 } from './plans'
 import { httpSigner } from './http'
-import { type SignerBackend, readAudit } from './signer'
+import { type SignerBackend, type SignerResponse, type V2Request, readAudit } from './signer'
 import { buildSwap, orderUrl, postOrder } from './swap'
+import { coSignerPolicyAbi, timelockPolicyAbi } from './v2/abi'
+import { blockTime, moduleCallHash } from './v2/client'
+import { duration, isoTime } from './v2/labels'
+import { renderQueue, renderSimulation } from './v2/render'
 import {
   type QueueEntry,
-  blockTime,
-  isoTime,
+  type V2Context,
   readQueue,
   requireV2,
   scheduleCheck,
   scheduleState,
   v2Context,
-} from './v2'
-import { renderQueue, renderSimulation } from './v2render'
+} from './v2/role'
 
 /**
  * The agent-facing commands, shared by the MCP tools (`safe_role_<command>`, served by the signer)
@@ -50,6 +51,10 @@ export const AGENT_COMMANDS = [
   'exec',
   'schedule',
   'queue',
+  'cancel',
+  'approve',
+  'freeze',
+  'lift',
 ] as const
 export type AgentCommand = (typeof AGENT_COMMANDS)[number]
 
@@ -77,14 +82,57 @@ function ensurePlan(config: Config, tx: ModuleTx): Plan {
   }
 }
 
-const QUEUE_NEXT: Record<QueueEntry['status'], (id: string, e: Pick<QueueEntry, 'countdown'>) => string> = {
-  waiting: (id, e) => `wait ${e.countdown}, then simulate ${id} and exec ${id}`,
-  ready: (id) => `ready: simulate ${id}, then exec ${id}`,
-  expired: (id) =>
-    `expired: schedule ${id} again (it replaces the expired schedule), wait, then exec in the window`,
-  cleared: (id) => `cleared by a freeze: schedule ${id} again once not frozen`,
-  untimelocked: (id) => `no Timelock applies any more: simulate ${id}, then exec`,
+const HASH = /^0x[0-9a-fA-F]{64}$/
+
+/** `90`, `30m`, `2h`, `1d` → seconds. */
+function parseDuration(text: string): bigint {
+  const m = /^(\d+)\s*(s|m|h|d)?$/.exec(text.trim())
+  if (!m) throw new CliError(`Bad duration "${text}".`, 'Use e.g. 30m, 2h or 1d.')
+  return BigInt(m[1]!) * { s: 1n, m: 60n, h: 3600n, d: 86_400n }[(m[2] ?? 's') as 's' | 'm' | 'h' | 'd']
 }
+
+/** `--valid-until` (unix seconds or an ISO date) or `--valid-for` (a duration, default 1h). */
+async function validUntilOf(args: { validUntil?: string; validFor?: string }): Promise<bigint> {
+  if (args.validUntil) {
+    const v = args.validUntil.trim()
+    const ms = Date.parse(v)
+    const seconds = /^\d+$/.test(v) ? BigInt(v) : Number.isNaN(ms) ? 0n : BigInt(Math.floor(ms / 1000))
+    if (seconds <= 0n) throw new CliError(`Bad --valid-until "${v}".`, 'Unix seconds or an ISO date.')
+    return seconds
+  }
+  return (await blockTime()) + parseDuration(args.validFor ?? '1h')
+}
+
+const attachmentIds = (text: string | undefined): Hex[] =>
+  (text ?? '')
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .map((id) => {
+      if (!HASH.test(id))
+        throw new CliError(`"${id}" is not an attachment id (32-byte hex).`, 'Run safe-role policies.')
+      return id as Hex
+    })
+
+type Sent = { txHash: Hex; ok: boolean; events: { eventName: string; args: unknown }[] }
+
+/** Sends a V2 request to the signer, then waits for the receipt and decodes the policy's events. */
+async function sendV2(signer: SignerBackend, request: V2Request, abi: Abi): Promise<Sent> {
+  const response: SignerResponse = await signer.v2(request)
+  if (!response.ok) throw new CliError(response.error, response.hint)
+  const txHash = response.txHash as Hex
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 180_000 })
+  const events = parseEventLogs({ abi, logs: receipt.logs }) as unknown as Sent['events']
+  return { txHash, ok: receipt.status === 'success', events }
+}
+
+/** A schedule's call hash, from a plan id or the hash itself. */
+function callHashOf(config: Config, idOrHash: string | undefined): Hex {
+  if (idOrHash && HASH.test(idOrHash)) return idOrHash as Hex
+  return moduleCallHash(config.safe, config.role, planTx(loadPlan(config, idOrHash)))
+}
+
+const v2Of = async (config: Config): Promise<V2Context> =>
+  requireV2(await v2Context(config, await fetchSafeState(config.safe)))
 
 let connectedTo: string | undefined
 
@@ -92,7 +140,14 @@ let connectedTo: string | undefined
 export async function runAgentCommand(
   config: Config,
   command: AgentCommand,
-  args: PlanArgs & { action?: string; id?: string; fromBlock?: string },
+  args: PlanArgs & {
+    action?: string
+    id?: string
+    ids?: string
+    fromBlock?: string
+    validFor?: string
+    validUntil?: string
+  },
   signer: SignerBackend = httpSigner,
 ): Promise<CommandResult> {
   if (command === 'book') {
@@ -164,12 +219,13 @@ export async function runAgentCommand(
           data: {
             id: plan.id,
             intent: intent.text,
-            engine: 'v2',
+            engine: 'v2 rev 3',
             allowed: result.ok,
             reason: result.reason,
             deciding: v2.deciding ?? null,
             gates: v2.gates,
             needs: v2.needs,
+            blocked: v2.blocked,
             next: v2.next,
             callHash: v2.callHash,
             execution: v2.execution,
@@ -198,51 +254,48 @@ export async function runAgentCommand(
       const plan = loadPlan(config, args.id)
       const tx = planTx(plan)
       const intent = describeTx(config, tx, plan.cow)
-      const ctx = requireV2(await v2Context(config, await fetchSafeState(config.safe)))
+      const ctx = await v2Of(config)
       // Checked here for a quick answer, and again by the signer before it signs.
       const check = await scheduleCheck(config, ctx, tx, plan.id)
       if (!check.ok) throw new CliError(check.reason, check.hint)
-      const response = await signer.schedule(plan)
-      if (!response.ok) throw new CliError(response.error, response.hint)
-      const txHash = response.txHash as Hex
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 180_000 })
-      const scheduled = parseEventLogs({
-        abi: timelockPolicyAbi,
-        logs: receipt.logs,
-        eventName: 'Scheduled',
-      })[0]
-      const readyAt = scheduled?.args.readyAt ?? check.readyAt
-      const ok = receipt.status === 'success' && !!scheduled
+      const r = await sendV2(signer, { type: 'schedule', plan }, timelockPolicyAbi)
+      const scheduled = r.events.find((e) => e.eventName === 'Scheduled')?.args as
+        { readyAt: bigint } | undefined
+      const readyAt = scheduled?.readyAt ?? check.readyAt
+      const done = r.ok && !!scheduled
       return {
-        summary: ok
-          ? `Scheduled: ${intent.text}. Executable from ${isoTime(readyAt)} (delay ${durationLabel(check.delay)}). ` +
-            `Check safe-role queue, then simulate and exec ${plan.id}. ${txLink(txHash)}`
-          : `Schedule transaction FAILED (${receipt.status}). ${txLink(txHash)}`,
+        summary: done
+          ? `Scheduled: ${intent.text}. Executable from ${isoTime(readyAt)} (delay ${duration(check.delay)}). ` +
+            `Check safe-role queue, then simulate and exec ${plan.id}. ${txLink(r.txHash)}`
+          : `Schedule transaction FAILED. ${txLink(r.txHash)}`,
         data: {
           id: plan.id,
           intent: intent.text,
-          scheduled: ok,
+          scheduled: done,
           callHash: check.callHash,
           readyAt: isoTime(readyAt),
-          delay: durationLabel(check.delay),
+          delay: duration(check.delay),
+          ...(check.window ? { window: duration(check.window) } : {}),
           cancellers: check.cancellers,
-          txHash,
-          explorer: txLink(txHash),
+          warnings: check.warnings,
+          txHash: r.txHash,
+          explorer: txLink(r.txHash),
         },
       }
     }
     case 'queue': {
-      const ctx = requireV2(await v2Context(config, await fetchSafeState(config.safe)))
-      const [{ from, to, live }, at] = await Promise.all([
+      const ctx = await v2Of(config)
+      const [{ from, to, live }, now] = await Promise.all([
         readQueue(config, ctx, args.fromBlock ? BigInt(args.fromBlock) : undefined),
         blockTime(),
       ])
       const entries = await Promise.all(
-        live.map(async ({ call, schedule }): Promise<QueueEntry> => {
-          const state = await scheduleState(config, ctx, call, schedule, at)
+        live.map(async ({ call, schedule, timelock, txHash }): Promise<QueueEntry> => {
           const plan = call.operation === 0 ? ensurePlan(config, call) : undefined
+          const state = await scheduleState(config, ctx, timelock, schedule, now, plan?.id)
           return {
-            callHash: schedule.txHash,
+            callHash: txHash,
+            timelock,
             ...(plan ? { planId: plan.id } : {}),
             intent: describeTx(config, call).text,
             to: call.to,
@@ -251,9 +304,7 @@ export async function runAgentCommand(
             operation: call.operation,
             scheduledAt: isoTime(schedule.scheduledAt),
             ...state,
-            next: plan
-              ? QUEUE_NEXT[state.status](plan.id, state)
-              : 'DELEGATECALL schedule: not executable by this CLI',
+            ...(plan ? {} : { next: 'DELEGATECALL schedule: not executable by this CLI' }),
           }
         }),
       )
@@ -265,6 +316,86 @@ export async function runAgentCommand(
           : `No pending schedules for this role (${scanned}).`,
         data: { engine: ctx.engine, scannedFrom: from, scannedTo: to, queue: entries },
         text: renderQueue(entries, scanned),
+      }
+    }
+    case 'cancel': {
+      await v2Of(config)
+      const callHash = callHashOf(config, args.id)
+      const r = await sendV2(signer, { type: 'cancel', txHash: callHash }, timelockPolicyAbi)
+      const done = r.ok && r.events.some((e) => e.eventName === 'Cancelled')
+      return {
+        summary: done
+          ? `Cancelled schedule ${callHash}. ${txLink(r.txHash)}`
+          : `Cancel FAILED. ${txLink(r.txHash)}`,
+        data: { cancelled: done, callHash, txHash: r.txHash, explorer: txLink(r.txHash) },
+      }
+    }
+    case 'approve': {
+      if (!args.id || !HASH.test(args.id))
+        throw new CliError('Usage: safe-role approve <txHash> [--valid-for 1h | --valid-until <time>]')
+      await v2Of(config)
+      const validUntil = await validUntilOf(args)
+      const r = await sendV2(
+        signer,
+        { type: 'approve', txHash: args.id as Hex, validUntil: validUntil.toString() },
+        coSignerPolicyAbi,
+      )
+      const done = r.ok && r.events.some((e) => e.eventName === 'Approved')
+      return {
+        summary: done
+          ? `Approved ${args.id} until ${isoTime(validUntil)}. ${txLink(r.txHash)}`
+          : `Approval FAILED. ${txLink(r.txHash)}`,
+        data: {
+          approved: done,
+          approvedHash: args.id,
+          validUntil: isoTime(validUntil),
+          txHash: r.txHash,
+          explorer: txLink(r.txHash),
+        },
+      }
+    }
+    case 'freeze': {
+      await v2Of(config)
+      const r = await sendV2(
+        signer,
+        { type: 'freeze', ids: attachmentIds(args.ids ?? args.id) },
+        timelockPolicyAbi,
+      )
+      const results = r.events
+        .filter((e) => e.eventName === 'Frozen' || e.eventName === 'FreezeSkipped')
+        .map((e) => {
+          const a = e.args as { attachmentId: Hex; until: bigint }
+          return {
+            attachmentId: a.attachmentId,
+            result: e.eventName === 'Frozen' ? 'frozen' : 'skipped',
+            until: isoTime(a.until),
+          }
+        })
+      return {
+        summary: r.ok
+          ? `Freeze sent: ${results.map((f) => `${f.attachmentId} ${f.result} until ${f.until}`).join(', ')}. ${txLink(r.txHash)}`
+          : `Freeze FAILED. ${txLink(r.txHash)}`,
+        data: { sent: r.ok, attachments: results, txHash: r.txHash, explorer: txLink(r.txHash) },
+      }
+    }
+    case 'lift': {
+      await v2Of(config)
+      const [id] = attachmentIds(args.id)
+      const r = await sendV2(signer, { type: 'lift', ...(id ? { id } : {}) }, timelockPolicyAbi)
+      const lifted = r.events.find((e) => e.eventName === 'Lifted')?.args as
+        { attachmentId: Hex; cooldownUntil: bigint } | undefined
+      return {
+        summary: lifted
+          ? `Lifted ${lifted.attachmentId}; cooling down until ${isoTime(lifted.cooldownUntil)}. ${txLink(r.txHash)}`
+          : `Lift FAILED. ${txLink(r.txHash)}`,
+        data: {
+          lifted: !!lifted,
+          ...(lifted
+            ? { attachmentId: lifted.attachmentId, cooldownUntil: isoTime(lifted.cooldownUntil) }
+            : {}),
+          txHash: r.txHash,
+          explorer: txLink(r.txHash),
+        },
       }
     }
     case 'exec': {

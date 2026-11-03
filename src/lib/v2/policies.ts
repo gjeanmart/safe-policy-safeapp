@@ -7,109 +7,68 @@ import {
   toFunctionSelector,
   zeroAddress,
 } from 'viem'
-import {
-  argsPolicyAbi,
-  coSignerPolicyV2Abi,
-  freezePolicyAbi,
-  limitPolicyAbi,
-  quorumPolicyV2Abi,
-  recipientsPolicyAbi,
-  safenetPolicyV2Abi,
-  timelockPolicyAbi,
-} from './abi'
-import { PolicyLevel } from './scopes'
+import { argsPolicyAbi, coSignerPolicyAbi, limitPolicyAbi, safenetPolicyAbi, timelockPolicyAbi } from './abi'
+import { Selectors } from './scopes'
 
 /**
- * The V2 policy registry: which contracts exist, their level (SPEC §8 table) and their ABI. The
- * addresses come from a {@link V2Deployment} passed in by the caller (WP7 prints it), so nothing in
- * `src/lib/v2` reads app config: the agent can reuse the lib with its own client.
+ * The rev 3 deployment and policy registry. Addresses come from a {@link V2Deployment} passed in by
+ * the caller (the deploy script prints it), so nothing in `src/lib/v2` reads app config: the agent
+ * reuses the lib with its own client.
  */
 
-export const POLICY_NAMES = [
-  'freeze',
-  'timelock',
-  'recipients',
-  'limit',
-  'args',
-  'coSigner',
-  'safenet',
-  'quorum',
-] as const
-export type PolicyName = (typeof POLICY_NAMES)[number]
-
+/** One rev 3 deployment, exactly as `contracts/scripts/deploy-v2.ts` prints it. */
 export type V2Deployment = {
-  /** `SafePolicyGuardV2`: engine and guard, one address. */
+  /** `PolicyGuard`: guard, module guard and the whole `IPolicyGuard` ABI, one address. */
   engine: Address
-  /** `PolicySignLib`, the engine's `SIGN_LIB()`. */
-  signLib: Address
-  /** `PolicyFallbackHandler` (on-chain-only ERC-1271). */
-  fallbackHandler: Address
-  /** The engine's trusted batch contracts (MultiSendCallOnly first: the app batches with it). */
-  trustedBatches: readonly Address[]
-  policies: Record<PolicyName, Address>
+  /** `PolicyGuardConfig`, reached by the guard's fallback (never called directly). */
+  engineConfig: Address
+  /** MultiSendCallOnly contracts the engine decodes (the first one is what the app batches with). */
+  trustedBatches: Address[]
+  policies: {
+    timelock: Address
+    /** `TimelockPolicyQueue`, reached by the policy's DELEGATECALL (never called directly). */
+    timelockQueue: Address
+    args: Address
+    limit: Address
+    coSigner: Address
+    /** 0x0 when the deploy had no Safenet consensus: the app then hides it. */
+    safenet: Address
+  }
+  /** First block worth scanning for events (the deployment block). */
+  fromBlock?: bigint
 }
 
+/** The policies a Safe can attach (the queue is part of the Timelock). */
+export const POLICY_NAMES = ['timelock', 'args', 'limit', 'coSigner', 'safenet'] as const
+export type PolicyName = (typeof POLICY_NAMES)[number]
+
 export const POLICY_INFO = {
-  freeze: { label: 'Freeze', contract: 'FreezePolicy', level: PolicyLevel.TRANSACTION, abi: freezePolicyAbi },
-  timelock: {
-    label: 'Timelock',
-    contract: 'TimelockPolicy',
-    level: PolicyLevel.TRANSACTION,
-    abi: timelockPolicyAbi,
-  },
-  recipients: {
-    label: 'Recipients',
-    contract: 'RecipientsPolicy',
-    level: PolicyLevel.CALL,
-    abi: recipientsPolicyAbi,
-  },
-  limit: { label: 'Transfer budget', contract: 'LimitPolicy', level: PolicyLevel.CALL, abi: limitPolicyAbi },
-  args: { label: 'Arguments', contract: 'ArgsPolicy', level: PolicyLevel.CALL, abi: argsPolicyAbi },
-  coSigner: {
-    label: 'Co-signer',
-    contract: 'CoSignerPolicyV2',
-    level: PolicyLevel.TRANSACTION,
-    abi: coSignerPolicyV2Abi,
-  },
-  safenet: {
-    label: 'Safenet',
-    contract: 'SafenetPolicyV2',
-    level: PolicyLevel.TRANSACTION,
-    abi: safenetPolicyV2Abi,
-  },
-  quorum: {
-    label: 'Quorum',
-    contract: 'QuorumPolicyV2',
-    level: PolicyLevel.TRANSACTION,
-    abi: quorumPolicyV2Abi,
-  },
-} as const satisfies Record<PolicyName, { label: string; contract: string; level: PolicyLevel; abi: unknown }>
+  timelock: { label: 'Timelock', contract: 'TimelockPolicy', abi: timelockPolicyAbi },
+  args: { label: 'Conditions', contract: 'ArgsPolicy', abi: argsPolicyAbi },
+  limit: { label: 'Budget', contract: 'LimitPolicy', abi: limitPolicyAbi },
+  coSigner: { label: 'Co-signer', contract: 'CoSignerPolicy', abi: coSignerPolicyAbi },
+  safenet: { label: 'Safenet', contract: 'SafenetPolicy', abi: safenetPolicyAbi },
+} as const satisfies Record<PolicyName, { label: string; contract: string; abi: unknown }>
 
-const isZeroAddress = (address: Address): boolean => isAddressEqual(address, zeroAddress)
+const isZero = (address: Address): boolean => isAddressEqual(address, zeroAddress)
 
-/**
- * Which known policy `address` is, if any. A policy left at `0x0` in the deployment (Safenet on
- * Sepolia without a Consensus deployment) is not deployed: the zero address never names it.
- */
+/** Which known policy `address` is. A policy left at 0x0 (Safenet without consensus) never matches. */
 export const policyNameOf = (deployment: V2Deployment, address: Address): PolicyName | undefined =>
-  isZeroAddress(address)
+  isZero(address)
     ? undefined
     : POLICY_NAMES.find((name) => isAddressEqual(deployment.policies[name], address))
 
-/** Whether the engine of this deployment exists (placeholders are all zero until WP7 deploys). */
-export const isDeployed = (deployment: V2Deployment): boolean => !isZeroAddress(deployment.engine)
+/** Whether the engine exists (the config keeps zero placeholders until the deploy). */
+export const isDeployed = (deployment: V2Deployment): boolean => !isZero(deployment.engine)
 
 /** Policies with a non-zero address, in registry order. */
 export const deployedPolicies = (deployment: V2Deployment): PolicyName[] =>
-  POLICY_NAMES.filter((name) => !isZeroAddress(deployment.policies[name]))
+  POLICY_NAMES.filter((name) => !isZero(deployment.policies[name]))
 
 /**
- * Validates the JSON block `contracts/scripts/deploy-v2.ts` prints (one per engine) and returns it
- * checksummed. Throws with the offending field on anything else, so a bad paste fails loudly.
- *
- * @example
- * parseV2Deployment({ engine: '0x…', signLib: '0x…', fallbackHandler: '0x…', trustedBatches: ['0x…'],
- *   policies: { freeze: '0x…', …, safenet: '0x0000000000000000000000000000000000000000', … } })
+ * Validates the JSON block the deploy script prints and returns it checksummed. Throws with the
+ * offending field on anything else, so a bad paste fails loudly. `fromBlock` may be a number,
+ * a decimal string or a bigint.
  */
 export function parseV2Deployment(json: unknown): V2Deployment {
   const fail = (field: string): never => {
@@ -119,36 +78,46 @@ export function parseV2Deployment(json: unknown): V2Deployment {
     typeof value === 'string' && isAddress(value, { strict: false }) ? getAddress(value) : fail(field)
   const o = (json ?? {}) as Record<string, unknown>
   const batches = Array.isArray(o.trustedBatches) ? o.trustedBatches : fail('trustedBatches')
-  const policies = (o.policies ?? {}) as Record<string, unknown>
+  const p = (o.policies ?? {}) as Record<string, unknown>
+  const from = o.fromBlock
   return {
     engine: address(o.engine, 'engine'),
-    signLib: address(o.signLib, 'signLib'),
-    fallbackHandler: address(o.fallbackHandler, 'fallbackHandler'),
+    engineConfig: address(o.engineConfig, 'engineConfig'),
     trustedBatches: batches.map((b, i) => address(b, `trustedBatches[${i}]`)),
-    policies: Object.fromEntries(
-      POLICY_NAMES.map((name) => [name, address(policies[name], `policies.${name}`)]),
-    ) as Record<PolicyName, Address>,
+    policies: {
+      timelock: address(p.timelock, 'policies.timelock'),
+      timelockQueue: address(p.timelockQueue, 'policies.timelockQueue'),
+      args: address(p.args, 'policies.args'),
+      limit: address(p.limit, 'policies.limit'),
+      coSigner: address(p.coSigner, 'policies.coSigner'),
+      safenet: address(p.safenet, 'policies.safenet'),
+    },
+    fromBlock:
+      typeof from === 'bigint' || typeof from === 'number' || typeof from === 'string'
+        ? BigInt(from)
+        : undefined,
   }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Selectors the policies and lint rules care about
+// Selectors the builder, policies and lint rules care about
 // ---------------------------------------------------------------------------------------------
 
 export const SELECTORS = {
-  transfer: toFunctionSelector('transfer(address,uint256)'),
-  transferFrom: toFunctionSelector('transferFrom(address,address,uint256)'),
-  approve: toFunctionSelector('approve(address,uint256)'),
-  increaseAllowance: toFunctionSelector('increaseAllowance(address,uint256)'),
-  decreaseAllowance: toFunctionSelector('decreaseAllowance(address,uint256)'),
-  multiSend: toFunctionSelector('multiSend(bytes)'),
-  // PolicySignLib entries, all matched as CALL (SPEC §6.3, D-22): the typed ones are priced, the raw
-  // signMessage is not.
-  signPermit: '0x51bdfa61',
-  signCowOrder: '0x3d296e04',
-  signPermit2: '0xda3c0cb0',
-  signMessage: toFunctionSelector('signMessage(bytes32)'),
-  // Safe self-calls (SPEC §6.4: module path needs an exact-scope ALLOW).
+  transfer: Selectors.erc20Transfer,
+  transferFrom: Selectors.erc20TransferFrom,
+  approve: Selectors.erc20Approve,
+  increaseAllowance: Selectors.erc20IncreaseAllowance,
+  decreaseAllowance: Selectors.erc20DecreaseAllowance,
+  multiSend: Selectors.multiSend,
+  configure: Selectors.configure,
+  // ERC-721 shapes LimitPolicy cannot tell from ERC-20 (transferFrom / approve) or does not price.
+  safeTransferFrom: toFunctionSelector('safeTransferFrom(address,address,uint256)'),
+  safeTransferFromData: toFunctionSelector('safeTransferFrom(address,address,uint256,bytes)'),
+  setApprovalForAll: toFunctionSelector('setApprovalForAll(address,bool)'),
+  // CoW
+  setPreSignature: toFunctionSelector('setPreSignature(bytes,bool)'),
+  // Safe self-calls (module path: an exact Allow, F5)
   swapOwner: toFunctionSelector('swapOwner(address,address,address)'),
   addOwnerWithThreshold: toFunctionSelector('addOwnerWithThreshold(address,uint256)'),
   removeOwner: toFunctionSelector('removeOwner(address,address,uint256)'),
@@ -158,13 +127,7 @@ export const SELECTORS = {
   setGuard: toFunctionSelector('setGuard(address)'),
   setModuleGuard: toFunctionSelector('setModuleGuard(address)'),
   setFallbackHandler: toFunctionSelector('setFallbackHandler(address)'),
-  // Engine targets reachable from a guarded Safe (SPEC §6.4).
-  freeze: '0x1d38fcda',
-  freezeActor: '0x6a6a89ef',
-  lift: '0x05dda954',
-  requestConfiguration: '0xa809eb8e',
-  invalidateRoot: '0x3eefdcce',
-  applyConfiguration: '0x1d4ed8ec',
+  execTransactionFromModule: toFunctionSelector('execTransactionFromModule(address,uint256,bytes,uint8)'),
 } as const satisfies Record<string, Hex>
 
 /** Safe owner-management selectors: what a Recovery actor is granted. */
@@ -175,54 +138,26 @@ export const OWNER_MANAGEMENT_SELECTORS: readonly Hex[] = [
   SELECTORS.changeThreshold,
 ]
 
-/** Selectors LimitPolicy prices (SPEC §8.4), besides empty calldata; sign-lib ones only on `SIGN_LIB`. */
-export const PRICED_TOKEN_SELECTORS: readonly Hex[] = [
+/** Calls LimitPolicy prices as a spend of `call.to` (SPEC.md §5.3); unlisted tokens are `Unpriced`. */
+export const SPEND_SELECTORS: readonly Hex[] = [
   SELECTORS.transfer,
   SELECTORS.transferFrom,
   SELECTORS.approve,
   SELECTORS.increaseAllowance,
-  SELECTORS.decreaseAllowance,
-]
-/**
- * Every typed sign-lib entry spends its full amount (a permit too: never `value - allowance`, and
- * PolicySignLib binds the permit domain to `token`), so an Allow on one is priceable (review L-4).
- */
-export const PRICED_SIGN_LIB_SELECTORS: readonly Hex[] = [
-  SELECTORS.signPermit,
-  SELECTORS.signPermit2,
-  SELECTORS.signCowOrder,
 ]
 
-/** The engine's configuration selectors: the configuration path (SPEC §5.1). */
-export const CONFIG_SELECTORS: readonly Hex[] = [
-  SELECTORS.requestConfiguration,
-  SELECTORS.invalidateRoot,
-  SELECTORS.applyConfiguration,
-]
-
-/**
- * Contracts that act for whoever calls them as the Safe (review L-6): the module-path rule that
- * calls to the Safe or the engine need an exact Allow (F5) does not reach them. Canonical
- * addresses, the same on every chain the app supports.
- */
-export const AUTHORITY_TARGETS: readonly { address: Address; name: string; risk: string }[] = [
-  {
-    address: '0x000000000022D473030F116dDEE9F6B43aC78BA3',
-    name: 'Permit2',
-    risk: 'moves any token the Safe approved to Permit2, unpriced (approve, transferFrom)',
-  },
-  {
-    address: '0x9008D19f58AAbD9eD0D60971565AA8510560ab41',
-    name: 'GPv2Settlement',
-    risk: 'pre-signs CoW orders (setPreSignature) that no budget or recipients list sees',
-  },
+/** ERC-721 shapes: `transferFrom` / `approve` collide with ERC-20, the others are unpriced. */
+export const NFT_SELECTORS: readonly Hex[] = [
+  SELECTORS.safeTransferFrom,
+  SELECTORS.safeTransferFromData,
+  SELECTORS.setApprovalForAll,
 ]
 
 const SELECTOR_NAMES: Record<string, string> = Object.fromEntries(
   Object.entries(SELECTORS).map(([name, selector]) => [selector.toLowerCase(), name]),
 )
 
-/** Short name of a known selector (`transfer`, `swapOwner`, `signCowOrder`, ...). */
+/** Short name of a known selector (`transfer`, `swapOwner`, `configure`, ...). */
 export const selectorName = (selector: Hex): string | undefined =>
   BigInt(selector) === 0n ? '(empty calldata)' : SELECTOR_NAMES[selector.toLowerCase()]
 
@@ -230,11 +165,11 @@ export const selectorName = (selector: Hex): string | undefined =>
 export const deploymentNames = (deployment: V2Deployment): ((address: Address) => string | undefined) => {
   const names = new Map<string, string>([
     [getAddress(deployment.engine), 'Policy engine'],
-    [getAddress(deployment.signLib), 'PolicySignLib'],
-    [getAddress(deployment.fallbackHandler), 'PolicyFallbackHandler'],
+    [getAddress(deployment.engineConfig), 'PolicyGuardConfig'],
+    [getAddress(deployment.policies.timelockQueue), 'TimelockPolicyQueue'],
     ...deployment.trustedBatches.map((batch, i): [string, string] => [
       getAddress(batch),
-      `MultiSend #${i + 1}`,
+      `MultiSendCallOnly #${i + 1}`,
     ]),
     ...deployedPolicies(deployment).map((name): [string, string] => [
       getAddress(deployment.policies[name]),

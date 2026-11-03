@@ -13,9 +13,9 @@ import { type SignMode, printSignerBanner, unlockSigner } from './signer'
 const HELP = `safe-role: act on a Safe as a policy-scoped module (role EOA).
 
 Agent commands (read, plan, simulate, execute)
-  status                          Safe, guards, role module status and gas (V2: freeze state)
-  policies [--from-block N]       active policies, decoded, and what they mean for the role
-                                  (V2: grants, protections on me / on everyone, budgets left)
+  status                          Safe, guards, role module status and gas (V2: freeze state per Timelock)
+  policies [--from-block N]       what the role may do. V2: Allows and their conditions, budgets left and
+                                  their reset, Timelock / Co-signer / Safenet / Deny, freeze state, duties
   balances                        Safe token balances and role gas
   book                            address-book names (labels for addresses)
   plan transfer --token ETH|USDC|WETH --to <name|address> --amount <decimal>
@@ -26,11 +26,18 @@ Agent commands (read, plan, simulate, execute)
   plan unwrap   --amount <WETH>   WETH -> ETH (WETH.withdraw)
   plan call     --to <address> --data <0x...> [--value <ETH>]
   simulate <plan-id>              dry-run as the role; shows the policy that decides
-                                  (V2: every gate's verdict, the deciding gate, what to do next)
+                                  (V2: every gate per call and scope, the deciding one, what to do next)
   exec <plan-id>                  asks the signer to sign and send a simulated plan
-  schedule <plan-id>              V2: schedule a timelocked plan with the Timelock (signer asks y/N)
-  queue [--from-block N]          V2: this role's schedules, countdowns, freeze-cleared ones
   history                         what the signer sent or refused
+
+Policy Engine V2 (rev 3) commands, signed by the signer (y/N in ask mode)
+  schedule <plan-id>              schedule a timelocked plan (TimelockPolicy.scheduleModuleTx)
+  queue [--from-block N]          this role's schedules: waiting, ready, expired, void
+  cancel <plan-id|callHash>       cancel a schedule this role made, or one it is a canceller of
+  approve <txHash> [--valid-for 1h | --valid-until <unix|ISO>]
+                                  as a Co-signer approver: approve a transaction hash
+  freeze [attachmentId...]        as a Timelock guardian: freeze (default: every attachment it guards)
+  lift [attachmentId]             as a guardian or lifter: end a freeze early
   guide [overview|actions|policies|errors]   how to operate the role (the guide served over MCP)
 
 User-only commands (interactive terminal)
@@ -46,9 +53,8 @@ MCP
 
 Options
   --json                          V2 simulate / policies / queue: print JSON instead of text
-  --v2-deployment <file|json>     V2 addresses when src/config/contracts.ts has none yet (the
-                                  V2Deployment JSON printed by the deploy script); same as
-                                  SAFE_ROLE_V2_DEPLOYMENT
+  --v2-deployment <file|json>     rev 3 addresses when src/config/contracts.ts has none (the deployment
+                                  JSON printed by the deploy script); same as SAFE_ROLE_V2_DEPLOYMENT
 
 Files: ${CONFIG_PATH} (config), ${KEYSTORE_PATH} (encrypted key), plans in ${PLANS_DIR}.
 Every command prints JSON with ok, summary, and a hint on errors (V2 views print text unless --json).`
@@ -103,6 +109,8 @@ async function main(): Promise<void> {
       value: { type: 'string' },
       'from-block': { type: 'string' },
       'v2-deployment': { type: 'string' },
+      'valid-for': { type: 'string' },
+      'valid-until': { type: 'string' },
       json: { type: 'boolean' },
       auto: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -139,8 +147,10 @@ async function main(): Promise<void> {
     slippage,
     data: calldata,
     value,
-    ...(command === 'plan' ? { action: rest[0] } : { id: rest[0] }),
+    ...(command === 'plan' ? { action: rest[0] } : { id: rest[0], ids: rest.join(',') }),
     fromBlock: values['from-block'],
+    validFor: values['valid-for'],
+    validUntil: values['valid-until'],
   })
   if (text && !values.json) console.log(`${text}\n\n${summary}`)
   else printResult(summary, data)

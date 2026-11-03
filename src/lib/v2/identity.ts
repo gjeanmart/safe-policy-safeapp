@@ -2,47 +2,40 @@ import {
   type Address,
   type Hex,
   type PublicClient,
-  concat,
-  encodeAbiParameters,
   encodeFunctionData,
   hashTypedData,
-  isAddressEqual,
-  numberToHex,
   parseAbi,
-  parseAbiParameters,
-  size,
   zeroAddress,
 } from 'viem'
-import { coSignerPolicyV2Abi, safenetPolicyV2Abi, timelockPolicyAbi } from './abi'
+import { coSignerPolicyAbi, safenetPolicyAbi, timelockPolicyAbi } from './abi'
 import type { OwnerCall } from './changes'
 import type { V2Deployment } from './policies'
-import { CONTEXT_TYPE_HASH, type Operation, moduleCallHash } from './scopes'
+import { type Operation, moduleCallHash } from './scopes'
 
 /**
- * Transaction identity and proofs (SPEC §7). A policy sees `ctx.txHash`:
+ * Transaction identity and proofs (SPEC.md §3.1, §5). Every proof is pushed on-chain before
+ * execution, keyed by `ctx.txHash`:
  *
- * - owner path: the Safe transaction hash with the real gas fields and the nonce the transaction
- *   consumes (the guard reads `nonce() - 1` after the Safe incremented it), i.e. the hash the owners
- *   sign. A Timelock owner schedule, a co-signature or a Safenet attestation names that hash.
- * - module path: `moduleCallHash(safe, module, to, value, data, op)` (no nonce, no chain id).
- *   Signature proofs over it use an EIP-712 `ModuleTransaction` digest under the policy's domain,
- *   with a `deadline` (Co-signer adds a per-callHash nonce), never the raw hash.
- * - preview: the owner hash at the current nonce with zero gas fields; module as above.
+ * - owner path: the Safe transaction hash at the nonce the transaction executes at, with the real
+ *   gas fields (V2 requires `safeTxGas == gasPrice == 0`): the hash the owners sign.
+ * - module path: `moduleCallHash(safe, module, to, value, data, op)` (no nonce, no chain id);
+ *   proofs are consumed on use.
+ *
+ * Digests: CoSigner `Approval(engine, safe, txHash, useCount, validUntil)` under
+ * `("CoSignerPolicy", "1")`, TimelockPolicy `Cancel(engine, safe, txHash, scheduledAt)` under
+ * `("TimelockPolicy", "1")`, Safenet `ModuleTransaction(engine, safe, callHash, deadline)` under
+ * `("SafenetPolicy", "1")`.
  *
  * @example
- * // Owner path: schedule the next transaction, then execute it after the delay.
  * const tx = safeTransaction(call, await readSafeNonce(client, safe))
- * const hash = safeTxHash(chainId, safe, tx)              // owners sign this
- * timelockCalls.scheduleOwnerTx(deployment, safe, tx, signatures)   // direct call, anyone relays
- * // Module path: the module schedules its own call; the same hash is consumed at execution.
- * const callHash = moduleCallHash(safe, agent, call.to, call.value, call.data, call.operation)
- * const nonce = await readCoSignerModuleTxNonce(client, deployment, safe, callHash)
- * coSignerModuleTxDigest(chainId, deployment.policies.coSigner, engine, safe, callHash, nonce, deadline) // co-signer signs
+ * const hash = safeTxHash(chainId, safe, tx)                         // owners sign this
+ * timelockCalls.schedule(deployment, safe, tx, signatures)          // anyone relays
+ * const digest = coSignerApprovalDigest(chainId, deployment.policies.coSigner, engine, safe, hash, useCount, until)
  */
 
 export { moduleCallHash }
 
-/** The fields `ISafe.getTransactionHash` hashes. V2 requires `gasPrice == 0` and `safeTxGas == 0`. */
+/** The fields `ISafe.getTransactionHash` hashes. */
 export type SafeTransaction = {
   to: Address
   value: bigint
@@ -88,10 +81,7 @@ const SAFE_TX_TYPES = {
   ],
 } as const
 
-/**
- * Safe (≥ 1.3) EIP-712 transaction hash: what owners sign, what `getTransactionHash` returns, and
- * the owner-path `ctx.txHash` when `tx.nonce` is the nonce the transaction executes at.
- */
+/** Safe (≥ 1.3) EIP-712 transaction hash: what owners sign and the owner-path `ctx.txHash`. */
 export const safeTxHash = (chainId: number, safe: Address, tx: SafeTransaction): Hex =>
   hashTypedData({
     domain: { chainId, verifyingContract: safe },
@@ -100,53 +90,76 @@ export const safeTxHash = (chainId: number, safe: Address, tx: SafeTransaction):
     message: tx,
   })
 
-/** The owner-path `ctx.txHash` a `preview` uses: current nonce, zero gas fields. */
-export const previewOwnerTxHash = (
+/** The `ctx.txHash` of a call: the Safe tx hash at `ownerNonce` for OWNERS, else the module call hash. */
+export const txHashOf = (
   chainId: number,
   safe: Address,
+  actor: Address,
   c: Pick<OwnerCall, 'to' | 'value' | 'data' | 'operation'>,
-  currentNonce: bigint,
-): Hex => safeTxHash(chainId, safe, safeTransaction(c, currentNonce))
-
-/** Default lifetime of a module-path proof (co-signature, attestation) the app or agent asks for. */
-export const MODULE_PROOF_LIFETIME = 3600n
+  ownerNonce: bigint,
+): Hex =>
+  BigInt(actor) === 1n
+    ? safeTxHash(chainId, safe, safeTransaction(c, ownerNonce))
+    : moduleCallHash(safe, actor, c.to, c.value, c.data, c.operation)
 
 /**
- * What a co-signer signs for a module transaction: EIP-712
- * `ModuleTransaction(engine, safe, callHash, nonce, deadline)` under
- * `("CoSignerPolicyV2", "1", chainid, policy)`, with `nonce = moduleTxNonce(engine, safe, callHash)`
- * (the same call executed twice needs a second co-signature) and `deadline` the last second the
- * co-signature may be consumed. Equals the policy's `moduleTxDigest(engine, safe, callHash, deadline)`.
+ * What a co-signer signs for {@link coSignerCalls.approveWithSig}: EIP-712
+ * `Approval(engine, safe, txHash, useCount, validUntil)` under `("CoSignerPolicy", "1", chainid,
+ * policy)`, with the current `useCount(engine, safe, txHash)`. Equals the policy's `approvalDigest`.
  */
-export const coSignerModuleTxDigest = (
+export const coSignerApprovalDigest = (
   chainId: number,
   policy: Address,
   engine: Address,
   safe: Address,
-  callHash: Hex,
-  nonce: bigint,
-  deadline: bigint,
+  txHash: Hex,
+  useCount: bigint,
+  validUntil: bigint,
 ): Hex =>
   hashTypedData({
-    domain: { name: 'CoSignerPolicyV2', version: '1', chainId, verifyingContract: policy },
+    domain: { name: 'CoSignerPolicy', version: '1', chainId, verifyingContract: policy },
     types: {
-      ModuleTransaction: [
+      Approval: [
         { name: 'engine', type: 'address' },
         { name: 'safe', type: 'address' },
-        { name: 'callHash', type: 'bytes32' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'deadline', type: 'uint256' },
+        { name: 'txHash', type: 'bytes32' },
+        { name: 'useCount', type: 'uint256' },
+        { name: 'validUntil', type: 'uint64' },
       ],
     },
-    primaryType: 'ModuleTransaction',
-    message: { engine, safe, callHash, nonce, deadline },
+    primaryType: 'Approval',
+    message: { engine, safe, txHash, useCount, validUntil },
   })
 
 /**
- * What Safenet attests for a module transaction, in place of the Safe transaction hash: EIP-712
- * `ModuleTransaction(engine, safe, callHash, deadline)` under `("SafenetPolicyV2", "1", chainid, policy)`.
+ * What the owners sign to cancel an owner-path schedule: EIP-712 `Cancel(engine, safe, txHash,
+ * scheduledAt)` under `("TimelockPolicy", "1", chainid, timelock)`. Bound to the current schedule,
+ * so a cancel signature cannot cancel a later re-schedule. Equals the policy's `cancelDigest`.
  */
-export const safenetModuleTxDigest = (
+export const timelockCancelDigest = (
+  chainId: number,
+  timelock: Address,
+  engine: Address,
+  safe: Address,
+  txHash: Hex,
+  scheduledAt: bigint,
+): Hex =>
+  hashTypedData({
+    domain: { name: 'TimelockPolicy', version: '1', chainId, verifyingContract: timelock },
+    types: {
+      Cancel: [
+        { name: 'engine', type: 'address' },
+        { name: 'safe', type: 'address' },
+        { name: 'txHash', type: 'bytes32' },
+        { name: 'scheduledAt', type: 'uint64' },
+      ],
+    },
+    primaryType: 'Cancel',
+    message: { engine, safe, txHash, scheduledAt },
+  })
+
+/** Module-path Safenet attestation digest (the Safe tx hash stands in on the owner path). */
+export const safenetAttestationDigest = (
   chainId: number,
   policy: Address,
   engine: Address,
@@ -155,7 +168,7 @@ export const safenetModuleTxDigest = (
   deadline: bigint,
 ): Hex =>
   hashTypedData({
-    domain: { name: 'SafenetPolicyV2', version: '1', chainId, verifyingContract: policy },
+    domain: { name: 'SafenetPolicy', version: '1', chainId, verifyingContract: policy },
     types: {
       ModuleTransaction: [
         { name: 'engine', type: 'address' },
@@ -168,87 +181,25 @@ export const safenetModuleTxDigest = (
     message: { engine, safe, callHash, deadline },
   })
 
-/**
- * What owners sign to cancel an owners'-queue schedule: `Cancel(engine, safe, txHash, cancelCount)`
- * under `("TimelockPolicy", "1", chainid, timelock)`. `cancelCount` is the current count (the
- * policy's `cancelCount(engine, safe)`); it needs `min(cancelCount + 1, threshold)` signatures.
- */
-export const timelockCancelDigest = (
-  chainId: number,
-  timelock: Address,
-  engine: Address,
-  safe: Address,
-  txHash: Hex,
-  cancelCount: bigint,
-): Hex =>
-  hashTypedData({
-    domain: { name: 'TimelockPolicy', version: '1', chainId, verifyingContract: timelock },
-    types: {
-      Cancel: [
-        { name: 'engine', type: 'address' },
-        { name: 'safe', type: 'address' },
-        { name: 'txHash', type: 'bytes32' },
-        { name: 'cancelCount', type: 'uint256' },
-      ],
-    },
-    primaryType: 'Cancel',
-    message: { engine, safe, txHash, cancelCount },
-  })
-
 // ---------------------------------------------------------------------------------------------
-// Owner-path policy context (SPEC §6.6)
-// ---------------------------------------------------------------------------------------------
-
-export type PolicyContextEntry = { policy: Address; data: Hex }
-
-const policyContextParams = parseAbiParameters('(address policy, bytes data)[]')
-const coSignaturesParams = parseAbiParameters('(address cosigner, bytes signature)[]')
-
-/**
- * Appends the policy context to the owners' signatures:
- * `signatures ‖ abi.encode(PolicyContext[]) ‖ uint256 length ‖ CONTEXT_TYPE_HASH`
- * (the `SignatureExtension` envelope). Each policy may appear once (`MalformedContext` otherwise).
- */
-export function withPolicyContext(signatures: Hex, entries: readonly PolicyContextEntry[]): Hex {
-  if (entries.length === 0) return signatures
-  const seen = new Set<string>()
-  for (const entry of entries) {
-    const key = entry.policy.toLowerCase()
-    if (seen.has(key)) throw new Error(`Policy ${entry.policy} listed twice in the context`)
-    seen.add(key)
-  }
-  const payload = encodeAbiParameters(policyContextParams, [entries])
-  return concat([signatures, payload, numberToHex(size(payload), { size: 32 }), CONTEXT_TYPE_HASH])
-}
-
-/** CoSignerPolicyV2 owner-path context data: `abi.encode(CoSignature[])` over the Safe tx hash. */
-export const encodeCoSignatures = (cosignatures: readonly { cosigner: Address; signature: Hex }[]): Hex =>
-  encodeAbiParameters(coSignaturesParams, [cosignatures])
-
-// ---------------------------------------------------------------------------------------------
-// Proof calldata (direct calls to the policies, not Safe transactions)
+// Direct calls to the policies (not Safe transactions)
 // ---------------------------------------------------------------------------------------------
 
 export type DirectCall = { to: Address; data: Hex; description: string }
 
 export const timelockCalls = {
-  /** Owners schedule with the same signatures they will execute with; anyone relays. */
-  scheduleOwnerTx: (
-    deployment: V2Deployment,
-    safe: Address,
-    tx: SafeTransaction,
-    signatures: Hex,
-  ): DirectCall => ({
+  /** Owners schedule with the signatures they will execute with; anyone relays. */
+  schedule: (deployment: V2Deployment, safe: Address, tx: SafeTransaction, signatures: Hex): DirectCall => ({
     to: deployment.policies.timelock,
     data: encodeFunctionData({
       abi: timelockPolicyAbi,
-      functionName: 'scheduleOwnerTx',
+      functionName: 'schedule',
       args: [deployment.engine, safe, tx, signatures],
     }),
     description: `schedule owner transaction #${tx.nonce}`,
   }),
 
-  /** Must be sent by the module itself (`msg.sender` is the actor). */
+  /** Sent by the module itself (`msg.sender` is the actor). */
   scheduleModuleTx: (
     deployment: V2Deployment,
     safe: Address,
@@ -263,17 +214,7 @@ export const timelockCalls = {
     description: 'schedule module call',
   }),
 
-  cancelAsOwners: (deployment: V2Deployment, safe: Address, txHash: Hex, signatures: Hex): DirectCall => ({
-    to: deployment.policies.timelock,
-    data: encodeFunctionData({
-      abi: timelockPolicyAbi,
-      functionName: 'cancelAsOwners',
-      args: [deployment.engine, safe, txHash, signatures],
-    }),
-    description: `cancel ${txHash} (owners)`,
-  }),
-
-  /** By a canceller listed by a matched attachment (e.g. another Safe, from its own transaction). */
+  /** By a canceller of a matched attachment, or the module that scheduled it. */
   cancel: (deployment: V2Deployment, safe: Address, txHash: Hex): DirectCall => ({
     to: deployment.policies.timelock,
     data: encodeFunctionData({
@@ -281,183 +222,195 @@ export const timelockCalls = {
       functionName: 'cancel',
       args: [deployment.engine, safe, txHash],
     }),
-    description: `cancel ${txHash}`,
+    description: `cancel ${txHash.slice(0, 10)}…`,
+  }),
+
+  /** `threshold` owner signatures over {@link timelockCancelDigest}; owner-path schedules only. */
+  cancelAsOwners: (deployment: V2Deployment, safe: Address, txHash: Hex, signatures: Hex): DirectCall => ({
+    to: deployment.policies.timelock,
+    data: encodeFunctionData({
+      abi: timelockPolicyAbi,
+      functionName: 'cancelAsOwners',
+      args: [deployment.engine, safe, txHash, signatures],
+    }),
+    description: `cancel ${txHash.slice(0, 10)}… (owners)`,
+  }),
+
+  /** A guardian of every listed attachment freezes them for MAX_FREEZE. */
+  freeze: (deployment: V2Deployment, safe: Address, ids: readonly Hex[]): DirectCall => ({
+    to: deployment.policies.timelock,
+    data: encodeFunctionData({
+      abi: timelockPolicyAbi,
+      functionName: 'freeze',
+      args: [deployment.engine, safe, ids],
+    }),
+    description: `freeze ${ids.length} attachment${ids.length === 1 ? '' : 's'}`,
+  }),
+
+  /** A guardian or lifter ends a freeze early (the cooldown starts). */
+  lift: (deployment: V2Deployment, safe: Address, id: Hex): DirectCall => ({
+    to: deployment.policies.timelock,
+    data: encodeFunctionData({
+      abi: timelockPolicyAbi,
+      functionName: 'lift',
+      args: [deployment.engine, safe, id],
+    }),
+    description: `lift ${id.slice(0, 10)}…`,
   }),
 }
 
-/** Module-path co-signature, over {@link coSignerModuleTxDigest}; anyone relays. */
-export const cosignCall = (
-  deployment: V2Deployment,
-  safe: Address,
-  callHash: Hex,
-  cosigner: Address,
-  deadline: bigint,
-  signature: Hex,
-): DirectCall => ({
-  to: deployment.policies.coSigner,
-  data: encodeFunctionData({
-    abi: coSignerPolicyV2Abi,
-    functionName: 'cosign',
-    args: [deployment.engine, safe, callHash, cosigner, deadline, signature],
+export const coSignerCalls = {
+  /** By the approver itself. */
+  approve: (deployment: V2Deployment, safe: Address, txHash: Hex, validUntil: bigint): DirectCall => ({
+    to: deployment.policies.coSigner,
+    data: encodeFunctionData({
+      abi: coSignerPolicyAbi,
+      functionName: 'approve',
+      args: [deployment.engine, safe, txHash, validUntil],
+    }),
+    description: `approve ${txHash.slice(0, 10)}…`,
   }),
-  description: `co-sign ${callHash}`,
-})
 
-/** Module-path Safenet attestation (V1's 256-byte encoding) over {@link safenetModuleTxDigest}; anyone relays. */
+  /** By anyone, with the approver's signature over {@link coSignerApprovalDigest}. */
+  approveWithSig: (
+    deployment: V2Deployment,
+    safe: Address,
+    txHash: Hex,
+    approver: Address,
+    validUntil: bigint,
+    signature: Hex,
+  ): DirectCall => ({
+    to: deployment.policies.coSigner,
+    data: encodeFunctionData({
+      abi: coSignerPolicyAbi,
+      functionName: 'approveWithSig',
+      args: [deployment.engine, safe, txHash, approver, validUntil, signature],
+    }),
+    description: `approve ${txHash.slice(0, 10)}… (signed)`,
+  }),
+
+  revoke: (deployment: V2Deployment, safe: Address, txHash: Hex): DirectCall => ({
+    to: deployment.policies.coSigner,
+    data: encodeFunctionData({
+      abi: coSignerPolicyAbi,
+      functionName: 'revoke',
+      args: [deployment.engine, safe, txHash],
+    }),
+    description: `revoke ${txHash.slice(0, 10)}…`,
+  }),
+}
+
+/** Safenet attestation (V1's 256-byte encoding); deadline 0 on the owner path. Anyone relays. */
 export const submitAttestationCall = (
   deployment: V2Deployment,
   safe: Address,
-  callHash: Hex,
+  txHash: Hex,
   deadline: bigint,
   attestation: Hex,
 ): DirectCall => ({
   to: deployment.policies.safenet,
   data: encodeFunctionData({
-    abi: safenetPolicyV2Abi,
+    abi: safenetPolicyAbi,
     functionName: 'submitAttestation',
-    args: [deployment.engine, safe, callHash, deadline, attestation],
+    args: [deployment.engine, safe, txHash, deadline, attestation],
   }),
-  description: `attest ${callHash}`,
+  description: `attest ${txHash.slice(0, 10)}…`,
 })
 
 // ---------------------------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------------------------
 
-// Not in the frozen ICoSignerPolicyV2 (added by WP5).
-const coSignerNonceAbi = parseAbi([
-  'function moduleTxNonce(address engine, address safe, bytes32 callHash) view returns (uint256)',
-])
-
-/** The nonce the next co-signature of `callHash` must carry. */
-export const readCoSignerModuleTxNonce = (
-  client: PublicClient,
-  deployment: V2Deployment,
-  safe: Address,
-  callHash: Hex,
-): Promise<bigint> =>
-  client.readContract({
-    address: deployment.policies.coSigner,
-    abi: coSignerNonceAbi,
-    functionName: 'moduleTxNonce',
-    args: [deployment.engine, safe, callHash],
-  })
-
 const safeIdentityAbi = parseAbi([
   'function nonce() view returns (uint256)',
-  'function getTransactionHash(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) view returns (bytes32)',
+  'function getThreshold() view returns (uint256)',
 ])
 
 export const readSafeNonce = (client: PublicClient, safe: Address): Promise<bigint> =>
   client.readContract({ address: safe, abi: safeIdentityAbi, functionName: 'nonce' })
 
-/** The Safe's own hash, to cross-check {@link safeTxHash}. */
-export const readSafeTxHash = (client: PublicClient, safe: Address, tx: SafeTransaction): Promise<Hex> =>
-  client.readContract({
-    address: safe,
-    abi: safeIdentityAbi,
-    functionName: 'getTransactionHash',
-    args: [
-      tx.to,
-      tx.value,
-      tx.data,
-      tx.operation,
-      tx.safeTxGas,
-      tx.baseGas,
-      tx.gasPrice,
-      tx.gasToken,
-      tx.refundReceiver,
-      tx.nonce,
-    ],
-  })
-
 export type Schedule = {
   txHash: Hex
+  /** OWNERS or the module that scheduled it. */
   actor: Address
   scheduledAt: bigint
-  /** Informational (longest delay at schedule time); the check recomputes it. */
-  readyAt: bigint
-  epoch: bigint
-  frozenAtSchedule: boolean
-  cancellers: readonly Address[]
+  isConfiguration: boolean
+  /** Timelock attachments the transaction matched at schedule time (their cancellers may cancel). */
+  attachmentIds: readonly Hex[]
 }
 
-/** TimelockPolicy `getSchedule` + `getCancellers`; undefined when nothing is scheduled. */
+/** TimelockPolicy `getSchedule`; undefined when nothing is scheduled. */
 export async function readSchedule(
   client: PublicClient,
   deployment: V2Deployment,
   safe: Address,
   txHash: Hex,
 ): Promise<Schedule | undefined> {
-  const args = [deployment.engine, safe, txHash] as const
-  const [s, cancellers] = await Promise.all([
-    client.readContract({
-      address: deployment.policies.timelock,
-      abi: timelockPolicyAbi,
-      functionName: 'getSchedule',
-      args,
-    }),
-    client.readContract({
-      address: deployment.policies.timelock,
-      abi: timelockPolicyAbi,
-      functionName: 'getCancellers',
-      args,
-    }),
-  ])
-  if (isAddressEqual(s.actor, zeroAddress)) return undefined
-  return { txHash, ...s, cancellers }
+  const s = await client.readContract({
+    address: deployment.policies.timelock,
+    abi: timelockPolicyAbi,
+    functionName: 'getSchedule',
+    args: [deployment.engine, safe, txHash],
+  })
+  if (s.scheduledAt === 0n) return undefined
+  return { txHash, ...s, scheduledAt: BigInt(s.scheduledAt) }
 }
 
-/**
- * The latest `configuredAt` of the given Timelock attachments (0 for none): a schedule is ready
- * `delay` after the later of its own time and this (SPEC §8.2, §14 D-20).
- */
-export async function readTimelockConfiguredAt(
+/** TimelockPolicy `cancelDigest` (what the owners sign to cancel), read from the policy. */
+export const readCancelDigest = (
   client: PublicClient,
   deployment: V2Deployment,
   safe: Address,
-  attachmentIds: readonly Hex[],
-): Promise<bigint> {
-  const times = await Promise.all(
-    attachmentIds.map((id) =>
+  txHash: Hex,
+): Promise<Hex> =>
+  client.readContract({
+    address: deployment.policies.timelock,
+    abi: timelockPolicyAbi,
+    functionName: 'cancelDigest',
+    args: [deployment.engine, safe, txHash],
+  })
+
+/** TimelockPolicy `configuredAt` per id: the delay runs from the latest of these and the schedule. */
+export const readConfiguredAt = (
+  client: PublicClient,
+  deployment: V2Deployment,
+  safe: Address,
+  id: Hex,
+): Promise<bigint> =>
+  client.readContract({
+    address: deployment.policies.timelock,
+    abi: timelockPolicyAbi,
+    functionName: 'configuredAt',
+    args: [deployment.engine, safe, id],
+  })
+
+/** CoSignerPolicy `useCount` and each approver's `approvedUntil` (0 = none) for one transaction. */
+export async function readApprovals(
+  client: PublicClient,
+  deployment: V2Deployment,
+  safe: Address,
+  txHash: Hex,
+  approvers: readonly Address[],
+): Promise<{ useCount: bigint; approvedUntil: Map<Address, bigint> }> {
+  const address = deployment.policies.coSigner
+  const [useCount, ...until] = await Promise.all([
+    client.readContract({
+      address,
+      abi: coSignerPolicyAbi,
+      functionName: 'useCount',
+      args: [deployment.engine, safe, txHash],
+    }),
+    ...approvers.map((a) =>
       client.readContract({
-        address: deployment.policies.timelock,
-        abi: timelockPolicyAbi,
-        functionName: 'configuredAt',
-        args: [deployment.engine, safe, id],
+        address,
+        abi: coSignerPolicyAbi,
+        functionName: 'approvedUntil',
+        args: [deployment.engine, safe, txHash, a],
       }),
     ),
-  )
-  return times.reduce((max, t) => (t > max ? t : max), 0n)
-}
-
-export type ScheduleStatus = 'waiting' | 'ready' | 'expired' | 'cleared'
-
-/**
- * Where a schedule stands for the queue view, as TimelockPolicy's check and its replacement rule
- * judge it. `delay` / `window` are the current merged settings (max delay, min non-zero window) of
- * the attachments the call matches, `configuredAt` their latest (re)configuration (the delay runs
- * from it when it is later than the schedule); `freezeEpoch` the actor's current `freezeStatus`
- * epoch when a matched attachment has `clearOnFreeze`. `expired` and `cleared` schedules are
- * replaced by a new schedule of the same call.
- */
-export function scheduleStatus(
-  s: Pick<Schedule, 'scheduledAt' | 'epoch' | 'frozenAtSchedule'>,
-  current: {
-    now: bigint
-    delay: bigint
-    window: bigint
-    clearOnFreeze: boolean
-    freezeEpoch: bigint
-    configuredAt?: bigint
-  },
-): { status: ScheduleStatus; readyAt: bigint; expiresAt?: bigint } {
-  const configuredAt = current.configuredAt ?? 0n
-  const readyAt = (s.scheduledAt > configuredAt ? s.scheduledAt : configuredAt) + current.delay
-  const expiresAt = current.window === 0n ? undefined : readyAt + current.window
-  if (current.clearOnFreeze && (s.frozenAtSchedule || s.epoch !== current.freezeEpoch))
-    return { status: 'cleared', readyAt, expiresAt }
-  if (current.now < readyAt) return { status: 'waiting', readyAt, expiresAt }
-  if (expiresAt !== undefined && current.now > expiresAt) return { status: 'expired', readyAt, expiresAt }
-  return { status: 'ready', readyAt, expiresAt }
+  ])
+  return {
+    useCount: useCount as bigint,
+    approvedUntil: new Map(approvers.map((a, i) => [a, BigInt(until[i] as bigint | number)])),
+  }
 }

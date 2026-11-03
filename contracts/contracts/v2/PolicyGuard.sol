@@ -213,27 +213,58 @@ contract PolicyGuard is EngineEvaluator {
      *      matches (already ordered by call, level, storage). A revert, or anything but one word
      *      holding `IPolicy.check.selector`, is `PolicyDenied`. Bounded: at most 8 calls x 48
      *      matches, scanned once per distinct policy, in memory.
+     *
+     *      The payload is ABI-encoded once with an empty `matches` (the last argument, so its
+     *      encoding is the payload's tail); each run only rewrites that tail in place. Encoding the
+     *      calls and allocating a new payload and match array per run made the cost grow with
+     *      runs x calls plus quadratic memory expansion: 8 distinct calls at the caps did not fit
+     *      the 2^24 transaction gas cap.
      */
     function _dispatch(Frame memory f, bytes32 txHash) private {
-        Context memory ctx = Context(f.safe, f.actor, txHash);
         uint256[] memory words = f.words;
+        bytes32[] memory ids = f.ids;
         uint256 n = f.count;
+        bytes memory payload = abi.encodeCall(
+            IPolicy.check,
+            (Context(f.safe, f.actor, txHash), f.calls, new Match[](0))
+        );
+        uint256 baseLength = payload.length;
+        uint256 tail; // memory address of the `matches` length word
+        assembly ("memory-safe") {
+            // Arguments start after the length word and the selector; `matches`' offset is the 5th
+            // head word (ctx takes 3, `calls` 1).
+            tail := add(add(payload, 0x24), mload(add(payload, 0xa4)))
+            // Room for up to n matches (3 words each) after the payload, its last allocation.
+            mstore(0x40, add(add(tail, 0x20), mul(n, 0x60)))
+        }
         for (uint256 s = 0; s < n; s++) {
             address policy = address(uint160(words[s]));
             if (policy == address(0)) continue;
-            Match[] memory found = new Match[](n - s);
             uint256 m;
-            for (uint256 j = s; j < n; j++) {
-                uint256 word = words[j];
-                if (address(uint160(word)) == policy) {
-                    found[m++] = Match(uint16(word >> 168), uint8(word >> 160), f.ids[j]);
-                    words[j] = 0;
-                }
-            }
             assembly ("memory-safe") {
-                mstore(found, m)
+                // Collect this policy's matches (s..n-1) into the payload tail, clearing them.
+                let w := add(words, 0x20)
+                let d := sub(add(ids, 0x20), w)
+                let p := add(tail, 0x20)
+                for {
+                    let at := add(w, shl(5, s))
+                    let end := add(w, shl(5, n))
+                } lt(at, end) {
+                    at := add(at, 0x20)
+                } {
+                    let word := mload(at)
+                    if eq(and(word, 0xffffffffffffffffffffffffffffffffffffffff), policy) {
+                        mstore(p, and(shr(168, word), 0xffff))
+                        mstore(add(p, 0x20), and(shr(160, word), 0xff))
+                        mstore(add(p, 0x40), mload(add(at, d)))
+                        p := add(p, 0x60)
+                        m := add(m, 1)
+                        mstore(at, 0)
+                    }
+                }
+                mstore(tail, m)
+                mstore(payload, add(baseLength, mul(m, 0x60)))
             }
-            bytes memory payload = abi.encodeCall(IPolicy.check, (ctx, f.calls, found));
             bytes4 pass = IPolicy.check.selector;
             bool ok;
             bool passed;

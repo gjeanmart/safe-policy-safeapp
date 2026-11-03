@@ -2,7 +2,7 @@ import type { Address, Hash, Hex } from 'viem'
 import { DEFAULT_GUARD } from '../config/contracts'
 import type { Configuration } from '../lib/configurations'
 import type { ConfirmedPolicy } from '../lib/policyEvents'
-import type { ChangeSet } from '../lib/v2/changes'
+import type { Change } from '../lib/v2/changes'
 import type { SafeTransaction } from '../lib/v2/identity'
 import { persisted } from './persisted'
 
@@ -47,8 +47,6 @@ export type Settings = {
   guardOwnerPath: boolean
   /** Engine to set up when no guard is installed yet (an installed guard always decides). */
   engineVersion?: 'v1' | 'v2'
-  /** V2 engine to install, by its `V2_ENGINES` label. */
-  v2Engine?: string
 }
 
 export const settingsStore = persisted<Settings>('settings', { guard: DEFAULT_GUARD, guardOwnerPath: false })
@@ -111,22 +109,11 @@ export const policyHistoryStore = persisted<Record<string, PolicyHistory>>('poli
 
 export const historyKey = (guard: Address, safe: Address) => `${guard.toLowerCase()}:${safe.toLowerCase()}`
 
-/** V2 draft: attachment and role changes being assembled in the scope builder (one per engine and Safe). */
-export const v2DraftStore = persisted<Record<string, ChangeSet>>('v2-draft', {})
-
 /**
- * A V2 configuration request made from this browser: the engine only stores the root, so the
- * change set is kept to apply it once DELAY has passed.
+ * V2 draft: the configuration changes being assembled in the scope builder, per engine and Safe
+ * (rev 3 shape; the key changed with it so rev 2 drafts are not read back).
  */
-export type V2PendingConfiguration = {
-  root: Hex
-  safe: Address
-  engine: Address
-  set: ChangeSet
-  createdAt: number
-}
-
-export const v2PendingStore = persisted<V2PendingConfiguration[]>('v2-pending', [])
+export const v2DraftStore = persisted<Record<string, Change[]>>('v2-draft-rev3', {})
 
 /**
  * Owner transactions scheduled from this browser with locally collected signatures, by Safe

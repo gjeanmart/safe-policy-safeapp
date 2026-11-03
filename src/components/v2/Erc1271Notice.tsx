@@ -1,30 +1,31 @@
-import { type Address, isAddressEqual } from 'viem'
-import { Notice } from '../ui'
+import { type Address, zeroAddress } from 'viem'
+import { AddressView, Notice } from '../ui'
 
 /**
- * Where owners sign messages or permits: under V2 the PolicyFallbackHandler rejects every off-chain
- * owner signature (any non-empty signature), so only messages the Safe approved on-chain, through a
- * checked transaction, are valid. Without it, a Permit or CoW order signed off-chain bypasses every
- * policy (the off-chain permit attack).
+ * The policies only see transactions. A fallback handler that implements ERC-1271 (Safe's
+ * CompatibilityFallbackHandler, the Safe{Wallet} default) makes the owners' off-chain signatures
+ * valid for the Safe: a Permit, Permit2 or CoW order signed in Safe{Wallet} then moves funds with no
+ * policy running (SPEC.md §6, decision 12). Install leaves the handler alone; this notice says what
+ * to do about it.
  */
-export function Erc1271Notice({ handler, policyHandler }: { handler?: Address; policyHandler: Address }) {
-  if (handler && !isAddressEqual(handler, policyHandler))
-    return (
-      <Notice tone="bad">
-        <strong>ERC-1271 bypass:</strong> this Safe&apos;s fallback handler accepts off-chain owner
-        signatures. A Permit, Permit2 or CoW order signed by the owners in Safe{'{Wallet}'} moves funds
-        without any policy running. Switch it to PolicyFallbackHandler: setFallbackHandler is an owner
-        transaction like any other (Allow + the owners' Timelock).
-      </Notice>
-    )
+export function Erc1271Notice({ handler }: { handler?: Address }) {
+  const none = handler !== undefined && handler === zeroAddress
   return (
-    <Notice tone="warn">
-      <strong>Off-chain signatures are refused.</strong> PolicyFallbackHandler rejects every off-chain owner
-      signature: signing a message, a Permit or a CoW order in Safe{'{Wallet}'} (Sign-In with Ethereum,
-      gasless approvals, off-chain orders) returns &quot;invalid&quot;. Approve them on-chain instead, as a
-      Safe transaction that the policies check (PolicySignLib signPermit / signCowOrder, priced; or a raw
-      signMessage, for another Safe this one owns or a login: the owners&apos; Allow covers it, their Timelock
-      and Co-signer apply, but no budget sees what it approves).
+    <Notice tone={none ? 'info' : 'warn'}>
+      <strong>Off-chain owner signatures bypass the policies.</strong> The engine checks transactions only. If
+      this Safe&apos;s fallback handler implements ERC-1271 (CompatibilityFallbackHandler, the default), a
+      Permit, Permit2 or CoW order the owners sign off-chain is valid for the Safe and can move its funds
+      without any policy running. Recommended: switch to Safe&apos;s <strong>TokenCallbackHandler</strong>{' '}
+      (receives ERC-721 / ERC-1155, no ERC-1271), with an owner transaction to <code>setFallbackHandler</code>{' '}
+      (it goes through the owners&apos; Allow and Timelock like any other).{' '}
+      {handler !== undefined &&
+        (none ? (
+          <>This Safe has no fallback handler: off-chain signatures are not valid for it.</>
+        ) : (
+          <>
+            Current handler: <AddressView address={handler} />.
+          </>
+        ))}
     </Notice>
   )
 }

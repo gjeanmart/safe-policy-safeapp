@@ -5,8 +5,8 @@ import { type OwnerCall, Operation } from '../../lib/v2'
 
 /**
  * Owner calls as Safe{Wallet} proposals. The Safe Apps SDK only proposes CALLs; several calls in one
- * proposal are batched by Safe{Wallet} through MultiSendCallOnly, which the V2 engine trusts. A
- * configuration call (request / apply / invalidate) must be proposed alone: inside a batch it is
+ * proposal are batched by Safe{Wallet} through MultiSendCallOnly, which the engine trusts. Once the
+ * engine guards the Safe, `engine.configure` must be proposed alone: inside a batch it is
  * `GuardTargetDenied`.
  */
 export function toSafeTxs(calls: readonly OwnerCall[]): SafeTx[] {

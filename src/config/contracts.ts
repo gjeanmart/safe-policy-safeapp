@@ -77,71 +77,33 @@ export const ADDRESS_BOOK: Record<string, string> = Object.fromEntries([
 ])
 
 /**
- * Policy Engine V2 (contracts/contracts/v2). Not deployed yet: every address is a zero placeholder
- * and the app shows "V2 not deployed on this chain" until they are filled in.
+ * Policy Engine V2, rev 3 (contracts/contracts/v2/SPEC.md). Until it is deployed every address is a
+ * zero placeholder and the app shows "V2 not deployed on this chain".
  *
- * To fill in: run `pnpm deploy:v2:sepolia` in `contracts/` and replace each entry below with the
- * printed `V2_ENGINES` line of the same engine (`5 seconds` / `24 hours`): its `fromBlock` is the
- * engine's deployment block, where the Timelock queue scan starts, and `parseV2Deployment`
- * validates and checksums every address. The engine is one address even though it is deployed as
- * a guard plus modules (contracts/contracts/v2/SPEC.md §14, D-18). Safenet stays 0x0 when the
- * deploy had no SAFENET_* variables: the app then hides it.
+ * To fill in: run `pnpm deploy:v2:sepolia` in `contracts/` and replace the entry below with the
+ * printed one (`{ label: 'rev 3', deployment: parseV2Deployment({...}) }`). `parseV2Deployment`
+ * validates and checksums every address; `fromBlock` (the deployment block, where the queue scan
+ * starts) is part of the JSON. Safenet stays 0x0 when the deploy had no Safenet consensus: the app
+ * then hides it.
  */
 const V2_ZERO = '0x0000000000000000000000000000000000000000'
 
-export type V2Engine = {
-  /** Configuration delay of this engine (DELAY), as a hint: the app reads the real value on-chain. */
-  label: string
-  /** First block worth scanning for this engine's events; undefined scans the recent past only. */
-  fromBlock?: bigint
-  deployment: V2Deployment
-}
+export type V2Engine = { label: string; deployment: V2Deployment }
 
 export const V2_ENGINES: readonly V2Engine[] = [
-  // Sepolia, deployed 2026-11-03 from scripts/deploy-v2.ts (Safenet skipped: no SAFENET_* variables).
   {
-    label: '5 seconds',
-    fromBlock: 12053985n,
+    label: 'rev 3',
     deployment: parseV2Deployment({
-      engine: '0xBe1BE24482A188DfD1d5C69BAD0D93327E403438',
-      signLib: '0x8b0aaaFF8365fdeef23FB21f1a5Bda4dFd1230fA',
-      fallbackHandler: '0xDaE012eB5d45163050815eb67553691f3209A2be',
-      trustedBatches: [
-        '0x9641d764fc13c8B624c04430C7356C1C7C8102e2',
-        '0xA83c336B20401Af773B6219BA5027174338D1836',
-      ],
+      engine: V2_ZERO,
+      engineConfig: V2_ZERO,
+      trustedBatches: [],
       policies: {
-        freeze: '0x9E608E753fE6760b372118513F94ffDad8d53941',
-        timelock: '0x7AcAbF09C1e7AA29aF1BA3C1b1Df40784aB57765',
-        recipients: '0x2779f6bF0cf916496B229a58d570328F5cc81673',
-        limit: '0x713AacA74fB6824e27D13aD2d28A0B9D238Dd5e0',
-        args: '0x89C92F2228E6853B981EFd99340E952E76879c16',
-        coSigner: '0x1b55E841BC8f15294E2F39aA607b8479CB07D973',
+        timelock: V2_ZERO,
+        timelockQueue: V2_ZERO,
+        args: V2_ZERO,
+        limit: V2_ZERO,
+        coSigner: V2_ZERO,
         safenet: V2_ZERO,
-        quorum: '0x38FE792874f8C3f7C45d158aB8E41A4c9522cF61',
-      },
-    }),
-  },
-  {
-    label: '24 hours',
-    fromBlock: 12054021n,
-    deployment: parseV2Deployment({
-      engine: '0x507CbF65845b9CA2072fB97519CE5151353cF319',
-      signLib: '0x8b0aaaFF8365fdeef23FB21f1a5Bda4dFd1230fA',
-      fallbackHandler: '0xDaE012eB5d45163050815eb67553691f3209A2be',
-      trustedBatches: [
-        '0x9641d764fc13c8B624c04430C7356C1C7C8102e2',
-        '0xA83c336B20401Af773B6219BA5027174338D1836',
-      ],
-      policies: {
-        freeze: '0x9E608E753fE6760b372118513F94ffDad8d53941',
-        timelock: '0x7AcAbF09C1e7AA29aF1BA3C1b1Df40784aB57765',
-        recipients: '0x2779f6bF0cf916496B229a58d570328F5cc81673',
-        limit: '0x713AacA74fB6824e27D13aD2d28A0B9D238Dd5e0',
-        args: '0x89C92F2228E6853B981EFd99340E952E76879c16',
-        coSigner: '0x1b55E841BC8f15294E2F39aA607b8479CB07D973',
-        safenet: V2_ZERO,
-        quorum: '0x38FE792874f8C3f7C45d158aB8E41A4c9522cF61',
       },
     }),
   },
@@ -163,12 +125,12 @@ export function v2EngineFor(engine: Address): V2Engine | undefined {
   return base && { label: 'unknown engine', deployment: { ...base.deployment, engine } }
 }
 
-for (const { label, deployment } of deployedV2Engines()) {
+for (const { deployment } of deployedV2Engines()) {
   const nameOf = deploymentNames(deployment)
-  ADDRESS_BOOK[deployment.engine.toLowerCase()] = `SafePolicyGuardV2 (${label})`
   for (const address of [
-    deployment.signLib,
-    deployment.fallbackHandler,
+    deployment.engine,
+    deployment.engineConfig,
+    ...deployment.trustedBatches,
     ...Object.values(deployment.policies),
   ]) {
     const name = nameOf(address)

@@ -1,62 +1,42 @@
 import { artifacts, ethers } from 'hardhat'
-import type { ISafePolicyGuardV2 } from '../../typechain-types'
+import type { IPolicyGuard } from '../../typechain-types'
 
 /**
- * What a Policy Engine V2 deployment is made of, and how to deploy it, shared by
+ * What a Policy Engine V2 (rev 3) deployment is made of, and how to deploy it, shared by
  * `scripts/deploy-v2.ts` and the tests (so the tests deploy exactly what the script deploys).
  *
  * Sepolia prices deployed code at ~1,542 gas per byte (plus ~210k per create) and caps a
  * transaction at 2^24 gas (EIP-7825), so no contract may exceed ~10 KB of runtime and every
- * contract is its own transaction: the engine is a guard plus five modules it DELEGATECALLs,
- * TimelockPolicy a policy plus its scheduling module (SPEC.md §14, D-14).
+ * contract is its own transaction: the engine is `PolicyGuard` plus the `PolicyGuardConfig` it
+ * DELEGATECALLs, and TimelockPolicy a policy plus its `TimelockPolicyQueue`.
  */
 
 /** Fully qualified names: some V1 vendor names (ISafe, IERC165) clash in the artifact namespace. */
 export const FQN = {
-  signLib: 'contracts/v2/erc1271/PolicySignLib.sol:PolicySignLib',
-  engineConfig: 'contracts/v2/engine/PolicyEngineV2Config.sol:PolicyEngineV2Config',
-  engineFreeze: 'contracts/v2/engine/PolicyEngineV2Freeze.sol:PolicyEngineV2Freeze',
-  enginePreview: 'contracts/v2/engine/PolicyEngineV2Preview.sol:PolicyEngineV2Preview',
-  engineViews: 'contracts/v2/engine/PolicyEngineV2Views.sol:PolicyEngineV2Views',
-  engineRunner: 'contracts/v2/engine/PolicyEngineV2Runner.sol:PolicyEngineV2Runner',
-  engine: 'contracts/v2/SafePolicyGuardV2.sol:SafePolicyGuardV2',
-  fallbackHandler: 'contracts/v2/erc1271/PolicyFallbackHandler.sol:PolicyFallbackHandler',
-  freeze: 'contracts/v2/policies/FreezePolicy.sol:FreezePolicy',
+  engineConfig: 'contracts/v2/PolicyGuardConfig.sol:PolicyGuardConfig',
+  engine: 'contracts/v2/PolicyGuard.sol:PolicyGuard',
   timelockQueue: 'contracts/v2/policies/TimelockPolicyQueue.sol:TimelockPolicyQueue',
   timelock: 'contracts/v2/policies/TimelockPolicy.sol:TimelockPolicy',
-  recipients: 'contracts/v2/policies/RecipientsPolicy.sol:RecipientsPolicy',
-  limit: 'contracts/v2/policies/LimitPolicy.sol:LimitPolicy',
   args: 'contracts/v2/policies/ArgsPolicy.sol:ArgsPolicy',
-  coSigner: 'contracts/v2/policies/CoSignerPolicyV2.sol:CoSignerPolicyV2',
-  safenet: 'contracts/v2/policies/SafenetPolicyV2.sol:SafenetPolicyV2',
-  quorum: 'contracts/v2/policies/QuorumPolicyV2.sol:QuorumPolicyV2',
+  limit: 'contracts/v2/policies/LimitPolicy.sol:LimitPolicy',
+  coSigner: 'contracts/v2/policies/CoSignerPolicy.sol:CoSignerPolicy',
+  safenet: 'contracts/v2/policies/SafenetPolicy.sol:SafenetPolicy',
 } as const
 
-/** The engine's modules, in the order of the guard's `modules` constructor argument. */
-export const ENGINE_MODULES = [
+/** Every contract `scripts/deploy-v2.ts` deploys, in deployment order (Safenet only with SAFENET_*). */
+export const DEPLOYED: readonly string[] = [
   FQN.engineConfig,
-  FQN.engineFreeze,
-  FQN.enginePreview,
-  FQN.engineViews,
-  FQN.engineRunner,
-] as const
-
-/** Every contract `scripts/deploy-v2.ts` deploys (each once per engine for the engine pieces). */
-export const DEPLOYED_V2_CONTRACTS: readonly string[] = [
-  FQN.signLib,
-  ...ENGINE_MODULES,
   FQN.engine,
-  FQN.fallbackHandler,
-  FQN.freeze,
   FQN.timelockQueue,
   FQN.timelock,
-  FQN.recipients,
-  FQN.limit,
   FQN.args,
+  FQN.limit,
   FQN.coSigner,
   FQN.safenet,
-  FQN.quorum,
 ]
+
+/** The contract name of a fully qualified name; also its label in logs and in `V2_REUSE`. */
+export const nameOf = (fqn: string): string => fqn.split(':')[1]
 
 /** Largest runtime a V2 contract may have: deployable on Sepolia with margin (see SEPOLIA). */
 export const MAX_RUNTIME_BYTES = 10_000
@@ -75,14 +55,47 @@ export async function runtimeSize(fqn: string): Promise<number> {
   return (deployedBytecode.length - 2) / 2
 }
 
-/** The engine's constructor arguments (SPEC.md §5.4), shared by the guard and its modules. */
-export type EngineArgs = {
-  delay: bigint
-  expiry: bigint
-  maxFreeze: bigint
-  freezeCooldown: bigint
+const HOUR = 3600n
+const DAY = 24n * HOUR
+
+/** TimelockPolicy's immutables (SPEC §5.1): MAX_FREEZE (F) 7 days, COOLDOWN (C) 12 hours. */
+export const TIMELOCK = { maxFreeze: 7n * DAY, cooldown: 12n * HOUR } as const
+
+/** SafenetPolicy's constructor: Consensus chain id and address, genesis epoch and FROST group key. */
+export type SafenetArgs = [bigint, string, bigint, { x: bigint; y: bigint }]
+
+/**
+ * Tests and dry runs only: a dummy Consensus and the secp256k1 generator as genesis key. No real
+ * attestation can ever satisfy a policy built from these.
+ */
+export const safenetPlaceholder = (chainId: bigint): SafenetArgs => [
+  chainId,
+  '0x000000000000000000000000000000000000dEaD',
+  0n,
+  {
+    x: 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n,
+    y: 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n,
+  },
+]
+
+/**
+ * What the deploy script prints, as `src/lib/v2/policies.ts` types it. `safenet` is the zero
+ * address when it was not deployed; `fromBlock` is the engine's deployment block (where the app
+ * starts scanning for engine and Timelock events).
+ */
+export type V2Deployment = {
+  engine: string
+  engineConfig: string
   trustedBatches: string[]
-  signLib: string
+  policies: {
+    timelock: string
+    timelockQueue: string
+    args: string
+    limit: string
+    coSigner: string
+    safenet: string
+  }
+  fromBlock: number
 }
 
 /** Deploys `fqn` with `args`, waits for it, returns its address. `label` names it in logs. */
@@ -94,35 +107,48 @@ export const deployQuietly: Deploy = async (_label, fqn, args) => {
   return contract.getAddress()
 }
 
-export type EngineDeployment = { engine: string; modules: string[] }
-
-/** The five modules, then the guard that DELEGATECALLs them (it checks they share its arguments). */
-export async function deployEngineV2(
-  args: EngineArgs,
+/** `PolicyGuardConfig`, then the `PolicyGuard` that DELEGATECALLs it (1 to 4 trusted batches). */
+export async function deployEngine(
+  trustedBatches: string[],
   deploy: Deploy = deployQuietly,
-  suffix = '',
-): Promise<EngineDeployment> {
-  const params = [
-    args.delay,
-    args.expiry,
-    args.maxFreeze,
-    args.freezeCooldown,
-    args.trustedBatches,
-    args.signLib,
-  ]
-  const modules: string[] = []
-  for (const fqn of ENGINE_MODULES) modules.push(await deploy(`${fqn.split(':')[1]}${suffix}`, fqn, params))
-  const engine = await deploy(`SafePolicyGuardV2${suffix}`, FQN.engine, [...params, modules])
-  return { engine, modules }
+): Promise<{ engine: string; engineConfig: string }> {
+  const engineConfig = await deploy(nameOf(FQN.engineConfig), FQN.engineConfig, [])
+  const engine = await deploy(nameOf(FQN.engine), FQN.engine, [trustedBatches, engineConfig])
+  return { engine, engineConfig }
 }
 
-/** The engine at `address` with its full ABI ({ISafePolicyGuardV2}). */
-export async function engineAt(address: string): Promise<ISafePolicyGuardV2> {
-  return (await ethers.getContractAt('ISafePolicyGuardV2', address)) as unknown as ISafePolicyGuardV2
+export type PolicyOptions = {
+  /** TimelockPolicy immutables; default {@link TIMELOCK}. */
+  timelock?: { maxFreeze: bigint; cooldown: bigint }
+  /** SafenetPolicy's constructor; skipped (zero address) when absent. */
+  safenet?: SafenetArgs
 }
 
-/** TimelockPolicyQueue, then the TimelockPolicy that DELEGATECALLs it. */
-export async function deployTimelockPolicy(deploy: Deploy = deployQuietly): Promise<string> {
-  const queue = await deploy('TimelockPolicyQueue', FQN.timelockQueue, [])
-  return deploy('TimelockPolicy', FQN.timelock, [queue])
+/**
+ * The policies: `TimelockPolicyQueue` then the `TimelockPolicy` that DELEGATECALLs it, `ArgsPolicy`,
+ * `LimitPolicy`, `CoSignerPolicy`, and `SafenetPolicy` when given its arguments. Policies key their
+ * state by engine (msg.sender), so they do not depend on the engine's address.
+ */
+export async function deployPolicies(
+  deploy: Deploy = deployQuietly,
+  { timelock = TIMELOCK, safenet }: PolicyOptions = {},
+): Promise<V2Deployment['policies']> {
+  const timelockQueue = await deploy(nameOf(FQN.timelockQueue), FQN.timelockQueue, [])
+  return {
+    timelock: await deploy(nameOf(FQN.timelock), FQN.timelock, [
+      timelock.maxFreeze,
+      timelock.cooldown,
+      timelockQueue,
+    ]),
+    timelockQueue,
+    args: await deploy(nameOf(FQN.args), FQN.args, []),
+    limit: await deploy(nameOf(FQN.limit), FQN.limit, []),
+    coSigner: await deploy(nameOf(FQN.coSigner), FQN.coSigner, []),
+    safenet: safenet ? await deploy(nameOf(FQN.safenet), FQN.safenet, safenet) : ethers.ZeroAddress,
+  }
+}
+
+/** The engine at `address` with its full ABI ({IPolicyGuard}: the guard's own ABI is partial). */
+export async function engineAt(address: string): Promise<IPolicyGuard> {
+  return (await ethers.getContractAt('IPolicyGuard', address)) as unknown as IPolicyGuard
 }

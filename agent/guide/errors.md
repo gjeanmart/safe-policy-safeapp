@@ -1,41 +1,43 @@
 # Errors → meaning → what to do
 
-## Policy Engine V2: why a call was denied
+## Policy Engine V2 (rev 3): why a call was denied
 
-`safe_role_simulate` lists every gate and names the `deciding` one; `next` says what to do. The
-deciding gate's reason is one of these:
+`safe_role_simulate` returns every gate per (call, scope, policy) with `allow`, `pass`, `deny`
+(and the decoded reason), the `deciding` one, `needs` (what you may satisfy), `blocked` (something
+only the owners or time can change) and `next`. Every policy either passes or reverts with one of
+these reasons:
 
-| Deciding gate → reason                                            | Meaning                                                      | Next step                                                                                               |
-| ----------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `Engine: NotGranted` → "No Allow covers …: denied by default"     | No Allow for this role on this call                          | Stop. Tell the user which Allow the owners would need (scope and function).                             |
-| `Deny`                                                            | The owners denied this explicitly                            | Stop.                                                                                                   |
-| `Timelock …` → "Needs to be scheduled first"                      | A Timelock applies and the call is not scheduled             | With the user's go-ahead: `safe_role_schedule {id}`, then wait.                                         |
-| `Timelock …` → "Scheduled, executable from …"                     | Scheduled, the delay is still running                        | Wait. `safe_role_queue` shows the countdown; then simulate and exec.                                    |
-| `Timelock …` → "The schedule was cleared by a freeze"             | A freeze voided the schedule                                 | Once not frozen (`safe_role_status`), schedule again.                                                   |
-| `Timelock …` → "The schedule expired …"                           | Ready too long ago (the Timelock has an execution window)    | It cannot be rescheduled until a canceller cancels it. Tell the user.                                   |
-| `Limit …` → "Over budget: X requested, Y left"                    | The transfer budget for this window is used up               | Stop. Say when it resets (`next`, or `safe_role_policies` → `resetsAt`). Never split the amount to fit. |
-| `Limit …` → "The budget cannot price …" / "No budget for token …" | The budget only allows calls it can price, in its tokens     | Stop. Owners decide.                                                                                    |
-| `Recipients …` → "Recipient/Spender … is not on the list"         | The counterparty is not allowed                              | Stop. Never pick another recipient on your own.                                                         |
-| `Recipients …` → "Approval … above the maximum"                   | Approval too large                                           | Stop, or ask the user for an amount within the max.                                                     |
-| `Freeze …` → "Frozen until …"                                     | The Safe or this role is frozen (kill switch)                | Stop. Nothing to retry until it ends or a guardian lifts it.                                            |
-| `Co-signer …` → "Needs a co-signature from …"                     | A co-signer must approve this exact call                     | Tell the user; `next` has the digest the co-signer signs and how it is relayed. Then simulate again.    |
-| `Safenet …` → "Needs a Safenet attestation"                       | An attestation for this call is missing                      | Tell the user; simulate again once submitted.                                                           |
-| `Quorum …` → "Quorum only applies to owner transactions"          | Quorum always denies modules                                 | Stop.                                                                                                   |
-| `Arguments …` → "argument N not allowed"                          | An argument is outside the owners' rule                      | Stop.                                                                                                   |
-| `Engine: AllowNotExact` (pass, "does not count")                  | A module calling the Safe or the engine needs an exact Allow | Stop.                                                                                                   |
-| `Engine: ModuleConfigurationDenied` / `GuardTargetDenied`         | Modules can never configure the engine                       | Configuration is for owners, in the Safe App.                                                           |
-| `ModuleExecutionFailed` / `GS013` in `execution.reason`           | Every gate passed, but the call itself reverts (balance…)    | Check `safe_role_balances`.                                                                             |
+| Gate → reason                                                 | Meaning                                          | Next step                                                                                       |
+| ------------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `Engine: NotGranted` → "no Allow for this role covers …"      | No Allow for this call                           | Stop. Tell the user which Allow the owners would add (scope and function).                      |
+| `Engine: Denied` → "a Deny matches …"                         | The owners deny it explicitly                    | Stop.                                                                                           |
+| `Engine: GuardTargetDenied`                                   | A call to the engine                             | Configuration is the owners', in the Safe App.                                                  |
+| `Allow` → `not counted`                                       | Calls to the Safe or engine need an exact Allow  | Stop.                                                                                           |
+| `Timelock` → "needs to be scheduled first"                    | Not scheduled (`needs: schedule`)                | With the user's go-ahead: `safe_role_schedule {id}`, then wait the delay.                       |
+| `Timelock` → "scheduled; executable from T"                   | The delay is running (`needs: wait`)             | Wait until T (`safe_role_queue` has the countdown), then simulate and exec.                     |
+| `Timelock` → "the schedule expired at T"                      | It was not executed within the window            | Schedule again (it replaces the expired one), wait, exec within the window.                     |
+| `Timelock` → "the schedule was voided by a freeze"            | A freeze happened after it was scheduled         | Once not frozen, schedule again (it replaces the void one).                                     |
+| `Timelock` → "frozen until T"                                 | A guardian froze this attachment                 | Stop. Nothing to retry until T, or a guardian/lifter lifts it (`next` names them).              |
+| `Transfer budget` → "over budget: X requested, Y left"        | The window's budget is used                      | Stop. Say when it resets (`next`); one-time budgets never reset. Never split the amount.        |
+| `Transfer budget` → "cannot price" / "no budget for"          | Not a known spend, or a token without a budget   | Stop. The owners decide.                                                                        |
+| `Conditions` → "breaks condition N" / "no condition covers …" | An argument, target or value is outside the rule | Stop. `next` quotes the condition. Never pick another recipient on your own.                    |
+| `Co-signer` → "needs M approval(s), has N"                    | Approvals of this call's hash are missing        | Tell the user: `next` has the hash, the approvers and the digest. Simulate again once approved. |
+| `Safenet` → "needs a Safenet attestation" / "expired"         | No (valid) attestation for this call             | Tell the user; `next` has the digest. Simulate again once submitted.                            |
+| `execution.reason` with every gate passing (`GS013` …)        | The call itself fails (balance …)                | Check `safe_role_balances`.                                                                     |
 
-Schedule errors (`safe_role_schedule`):
+Errors of the V2 actions (`schedule`, `cancel`, `approve`, `freeze`, `lift`):
 
-| Error                                                                 | Meaning                                                                        |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `No Timelock applies to this call`                                    | Nothing to schedule; simulate says what decides                                |
-| `No schedule needed: the call is allowed now`                         | Exec it instead                                                                |
-| `Scheduling would not help: …`                                        | Another gate denies (budget, recipient, freeze, no Allow): explain it and stop |
-| `Already scheduled (waiting / ready / expired)`                       | See `safe_role_queue`                                                          |
-| `Frozen: a schedule made now would be cleared`                        | Wait for the freeze to end                                                     |
-| `Policy Engine V2 is not deployed` / `no V2 addresses are configured` | The CLI lacks V2 addresses: the user sets `SAFE_ROLE_V2_DEPLOYMENT`            |
+| Error                                                     | Meaning                                                                 |
+| --------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `No Timelock applies to this call` / `No schedule needed` | Nothing to schedule; simulate says what decides, or exec it             |
+| `Already scheduled and waiting for its delay`             | See `safe_role_queue`                                                   |
+| `Frozen: a schedule made now would be void`               | Wait for the freeze to end                                              |
+| `Scheduling would not help: …`                            | Something else denies it (no Allow, conditions …): explain and stop     |
+| `This role neither made this schedule nor is a canceller` | Only the scheduling module or a listed canceller can cancel             |
+| `This role is not an approver …` / `not a guardian of …`  | This key has no such duty (`safe_role_policies` → `duties`)             |
+| `Every target is already frozen or cooling down`          | A freeze would be skipped: no extension, by design                      |
+| `Nothing frozen that this role can lift`                  | Nothing to do                                                           |
+| `Policy Engine V2 rev 3 is not deployed …`                | The CLI has no rev 3 addresses: the user sets `SAFE_ROLE_V2_DEPLOYMENT` |
 
 ## V1 SafePolicyGuard
 

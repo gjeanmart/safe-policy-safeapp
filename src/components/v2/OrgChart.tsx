@@ -1,12 +1,13 @@
-import { type Address, getAddress, isAddressEqual } from 'viem'
+import { type Address, isAddressEqual } from 'viem'
 import { publicClient } from '../../config/client'
 import { useSandbox } from '../../context'
 import { useAsync } from '../../hooks/useAsync'
 import { useNow } from '../../hooks/useNow'
+import { formatDuration } from '../../lib/format'
 import {
   type Attachment,
-  AttachmentKind,
-  type FreezeView,
+  CallMatch,
+  Kind,
   type LabelContext,
   OP_DELEGATECALL,
   OWNERS,
@@ -14,10 +15,14 @@ import {
   type V2Deployment,
   actorLabel,
   amountLabel,
+  argsLabel,
   attachmentRole,
   buildModel,
   callPhrase,
-  durationLabel,
+  freezePhase,
+  levelLabel,
+  limitResetsAt,
+  opMaskLabel,
   readLimitRemaining,
   settingsLabel,
 } from '../../lib/v2'
@@ -33,10 +38,7 @@ const settingsKey = (a: Attachment): string =>
     typeof v === 'bigint' ? v.toString() : v,
   )
 
-/**
- * Current attachments next to the draft's projection (and the builder's preview): what is live,
- * added, changed or about to be removed.
- */
+/** Current attachments next to the draft's projection and the builder's preview: live, added, changed, removed. */
 export function diffAttachments(
   current: readonly Attachment[],
   projected: readonly Attachment[],
@@ -56,28 +58,57 @@ export function diffAttachments(
   return result
 }
 
+/** An Allow and the conditions (Args) at the same scope shown as one row; other attachments alone. */
+type Row = { main: ChartAttachment; conditions?: ChartAttachment }
+
+function rowsOf(items: readonly ChartAttachment[]): Row[] {
+  const used = new Set<ChartAttachment>()
+  const rows: Row[] = []
+  for (const a of items) {
+    if (used.has(a)) continue
+    if (a.kind === Kind.ALLOW) {
+      const conditions = items.find(
+        (c) => c.policyName === 'args' && c.scopeKey === a.scopeKey && !used.has(c),
+      )
+      if (conditions) used.add(conditions)
+      rows.push({ main: a, conditions })
+    } else rows.push({ main: a })
+    used.add(a)
+  }
+  return rows
+}
+
+const roleOfRow = (r: Row) => attachmentRole(r.main)
+
 const TONES: Record<ReturnType<typeof attachmentRole>, ChipTone> = {
   canDo: 'allow',
   limitedBy: 'limit',
   protectedBy: 'protect',
-  denied: 'deny',
 }
 
-/** `USDC.transfer`, `Limit 5,000 USDC / month`, `Timelock 24h · on Safe.*`. */
-export function attachmentText(a: Attachment, ctx: LabelContext): string {
+const ops = (a: Attachment) => {
+  const defaultMask = a.kind === Kind.ALLOW ? 1 : 3
+  return a.opMask === defaultMask ? '' : ` (${opMaskLabel(a.opMask)})`
+}
+
+/** `USDC.transfer to Vendor A`, `Budget 5,000 USDC / month`, `Timelock 24h, guardians G · on Safe.*`. */
+export function attachmentText(a: Attachment, ctx: LabelContext, conditions?: Attachment): string {
   const where = callPhrase(a.scope, ctx)
-  if (a.kind === AttachmentKind.ALLOW)
-    return `${where}${a.opMask & OP_DELEGATECALL ? ' (DELEGATECALL too)' : ''}`
-  if (a.kind === AttachmentKind.DENY) return `Deny ${where}`
+  if (a.kind === Kind.ALLOW) {
+    const cond =
+      conditions?.settings?.policy === 'args' ? ` · ${argsLabel(conditions.settings.settings, ctx)}` : ''
+    return `${where}${a.opMask & OP_DELEGATECALL ? ' (DELEGATECALL too)' : ''}${cond}`
+  }
+  if (a.kind === Kind.DENY) return `Deny ${where}${ops(a)}`
   const label = a.settings
     ? settingsLabel(a.settings, ctx)
     : a.policyName
-      ? POLICY_INFO[a.policyName].label
+      ? `${POLICY_INFO[a.policyName].label} (${a.settingsError ? 'settings unreadable' : 'no settings'})`
       : `Unknown policy ${actorLabel(a.policy, ctx.nameOf)}`
-  return a.scope.callMatch === 0 ? label : `${label} · on ${where}`
+  return a.scope.callMatch === CallMatch.ANY ? `${label}${ops(a)}` : `${label} · on ${where}${ops(a)}`
 }
 
-/** "4,200 USDC left, resets in 12d" for each token of a live Limit attachment. */
+/** "4,200 USDC left, resets in 12d" for each token of a live budget. */
 function LimitRemaining({
   a,
   deployment,
@@ -100,14 +131,13 @@ function LimitRemaining({
   return (
     <span className="muted small">
       {remaining.data.map((r, i) => {
-        const end = r.period === 0n ? undefined : Number(r.windowStart + r.period)
+        const end = limitResetsAt(r)
         return (
           <span key={tokens[i]}>
             {i > 0 && ' · '}
             {amountLabel(tokens[i]!, r.available, ctx)} left
-            {end !== undefined &&
-              end > now &&
-              `, resets in ${durationLabel(Math.max(60, Math.ceil((end - now) / 60) * 60))}`}
+            {end !== undefined && Number(end) > now ? `, resets in ${formatDuration(Number(end) - now)}` : ''}
+            {end === undefined && ' (one-time)'}
           </span>
         )
       })}
@@ -115,43 +145,52 @@ function LimitRemaining({
   )
 }
 
-function FreezeBadge({ freeze, now }: { freeze?: FreezeView; now: number }) {
-  if (!freeze || freeze.phase === 'none') return null
-  const left = durationLabel(Math.max(60, Math.ceil((Number(freeze.until) - now) / 60) * 60))
-  return freeze.phase === 'frozen' ? (
-    <Badge tone="bad">frozen · {left} left</Badge>
+/** Frozen / cooling-down badge of one Timelock attachment. */
+export function FreezeBadge({ a, now }: { a: Attachment; now: number }) {
+  const phase = freezePhase(a.freeze, BigInt(now))
+  if (phase === 'active' || !a.freeze) return null
+  return phase === 'frozen' ? (
+    <Badge tone="bad">frozen · {formatDuration(Number(a.freeze.frozenUntil) - now)} left</Badge>
   ) : (
-    <Badge tone="warn">cooling down · {left}</Badge>
+    <Badge tone="warn">cooldown · {formatDuration(Number(a.freeze.cooldownUntil) - now)}</Badge>
   )
 }
 
-function ChipList({
-  items,
+function RowList({
+  rows,
   deployment,
   ctx,
   onDetach,
-  showRemaining,
 }: {
-  items: readonly ChartAttachment[]
+  rows: readonly Row[]
   deployment: V2Deployment
   ctx: LabelContext
-  onDetach?: (a: Attachment) => void
-  showRemaining?: boolean
+  onDetach?: (attachments: Attachment[]) => void
 }) {
+  const now = useNow(10_000)
   return (
     <div className="chip-list">
-      {items.map((a) => (
-        <span key={`${a.attachmentId}:${a.status}`} className="chip-row">
+      {rows.map(({ main, conditions }) => (
+        <span key={`${main.attachmentId}:${main.status}`} className="chip-row">
           <Chip
-            tone={TONES[attachmentRole(a)]}
-            status={a.status}
-            title={`Level ${a.level} · ${a.scopeKey.slice(0, 10)}…`}
-            onRemove={onDetach && a.status !== 'preview' ? () => onDetach(a) : undefined}
+            tone={TONES[attachmentRole(main)]}
+            status={
+              conditions && conditions.status !== 'live' && main.status === 'live'
+                ? conditions.status
+                : main.status
+            }
+            title={`${levelLabel(main.level)} · ${opMaskLabel(main.opMask)} · ${main.attachmentId.slice(0, 10)}…`}
+            onRemove={
+              onDetach && main.status !== 'preview'
+                ? () => onDetach(conditions ? [main, conditions] : [main])
+                : undefined
+            }
           >
-            {attachmentText(a, ctx)}
+            {attachmentText(main, ctx, conditions)}
           </Chip>
-          {showRemaining && a.policyName === 'limit' && a.status === 'live' && (
-            <LimitRemaining a={a} deployment={deployment} ctx={ctx} />
+          {main.policyName === 'timelock' && <FreezeBadge a={main} now={now} />}
+          {main.policyName === 'limit' && main.status === 'live' && (
+            <LimitRemaining a={main} deployment={deployment} ctx={ctx} />
           )}
         </span>
       ))}
@@ -160,18 +199,15 @@ function ChipList({
 }
 
 const SECTIONS = [
-  { role: 'canDo', title: 'Can do' },
+  { role: 'canDo', title: 'Can do', empty: 'Nothing: no Allow (deny by default).' },
   { role: 'limitedBy', title: 'Limited by' },
   { role: 'protectedBy', title: 'Protected by' },
-  { role: 'denied', title: 'Denied' },
 ] as const
 
 function ActorCard({
   actor,
   isModule,
   items,
-  everyoneAllows,
-  freeze,
   deployment,
   ctx,
   onDetach,
@@ -179,16 +215,12 @@ function ActorCard({
   actor: Address
   isModule: boolean
   items: ChartAttachment[]
-  everyoneAllows: boolean
-  freeze?: FreezeView
   deployment: V2Deployment
   ctx: LabelContext
-  onDetach?: (a: Attachment) => void
+  onDetach?: (attachments: Attachment[]) => void
 }) {
-  const now = useNow(10_000)
   const owners = isAddressEqual(actor, OWNERS)
-  const visible = items.filter((a) => a.status !== 'removed')
-  const canDo = visible.some((a) => a.kind === AttachmentKind.ALLOW)
+  const rows = rowsOf(items)
   return (
     <div className="actor-card">
       <header className="row wrap">
@@ -201,20 +233,21 @@ function ActorCard({
         ) : (
           <Badge tone="warn">not a module</Badge>
         )}
-        <FreezeBadge freeze={freeze} now={now} />
       </header>
-      {!canDo && (
-        <p className="muted small">
-          {everyoneAllows ? 'Can do only what Everyone may.' : 'Can do nothing: no Allow (deny by default).'}
-        </p>
-      )}
-      {SECTIONS.map(({ role, title }) => {
-        const list = items.filter((a) => attachmentRole(a) === role)
-        if (list.length === 0) return null
+      {SECTIONS.map((s) => {
+        const list = rows.filter((r) => roleOfRow(r) === s.role && r.main.status !== 'removed')
+        const removed = rows.filter((r) => roleOfRow(r) === s.role && r.main.status === 'removed')
+        if (list.length === 0 && removed.length === 0) {
+          return 'empty' in s ? (
+            <p key={s.role} className="muted small">
+              {s.title}: {s.empty}
+            </p>
+          ) : null
+        }
         return (
-          <div key={role} className="actor-section">
-            <span className="field-label">{title}</span>
-            <ChipList items={list} deployment={deployment} ctx={ctx} onDetach={onDetach} showRemaining />
+          <div key={s.role} className="actor-section">
+            <span className="field-label">{s.title}</span>
+            <RowList rows={[...list, ...removed]} deployment={deployment} ctx={ctx} onDetach={onDetach} />
           </div>
         )
       })}
@@ -223,48 +256,29 @@ function ActorCard({
 }
 
 /**
- * Who can do what and what protects them: the "Everyone" band (global and call-wide scopes, the
- * Safe-wide freeze), then one card per actor (Owners, each module, each local role). Draft
- * changes and the builder's preview show in place; × on a chip queues a detach in the draft.
+ * Who can do what and what protects them: the "Everyone" band (actor ANY), then one card per actor
+ * (Owners, each module, each local role) with Can do / Limited by / Protected by. Draft changes
+ * and the builder's preview show in place; × queues a detach in the draft.
  */
 export function OrgChart({
   deployment,
-  current,
   items,
-  freezeSafe,
-  freezes,
-  guardians,
   ctx,
   onDetach,
 }: {
   deployment: V2Deployment
-  current: readonly Attachment[]
   items: readonly ChartAttachment[]
-  freezeSafe: FreezeView
-  freezes: ReadonlyMap<string, FreezeView>
-  guardians: readonly Address[]
   ctx: LabelContext
-  onDetach?: (a: Attachment) => void
+  onDetach?: (attachments: Attachment[]) => void
 }) {
   const { safe, state } = useSandbox()
   const roles = rolesStore.use()
-  const now = useNow(10_000)
   const modules = state?.modules ?? []
-  // Group by actor with buildModel, then put the status back on each attachment.
-  const model = buildModel({
-    safe,
-    engine: deployment.engine,
-    attachments: items,
-    modules,
-    roles: { guardians: [], lifters: [] },
-    freezes: new Map(),
-    now: 0n,
-  })
+  const model = buildModel({ safe, engine: deployment.engine, attachments: items, modules, now: 0n })
   const statusOf = (a: Attachment) => (a as ChartAttachment).status
   const withStatus = (list: readonly Attachment[]) => list.map((a) => ({ ...a, status: statusOf(a) }))
   const extraRoles = roles.filter((r) => !model.actors.some((c) => isAddressEqual(c.actor, r.address)))
   const everyone = withStatus(model.everyone)
-  const everyoneAllows = everyone.some((a) => a.kind === AttachmentKind.ALLOW && a.status !== 'removed')
 
   return (
     <Card
@@ -273,8 +287,8 @@ export function OrgChart({
           Who can do what
           <InfoTip>
             Every matching scope runs: Everyone&apos;s attachments apply to every actor, owners included. Any
-            deny wins, at least one Allow is needed, protections only pass or deny. × queues a detach in the
-            draft below; dashed chips are draft changes.
+            deny wins, an Allow is needed, policies only pass or deny. × queues a detach in the draft; dashed
+            chips are draft changes.
           </InfoTip>
         </span>
       }
@@ -282,17 +296,12 @@ export function OrgChart({
       <div className="everyone-band">
         <header className="row wrap">
           <strong>Everyone</strong>
-          <span className="muted small">global and call-wide scopes, every actor</span>
-          <FreezeBadge freeze={freezeSafe} now={now} />
-          {freezeSafe.phase === 'none' && <Badge tone="ok">Safe active</Badge>}
-          <span className="muted small">
-            {guardians.length} guardian{guardians.length === 1 ? '' : 's'}
-          </span>
+          <span className="muted small">applies to every actor, owners included</span>
         </header>
         {everyone.length === 0 ? (
           <p className="muted small">Nothing attached for everyone.</p>
         ) : (
-          <ChipList items={everyone} deployment={deployment} ctx={ctx} onDetach={onDetach} />
+          <RowList rows={rowsOf(everyone)} deployment={deployment} ctx={ctx} onDetach={onDetach} />
         )}
       </div>
       <div className="actor-grid">
@@ -302,8 +311,6 @@ export function OrgChart({
             actor={card.actor}
             isModule={card.isModule}
             items={withStatus(card.attachments)}
-            everyoneAllows={everyoneAllows}
-            freeze={freezes.get(getAddress(card.actor))}
             deployment={deployment}
             ctx={ctx}
             onDetach={onDetach}
@@ -315,14 +322,13 @@ export function OrgChart({
             actor={r.address}
             isModule={modules.some((m) => isAddressEqual(m, r.address))}
             items={[]}
-            everyoneAllows={everyoneAllows}
             deployment={deployment}
             ctx={ctx}
           />
         ))}
       </div>
-      {current.length === 0 && items.length === 0 && (
-        <p className="muted small">No attachment yet: start from a template in the builder below.</p>
+      {items.length === 0 && (
+        <p className="muted small">No attachment yet: start from the Owners template in the builder below.</p>
       )}
     </Card>
   )

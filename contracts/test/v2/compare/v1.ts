@@ -12,7 +12,7 @@ import type {
   SpendingLimitPolicy,
 } from '../../../typechain-types'
 import { type SafeTx, completeTx, deploySafe, execAsOwners, safeTxHash, signSafeTx } from '../fixtures/safe'
-import { DAY, EXPIRY, call, type World } from '../e2e/world'
+import { DAY, type World, call, usdc } from '../stories/world'
 
 /**
  * V1 side of the comparison: the vendored `SafePolicyGuard` (71b9cb0) on its own Safe 1.5.0 from
@@ -21,6 +21,10 @@ import { DAY, EXPIRY, call, type World } from '../e2e/world'
  */
 
 const coder = AbiCoder.defaultAbiCoder()
+
+/** V1 configuration delay and expiry (as deployed by the V1 app). */
+export const V1_DELAY = DAY
+export const V1_EXPIRY = 9n * DAY
 
 /** V1 `Configuration`: one policy per `(target, selector, operation)`; target 0 + selector 0 = fallback. */
 export type V1Config = { target: string; selector: string; operation: number; policy: string; data: string }
@@ -31,15 +35,18 @@ export const v1Rule = (
   policy: string,
   data = '0x',
   operation = 0,
-): V1Config => ({
-  target,
-  selector,
-  operation,
-  policy,
-  data,
-})
+): V1Config => ({ target, selector, operation, policy, data })
 export const v1Fallback = (policy: string, data = '0x', operation = 0): V1Config =>
   v1Rule(ZeroAddress, '0x00000000', policy, data, operation)
+
+/** `keccak256(abi.encode(configurations))`: the V1 configuration root. */
+export const v1Root = (configs: V1Config[]) =>
+  ethers.keccak256(
+    coder.encode(
+      ['tuple(address target, bytes4 selector, uint8 operation, address policy, bytes data)[]'],
+      [configs.map((c) => [c.target, c.selector, c.operation, c.policy, c.data])],
+    ),
+  )
 
 export async function deployV1Policies() {
   const allow = (await ethers.deployContract('E2eV1AllowPolicy')) as unknown as E2eV1AllowPolicy
@@ -61,7 +68,7 @@ export const recipientList = (recipients: string[]) =>
 export type V1Safe = { safe: Safe; safeAddress: string; guard: SafePolicyGuard; guardAddress: string }
 
 /**
- * A V1-guarded Safe (owners o1..o3, threshold 2, 100,000 USDC, 10 ETH): `configureImmediately`,
+ * A V1-guarded Safe (the world's owners, threshold 2, 100,000 USDC, 10 ETH): `configureImmediately`,
  * modules enabled, then the guard as module guard and guard. `configs` may be a function of the
  * new Safe's address, for rules on calls to the Safe itself.
  */
@@ -72,15 +79,15 @@ export async function deployV1(
 ): Promise<V1Safe> {
   const safe = await deploySafe(w.owners, 2, { infra: w.infra })
   const safeAddress = await safe.getAddress()
-  await w.token.mint(safeAddress, 100_000n * 10n ** 6n)
+  await w.token.mint(safeAddress, usdc(100_000))
   await w.deployer.sendTransaction({ to: safeAddress, value: ethers.parseEther('10') })
   const guard = (await ethers.deployContract(
     'contracts/vendor/policy-engine/SafePolicyGuard.sol:SafePolicyGuard',
-    [DAY, EXPIRY],
+    [V1_DELAY, V1_EXPIRY],
   )) as unknown as SafePolicyGuard
   const guardAddress = await guard.getAddress()
   const iface = safe.interface as Interface
-  const own = (data: string, to = safeAddress) => execAsOwners(safe, call(to, data), w.quorum2)
+  const own = (data: string, to = safeAddress) => execAsOwners(safe, call(to, data), w.quorum)
   const list = typeof configs === 'function' ? configs(safeAddress) : configs
   await own(guard.interface.encodeFunctionData('configureImmediately', [list]), guardAddress)
   for (const m of modules) await own(iface.encodeFunctionData('enableModule', [m]))

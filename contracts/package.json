@@ -15,6 +15,7 @@
     "typecheck": "hardhat compile --quiet && tsc --noEmit",
     "export:v2-abi": "hardhat compile --quiet && ts-node scripts/export-v2-abi.ts",
     "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
+    "deploy:v2:dry-run": "DRY_RUN=1 hardhat run scripts/deploy-v2.ts",
     "deploy:v2:sepolia": "hardhat run scripts/deploy-v2.ts --network sepolia"
   },
   "devDependencies": {

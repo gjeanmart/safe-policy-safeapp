@@ -6,11 +6,12 @@ import { HOME, ensureHome } from './config'
 import { type JsonRpc, type RpcResponse, handleRpc } from './mcp'
 import { CliError } from './output'
 import type { Plan } from './plans'
-import type { SignerBackend, SignerResponse } from './signer'
+import type { SignerBackend, SignerResponse, V2Request } from './signer'
 
 /**
  * The signer's localhost endpoint: MCP over Streamable HTTP (plain JSON responses, no SSE), plus
- * three methods for the CLI, `signer/describe`, `signer/exec` and `signer/schedule`. It listens on 127.0.0.1 only and
+ * three methods for the CLI, `signer/describe`, `signer/exec` and `signer/v2` (schedule, cancel, approve,
+ * freeze, lift). It listens on 127.0.0.1 only and
  * every request needs the bearer token from `~/.safe-role/mcp-token`; Host and Origin are checked
  * so a web page cannot reach it through the browser (DNS rebinding, cross-origin POSTs).
  */
@@ -91,8 +92,8 @@ async function handleSignerRpc(message: JsonRpc, signer: SignerBackend): Promise
   if (message.method === 'signer/exec') {
     return { jsonrpc: '2.0', id, result: await signer.exec(message.params?.plan as Plan) }
   }
-  if (message.method === 'signer/schedule') {
-    return { jsonrpc: '2.0', id, result: await signer.schedule(message.params?.plan as Plan) }
+  if (message.method === 'signer/v2') {
+    return { jsonrpc: '2.0', id, result: await signer.v2(message.params?.request as V2Request) }
   }
   return handleRpc(message, signer)
 }
@@ -182,8 +183,8 @@ export const httpSigner: SignerBackend = {
     if (!r || !('result' in r)) throw new CliError('Unexpected answer from the signer.')
     return r.result as SignerResponse
   },
-  schedule: async (plan) => {
-    const r = await postRpc({ jsonrpc: '2.0', id: 1, method: 'signer/schedule', params: { plan } })
+  v2: async (request) => {
+    const r = await postRpc({ jsonrpc: '2.0', id: 1, method: 'signer/v2', params: { request } })
     if (!r || !('result' in r)) throw new CliError('Unexpected answer from the signer.')
     return r.result as SignerResponse
   },

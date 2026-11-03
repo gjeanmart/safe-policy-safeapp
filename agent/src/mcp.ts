@@ -39,7 +39,7 @@ const TOOLS: Tool[] = [
     name: 'safe_role_status',
     command: 'status',
     description:
-      'Safe version, owners, modules, guards (V1 SafePolicyGuard or Policy Engine V2), whether the role is an enabled policy-scoped module, its gas, whether the signer is running, and on V2 the freeze state of the Safe and of this role. Report every item in `problems`.',
+      'Safe version, owners, modules, guards (V1 SafePolicyGuard or Policy Engine V2 rev 3), whether the role is an enabled policy-scoped module, its gas, whether the signer is running, and on V2 the freeze state of every Timelock attachment (`appliesToMe`). Report every item in `problems`.',
     inputSchema: noArgs,
     annotations: { ...read, title: 'Safe status' },
   },
@@ -47,7 +47,7 @@ const TOOLS: Tool[] = [
     name: 'safe_role_policies',
     command: 'policies',
     description:
-      'What this role may do. V1: active policies, decoded, with what each means for the role. V2: grants (Allow that applies to the role), protections on the role, protections on everyone, and each transfer budget with what is left and when it resets. Anything not granted is denied.',
+      'What this role may do. V1: active policies, decoded, with what each means for the role. V2: `canDo` (its Allows and their conditions), `budgets` (left, total, reset), `protections` (Timelock delay, guardians, co-signers, Safenet, Deny), `freeze` per Timelock attachment, and `duties` (where this key is a guardian, lifter, canceller or approver). Anything not allowed is denied.',
     inputSchema: {
       type: 'object',
       properties: { fromBlock: { type: 'string', description: 'Scan from this block (default ~4 weeks)' } },
@@ -110,7 +110,7 @@ const TOOLS: Tool[] = [
     name: 'safe_role_simulate',
     command: 'simulate',
     description:
-      'Dry-runs a plan as the role against the live Safe and names the deciding policy. On V2: every gate (Allow / pass / Deny), the deciding gate, `needs` and `next` (schedule, wait, co-signature). A denial is an answer: explain it, do not work around it.',
+      'Dry-runs a plan as the role against the live Safe and names the deciding policy. On V2: every gate per (call, scope, policy) with allow / pass / deny and the decoded reason, the deciding one, `needs` (schedule, wait, approval, attestation), `blocked`, and `next`. A denial is an answer: explain it, do not work around it.',
     inputSchema: planId,
     annotations: { ...read, title: 'Simulate a plan' },
   },
@@ -132,13 +132,81 @@ const TOOLS: Tool[] = [
     name: 'safe_role_queue',
     command: 'queue',
     description:
-      "V2 only: this role's Timelock schedules: status (waiting with a countdown, ready, expired, cleared by a freeze), the plan id and the next step.",
+      "V2 only: this role's Timelock schedules: status (waiting with a countdown, ready, expired, void after a freeze), the plan id and the next step.",
     inputSchema: {
       type: 'object',
       properties: { fromBlock: { type: 'string', description: 'Scan from this block (default ~4 weeks)' } },
       additionalProperties: false,
     },
     annotations: { ...read, title: 'Timelock queue' },
+  },
+  {
+    name: 'safe_role_cancel',
+    command: 'cancel',
+    description:
+      'V2 only: cancels a Timelock schedule this role made (by plan id or callHash), or one it is a listed canceller of. Sends a transaction from the role; the signer asks y/N in ask mode. Only when the user asks.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Plan id, or the schedule callHash (0x, 32 bytes)' } },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+      title: 'Cancel a schedule',
+    },
+  },
+  {
+    name: 'safe_role_approve',
+    command: 'approve',
+    description:
+      'V2 only, for a role listed as a Co-signer approver: approves a transaction hash until validFor from now (default 1h). The hash alone does not say what it approves: only approve a hash the user gave you and reviewed. The signer shows what it can and asks y/N in ask mode.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The transaction hash to approve (0x, 32 bytes)' },
+        validFor: { type: 'string', description: 'How long the approval counts: 30m, 1h, 1d (default 1h)' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+      title: 'Approve as co-signer',
+    },
+  },
+  {
+    name: 'safe_role_freeze',
+    command: 'freeze',
+    description:
+      "V2 only, for a role listed as a Timelock guardian: freezes attachments (comma-separated ids from safe_role_policies duties; default: every attachment it guards). Every call they match is denied for the policy's max freeze. An emergency action: only on the user's explicit request.",
+    inputSchema: {
+      type: 'object',
+      properties: { ids: { type: 'string', description: 'Comma-separated attachment ids (optional)' } },
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+      title: 'Freeze (guardian)',
+    },
+  },
+  {
+    name: 'safe_role_lift',
+    command: 'lift',
+    description:
+      "V2 only, for a Timelock guardian or lifter: ends a freeze early (a cooldown follows). Pass the attachment id when several are frozen. Only on the user's explicit request.",
+    inputSchema: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'Attachment id (optional when only one is frozen)' } },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, title: 'Lift a freeze' },
   },
   {
     name: 'safe_role_exec',

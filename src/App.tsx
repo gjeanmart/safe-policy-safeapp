@@ -88,9 +88,7 @@ function Workspace({
     const installedV1 = state && activeGuard(state)
     const engineVersion = v2Guard ? 'v2' : installedV1 ? 'v1' : (settings.engineVersion ?? 'v1')
     const deployed = deployedV2Engines()
-    const v2 = v2Guard
-      ? v2EngineFor(v2Guard)
-      : (deployed.find((e) => e.label === settings.v2Engine) ?? deployed[0])
+    const v2 = v2Guard ? v2EngineFor(v2Guard) : deployed[0]
     return {
       safe,
       state,

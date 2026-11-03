@@ -7,85 +7,75 @@ import {
   encodeFunctionData,
   getAddress,
   isAddressEqual,
-  numberToHex,
   parseAbi,
   size,
 } from 'viem'
-import { policyEngineV2Abi, policyV2ErrorsAbi } from './abi'
+import { policyAbi, policyErrorsAbi, policyGuardAbi } from './abi'
 import type { OwnerCall } from './changes'
-import { type PolicyName, type V2Deployment, policyNameOf, selectorName } from './policies'
-import { GateKind, LEVEL_LABELS, NO_LEVEL, Operation, TX_INDEX, Verdict, opMaskLabel, opBit } from './scopes'
+import { readSafeNonce, txHashOf } from './identity'
+import { POLICY_INFO, type PolicyName, type V2Deployment, policyNameOf, selectorName } from './policies'
+import { Kind, OPERATION_LABELS, OWNERS, Selectors, levelLabel } from './scopes'
 import { type LabelContext, addressLabel, amountLabel } from './settings'
 
 /**
- * `preview(safe, actor, to, value, data, op)` always reverts with `Preview(GateResult[])` (SPEC
- * §6.7): every engine rule, matched attachment and policy run, without stopping at the first deny.
- * This module builds the call, decodes the revert into per-gate verdicts with readable reasons,
- * says what a denied transaction still needs (a schedule, a co-signature, ...), and picks the
- * deciding gate: the one a real execution would revert with.
+ * Off-chain preview (SPEC.md §3.5): `engine.matches(...)` returns the calls, every matched
+ * attachment and the engine error the hook would raise before any policy; then each matched
+ * policy's `check(ctx, calls, matches)` is `eth_call`ed from the engine address (same code, same
+ * state, nothing persists). The result is one gate per Allow / Deny / policy run, readable reasons,
+ * what a denied transaction still needs (a schedule, an approval, ...) and the deciding gate: the one
+ * a real execution reverts with.
  *
  * @example
- * const result = await runPreview(publicClient, deployment, safe, agent, { to: USDC, value: 0n, data, operation: 0 })
- * if (result.ok) {
- *   result.outcome.allowed                  // false
- *   result.outcome.deciding?.reasonText     // 'Needs a co-signature from 0x12…ab'
- *   result.outcome.needs                    // ['cosignature']
- * }
+ * const r = await runPreview(client, deployment, safe, agent, { to: USDC, value: 0n, data, operation: 0 }, { chainId })
+ * if (r.ok) r.outcome.deciding?.reasonText // 'Needs 1 approval of 1 (Co-signer)'
  */
 
 /** What a context-dependent deny asks for before the transaction can pass. */
-export type Need = 'schedule' | 'wait' | 'cosignature' | 'attestation' | 'signatures'
+export type Need = 'schedule' | 'wait' | 'approval' | 'attestation'
+
+export type GateKind = 'engine' | 'allow' | 'deny' | 'policy'
+export type GateVerdict = 'grant' | 'not-counted' | 'pass' | 'deny'
 
 export type Gate = {
-  callIndex: number
-  /** Transaction-level run (`callIndex == TX_INDEX`). */
-  txLevel: boolean
-  /** 0..7, or `NO_LEVEL` for engine rules. */
-  scopeLevel: number
   kind: GateKind
-  attachmentId: Hex
-  policy: Address
+  verdict: GateVerdict
+  /** Undefined for a transaction-wide engine error and for policy runs (they span calls). */
+  callIndex?: number
+  level?: number
+  attachmentId?: Hex
+  policy?: Address
   policyName?: PolicyName
-  verdict: Verdict
-  reason: Hex
-  /** Decoded reason, when it is a known error. */
+  /** Policy runs: the `(call, level, attachment)` matches it was checked with. */
+  matches?: { callIndex: number; level: number; attachmentId: Hex }[]
+  reason?: Hex
   error?: { name: string; args: readonly unknown[] }
   reasonText: string
   needs?: Need
 }
 
-export type CallGates = { callIndex: number; gates: Gate[]; allowed: boolean; granting: Gate[] }
-
 export type PreviewOutcome = {
-  /** Allowed iff no gate has verdict DENY. */
   allowed: boolean
-  /** Denied: the gate a real execution reverts with. Allowed: the first ALLOW that granted. */
+  /** Denied: the gate a real execution reverts with. Allowed: the first Allow that granted. */
   deciding?: Gate
+  gates: Gate[]
+  /** The calls the hook checks (decoded batch sub-calls, else the call itself). */
+  calls: { to: Address; value: bigint; data: Hex; operation: number }[]
   denies: Gate[]
-  /** Distinct needs of the denying gates, if every deny is one the actor can satisfy. */
+  /** Distinct needs of the denying gates. */
   needs: Need[]
-  /** True when every deny is a satisfiable need (e.g. schedule first, then execute). */
+  /** True when every deny is a satisfiable need (schedule, wait, approval, attestation). */
   onlyNeeds: boolean
-  calls: CallGates[]
-  transaction: Gate[]
+  /** The `ctx.txHash` the policies were checked with. */
+  txHash: Hex
 }
-
-// ---------------------------------------------------------------------------------------------
-// Calling preview
-// ---------------------------------------------------------------------------------------------
 
 export type PreviewCall = Pick<OwnerCall, 'to' | 'value' | 'data' | 'operation'>
 
-/** `SafeStorage.nonce` (slot 5 in Safe 1.3.0 – 1.5.0), overridden to preview at another nonce. */
-const SAFE_NONCE_SLOT = numberToHex(5, { size: 32 })
+export type PreviewResult = { ok: true; outcome: PreviewOutcome } | { ok: false; reason: string }
 
-/** Calldata of `engine.preview(...)`; send it with `eth_call` (it always reverts). */
-export const encodePreview = (safe: Address, actor: Address, c: PreviewCall): Hex =>
-  encodeFunctionData({
-    abi: policyEngineV2Abi,
-    functionName: 'preview',
-    args: [safe, actor, c.to, c.value, c.data, c.operation],
-  })
+// ---------------------------------------------------------------------------------------------
+// Reasons
+// ---------------------------------------------------------------------------------------------
 
 /** Raw revert data of a viem error, wherever the RPC put it. */
 export function revertDataOf(error: unknown): Hex | undefined {
@@ -101,132 +91,19 @@ export function revertDataOf(error: unknown): Hex | undefined {
   return typeof data === 'string' ? data : data?.data
 }
 
-export type PreviewResult =
-  | { ok: true; gates: Gate[]; outcome: PreviewOutcome }
-  /** The preview reverted with something else (e.g. `InvalidActor`, `Reentrancy`) or the RPC failed. */
-  | { ok: false; reason: string }
-
-/** Runs the preview with `eth_call` and decodes it. `actor` is `OWNERS` or a module. */
-export async function runPreview(
-  client: PublicClient,
-  deployment: V2Deployment,
-  safe: Address,
-  actor: Address,
-  c: PreviewCall,
-  ctx: LabelContext = {},
-  /**
-   * Owner path: preview the transaction at this Safe nonce instead of the current one (the engine
-   * hashes the owner transaction at `safe.nonce()`). Use the nonce it is scheduled or will execute
-   * at, e.g. current + 1 from the Timelock queue, so the Timelock gate finds that schedule.
-   */
-  ownerNonce?: bigint,
-): Promise<PreviewResult> {
-  try {
-    await client.call({
-      to: deployment.engine,
-      data: encodePreview(safe, actor, c),
-      stateOverride:
-        ownerNonce === undefined
-          ? undefined
-          : [
-              {
-                address: safe,
-                stateDiff: [{ slot: SAFE_NONCE_SLOT, value: numberToHex(ownerNonce, { size: 32 }) }],
-              },
-            ],
-    })
-    return { ok: false, reason: 'preview returned without reverting (not a V2 engine?)' }
-  } catch (error) {
-    const data = revertDataOf(error)
-    if (!data) return { ok: false, reason: error instanceof Error ? error.message : String(error) }
-    const decoded = decodePreviewRevert(data, deployment, ctx)
-    if (!decoded) return { ok: false, reason: describeReason(data, ctx).text }
-    return { ok: true, gates: decoded, outcome: previewOutcome(decoded) }
-  }
-}
-
-/** Decodes `Preview(gates)` revert data; undefined if the data is another error. */
-export function decodePreviewRevert(
-  data: Hex,
-  deployment?: V2Deployment,
-  ctx: LabelContext = {},
-): Gate[] | undefined {
-  let decoded
-  try {
-    decoded = decodeErrorResult({ abi: policyEngineV2Abi, data })
-  } catch {
-    return undefined
-  }
-  if (decoded.errorName !== 'Preview') return undefined
-  const [results] = decoded.args
-  return results.map((r): Gate => {
-    const kind = r.kind as GateKind
-    const verdict = r.verdict as Verdict
-    const { text, error, needs } =
-      size(r.reason) === 0
-        ? {
-            text:
-              verdict === Verdict.DENY
-                ? 'Denied: the policy reverted without a reason (out of gas, no code, a bare revert or a wrong return value)'
-                : '',
-            error: undefined,
-            needs: undefined,
-          }
-        : describeReason(r.reason, ctx)
-    return {
-      callIndex: r.callIndex,
-      txLevel: r.callIndex === TX_INDEX,
-      scopeLevel: r.scopeLevel,
-      kind,
-      attachmentId: r.attachmentId,
-      policy: r.policy,
-      policyName: deployment && kind === GateKind.POLICY ? policyNameOf(deployment, r.policy) : undefined,
-      verdict,
-      reason: r.reason,
-      error,
-      reasonText: verdict === Verdict.DENY ? text : text && `Does not count: ${text}`,
-      needs: verdict === Verdict.DENY ? needs : undefined,
-    }
-  })
-}
-
-// ---------------------------------------------------------------------------------------------
-// Reasons
-// ---------------------------------------------------------------------------------------------
-
-/**
- * Errors the policy contracts declare beyond their frozen interfaces (so not in `policyV2ErrorsAbi`):
- * Recipients / Limit `MalformedCall`, PolicySignLib's, and the FROST verifier's (Safenet).
- */
-export const extraPolicyErrorsAbi = parseAbi([
-  'error MalformedCall(bytes4 selector)',
-  'error ZeroAddress()',
-  'error OnlyDelegateCall()',
-  'error DomainSeparatorUnavailable(address token)',
-  'error SignatureExpired(uint256 deadline)',
-  'error DomainMismatch(address token)',
-  'error InvalidMulMulAddWitness()',
-  'error UnsupportedMulMulAddInput()',
-  'error InvalidScalar()',
-  'error NotOnCurve()',
-  'error InvalidAddress()',
-])
-
-const reasonErrorsAbi = [...policyV2ErrorsAbi, ...extraPolicyErrorsAbi]
+const reasonErrorsAbi = [...policyErrorsAbi, ...parseAbi(['error Error(string)'])]
 
 const time = (seconds: unknown): string =>
   new Date(Number(seconds) * 1000).toISOString().replace('.000Z', 'Z')
 
-const OPERATIONS = ['CALL', 'DELEGATECALL'] as const
+const shortHash = (hash: unknown) => `${String(hash).slice(0, 10)}…`
 
-/**
- * Human text for a revert reason (an engine rule or a policy error), with the need it expresses.
- * Unknown data is shown truncated.
- */
+/** Human text for a revert reason (an engine rule or a policy error), with the need it expresses. */
 export function describeReason(
   data: Hex,
   ctx: LabelContext = {},
 ): { text: string; error?: { name: string; args: readonly unknown[] }; needs?: Need } {
+  if (size(data) === 0) return { text: 'reverted without a reason (out of gas, no code, a bare revert)' }
   let name: string
   let args: readonly unknown[]
   try {
@@ -244,17 +121,19 @@ export function describeReason(
   switch (name) {
     case 'Error':
       return text(String(a(0)))
-    // Engine rules
+    // Engine verdicts and shape
     case 'NotGranted':
       return text(
-        `No Allow covers ${who(1)}.${fn(2)} (${OPERATIONS[Number(a(3))] ?? a(3)}): denied by default`,
+        `No Allow covers ${who(1)}.${fn(2)} (${OPERATION_LABELS[Number(a(3))] ?? a(3)}): denied by default`,
       )
     case 'Denied':
-      return text('Denied by a Deny rule')
-    case 'AllowNotExact':
-      return text('a module needs an Allow on exactly this function to call the Safe or the engine')
-    case 'PolicyDenied':
-      return describeReason(a(2) as Hex, ctx)
+      return text(`Denied by a Deny rule (call ${a(0)})`)
+    case 'PolicyDenied': {
+      const inner = describeReason(a(1) as Hex, ctx)
+      return size(a(1) as Hex) === 0
+        ? text(`${who(0)} did not return the pass value`)
+        : { ...inner, text: inner.text }
+    }
     case 'InvalidSelector':
       return text('Calldata of 1 to 3 bytes')
     case 'MalformedBatch':
@@ -264,36 +143,101 @@ export function describeReason(
     case 'NestedBatch':
       return text('A batch inside a batch')
     case 'GuardTargetDenied':
-      return text('This call to the policy engine is not allowed')
-    case 'ModuleConfigurationDenied':
-      return text('Modules can never change the configuration')
-    case 'ConfigFrozen':
-      return text(`Configuration is frozen until ${time(a(0))}`)
-    case 'ConfigurationNotEmpty':
-      return text('This Safe already has a configuration: change it through the delay (request, apply)')
-    case 'MalformedContext':
-      return text('The policy context after the signatures is malformed')
-    // Freeze
-    case 'Frozen':
-      return text(`Frozen until ${time(a(2))}`)
+      return text('Only a top-level configure call (no value, not in a batch) may target the engine')
+    case 'Reentrancy':
+      return text('Re-entered the engine during a check')
+    case 'NonZeroGasPrice':
+      return text('gasPrice must be 0 under V2')
+    case 'NonZeroSafeTxGas':
+      return text('safeTxGas must be 0 under V2')
+    case 'ExecutionFailed':
+    case 'ModuleExecutionFailed':
+      return text('The guarded transaction itself failed')
+    // Configuration
+    case 'InvalidScope':
+      return text('Invalid scope')
+    case 'AllowNotPerActor':
+      return text('An Allow must name an actor, never Everyone')
+    case 'DelegateCallNotExact':
+      return text('DELEGATECALL can only be allowed at (actor, contract.function)')
+    case 'InvalidOpMask':
+      return text(`Invalid op mask ${a(0)}`)
+    case 'InvalidPolicy':
+      return text(`${who(0)} is not a policy (ERC-165 IPolicy)`)
+    case 'PolicyConfigurationFailed':
+      return text(`${who(0)} refused its settings: ${describeReason(a(1) as Hex, ctx).text}`)
+    case 'TooManyAttachments':
+      return text('At most 8 attachments per scope')
+    case 'NotAttached':
+      return text('Not attached')
     // Timelock
+    case 'AttachmentFrozen':
+      return text(`Frozen by a guardian until ${time(a(1))}`)
     case 'NotScheduled':
       return text('Needs to be scheduled first (Timelock)', 'schedule')
     case 'NotReady':
       return text(`Scheduled, executable from ${time(a(1))}`, 'wait')
     case 'ScheduleExpired':
       return text(`The schedule expired at ${time(a(1))}: schedule again`, 'schedule')
-    case 'ClearedByFreeze':
-      return text('The schedule was cleared by a freeze: schedule again', 'schedule')
+    case 'VoidedByFreeze':
+      return text('Scheduled before a freeze ended: void, schedule again', 'schedule')
     case 'NoTimelock':
-      return text('No Timelock applies to this call: there is nothing to schedule')
-    // Co-signer, Safenet, Quorum
-    case 'MissingCoSignature':
-      return text(`Needs a co-signature from ${who(0)}`, 'cosignature')
-    case 'InvalidCoSignature':
-      return text(`Invalid co-signature from ${who(0)}`)
-    case 'CoSignatureExpired':
-      return text(`The co-signature from ${who(0)} expired at ${time(a(1))}: needs a new one`, 'cosignature')
+      return text('No Timelock applies to this call: nothing to schedule')
+    case 'AlreadyScheduled':
+      return text(`Already scheduled (${shortHash(a(0))})`)
+    case 'GasFieldsNotZero':
+      return text('safeTxGas and gasPrice must be 0')
+    case 'StaleNonce':
+      return text(`Nonce ${a(0)} already used (the Safe is at ${a(1)})`)
+    case 'TimelockNotCoveringConfiguration':
+      return text(
+        "This Timelock needs one at least as long covering engine.configure (the owners' (Owners, *))",
+      )
+    case 'NotCanceller':
+      return text(`${who(0)} may not cancel this schedule`)
+    case 'NotOwnersQueue':
+      return text('The owners can only cancel owner-path schedules')
+    case 'NotGuardian':
+      return text('Not a guardian of this attachment')
+    case 'NotGuardianOrLifter':
+      return text('Not a guardian or lifter of this attachment')
+    case 'NotFrozen':
+      return text('Not frozen')
+    // Args
+    case 'ConstraintFailed':
+      return text(`Call ${a(0)}: condition ${a(2)} does not hold`)
+    case 'ArgumentMissing':
+      return text(`Call ${a(0)}: argument missing for condition ${a(2)}`)
+    case 'NoConstraint':
+      return text(`Call ${a(0)}: no condition applies (other calls denied)`)
+    // Limit
+    case 'LimitExceeded': {
+      const token = a(2) as Address
+      return text(
+        `Over budget at call ${a(0)}: ${amountLabel(token, a(3) as bigint, ctx)} requested, ${amountLabel(token, a(4) as bigint, ctx)} left`,
+      )
+    }
+    case 'Unpriced': {
+      const token = a(2) as Address
+      return text(
+        BigInt(token) === 0n
+          ? `The budget cannot price call ${a(0)} (${fn(3)}): denied (native value unlisted, or not a known spend)`
+          : `No budget for token ${addressLabel(token, ctx)} (call ${a(0)}): list it`,
+      )
+    }
+    // CoSigner
+    case 'MissingApprovals':
+      return text(
+        `Needs ${a(1)} approval${Number(a(1)) === 1 ? '' : 's'}, has ${a(2)} (Co-signer)`,
+        'approval',
+      )
+    case 'ApprovalExpired':
+      return text(`Approval expired at ${time(a(0))}`)
+    case 'InvalidSignature':
+      return text(`Invalid approval signature of ${who(0)}`)
+    case 'SignatureAlreadyUsed':
+      return text('This approval signature was already pushed')
+    // Safenet
     case 'MissingAttestation':
       return text('Needs a Safenet attestation', 'attestation')
     case 'AttestationExpired':
@@ -301,180 +245,209 @@ export function describeReason(
     case 'MalformedAttestation':
     case 'UntrustedAttestationKey':
     case 'AttestationAlreadySpent':
-      return text(`Safenet: ${name}`)
-    case 'QuorumNotMet':
-      return text(`Needs ${a(0)} owner signatures`, 'signatures')
-    case 'ModulePathUnsupported':
-      return text('Quorum only applies to owner transactions: a module call is always denied')
-    // Recipients
-    case 'RecipientNotAllowed':
-      return text(`Recipient ${who(0)} is not on the list`)
-    case 'SpenderNotAllowed':
-      return text(`Spender ${who(0)} is not on the list`)
-    case 'ApprovalTooLarge':
-      return text(`Approval ${a(0)} above the maximum ${a(1)}`)
-    case 'UnclassifiedCall':
-      return text(`${fn(0)} is not a payment the Recipients policy understands (strict)`)
-    // Limit
-    case 'LimitExceeded': {
-      const token = a(1) as Address
-      return text(
-        `Over budget: ${amountLabel(token, a(2) as bigint, ctx)} requested, ${amountLabel(token, a(3) as bigint, ctx)} left`,
-      )
-    }
-    case 'Unpriced': {
-      const token = a(1) as Address
-      return text(
-        BigInt(token) === 0n
-          ? `The budget cannot price ${fn(2)}: denied`
-          : `No budget for token ${addressLabel(token, ctx)}`,
-      )
-    }
-    // Args
-    case 'ArgViolation':
-      return text(`${fn(0)}: argument ${a(1)} not allowed`)
-    case 'ArgMissing':
-      return text(`${fn(0)}: argument ${a(1)} missing`)
-    case 'NoConstraint':
-      return text(`${fn(0)} has no argument rule (strict)`)
-    case 'MalformedCall':
-      return text(`Malformed calldata for ${fn(0)}`)
-    case 'SignatureExpired':
-      return text(`Signature deadline passed (${time(a(0))})`)
-    case 'DomainSeparatorUnavailable':
-      return text(`Token ${who(0)} has no DOMAIN_SEPARATOR: cannot sign a permit for it`)
-    case 'DomainMismatch':
-      return text(
-        `Token ${who(0)}'s DOMAIN_SEPARATOR is not its own EIP-712 domain: cannot sign a permit for it`,
-      )
     case 'InvalidMulMulAddWitness':
     case 'UnsupportedMulMulAddInput':
     case 'InvalidScalar':
     case 'NotOnCurve':
-      return text(`Safenet: invalid attestation signature (${name})`)
+      return text(`Safenet: ${name}`)
+    case 'NoMatches':
+      return text('Policy called without a match')
+    case 'InvalidSettings':
+      return text('Invalid settings')
     default:
       return text(args.length ? `${name}(${args.map(String).join(', ')})` : name)
   }
 }
 
 // ---------------------------------------------------------------------------------------------
-// Outcome
+// Running the preview
 // ---------------------------------------------------------------------------------------------
 
-const isNotGranted = (g: Gate) => g.kind === GateKind.RULE && g.error?.name === 'NotGranted'
+type RawCall = { to: Address; value: bigint; data: Hex; operation: number }
 
-/**
- * The gate a real check reverts with, per SPEC §6.2–6.3 order: for each call, an engine rule, then
- * a built-in DENY, then `NotGranted`, then call-level policies; then transaction-level policies.
- */
-function decidingDeny(calls: readonly CallGates[], transaction: readonly Gate[]): Gate | undefined {
-  for (const { gates } of calls) {
-    const denies = gates.filter((g) => g.verdict === Verdict.DENY)
-    const pick =
-      denies.find((g) => g.kind === GateKind.RULE && !isNotGranted(g)) ??
-      denies.find((g) => g.kind === GateKind.DENY) ??
-      denies.find(isNotGranted) ??
-      denies.find((g) => g.kind === GateKind.POLICY)
-    if (pick) return pick
+/** `eth_call` of `policy.check` from the engine; the raw revert data or the returned word. */
+async function simulateCheck(
+  client: PublicClient,
+  engine: Address,
+  policy: Address,
+  data: Hex,
+): Promise<{ passed: boolean; reason?: Hex }> {
+  const run = async (override: boolean) => {
+    const result = await client.call({
+      account: engine,
+      to: policy,
+      data,
+      // Some nodes refuse `from` = a contract (EIP-3607): drop its code for the call. Policies only
+      // read their own storage in `check`, so the engine's code is not needed.
+      stateOverride: override ? [{ address: engine, code: '0x' }] : undefined,
+    })
+    const word = result.data ?? '0x'
+    return {
+      passed: size(word) === 32 && word.slice(0, 10).toLowerCase() === Selectors.check,
+      reason: undefined,
+    }
   }
-  return transaction.find((g) => g.verdict === Verdict.DENY)
+  try {
+    return await run(false)
+  } catch (error) {
+    const reason = revertDataOf(error)
+    if (reason !== undefined) return { passed: false, reason }
+    if (/sender|eoa|code/i.test(error instanceof Error ? error.message : '')) {
+      try {
+        return await run(true)
+      } catch (retry) {
+        const data = revertDataOf(retry)
+        if (data !== undefined) return { passed: false, reason: data }
+        throw retry
+      }
+    }
+    throw error
+  }
 }
 
-/** Groups gates per call (transaction-level last) and decides (pure). */
-export function previewOutcome(gates: readonly Gate[]): PreviewOutcome {
-  const indexes = [...new Set(gates.filter((g) => !g.txLevel).map((g) => g.callIndex))].sort((a, b) => a - b)
-  const calls = indexes.map((callIndex): CallGates => {
-    const own = gates.filter((g) => g.callIndex === callIndex)
-    return {
-      callIndex,
-      gates: own,
-      allowed: !own.some((g) => g.verdict === Verdict.DENY),
-      granting: own.filter((g) => g.verdict === Verdict.ALLOW),
+/**
+ * Runs `matches` and each matched policy's `check` (see the module doc). `actor` is `OWNERS` or a
+ * module. Owner path: the policies see the Safe tx hash at `ownerNonce` (default: the current
+ * nonce), so a schedule or approval made for that nonce counts.
+ */
+export async function runPreview(
+  client: PublicClient,
+  deployment: V2Deployment,
+  safe: Address,
+  actor: Address,
+  c: PreviewCall,
+  options: { chainId: number; ownerNonce?: bigint; ctx?: LabelContext },
+): Promise<PreviewResult> {
+  const ctx = options.ctx ?? {}
+  try {
+    const isOwners = isAddressEqual(actor, OWNERS)
+    const [[calls, found, engineError], nonce] = await Promise.all([
+      client.readContract({
+        address: deployment.engine,
+        abi: policyGuardAbi,
+        functionName: 'matches',
+        args: [safe, actor, c.to, c.value, c.data, c.operation],
+      }),
+      isOwners && options.ownerNonce === undefined ? readSafeNonce(client, safe) : options.ownerNonce,
+    ])
+    const txHash = txHashOf(options.chainId, safe, actor, c, nonce ?? 0n)
+    const gates: Gate[] = []
+
+    if (size(engineError) > 0) {
+      const d = describeReason(engineError, ctx)
+      const callIndex =
+        d.error && typeof d.error.args[0] === 'number' ? (d.error.args[0] as number) : undefined
+      gates.push({
+        kind: 'engine',
+        verdict: 'deny',
+        callIndex,
+        reason: engineError,
+        ...d,
+        reasonText: d.text,
+      })
     }
-  })
-  const transaction = gates.filter((g) => g.txLevel)
-  const denies = gates.filter((g) => g.verdict === Verdict.DENY)
+    for (const m of found) {
+      if (m.kind === Kind.ALLOW)
+        gates.push({
+          kind: 'allow',
+          verdict: m.counts ? 'grant' : 'not-counted',
+          callIndex: m.callIndex,
+          level: m.level,
+          attachmentId: m.attachmentId,
+          reasonText: m.counts
+            ? `Granted at ${levelLabel(m.level)}`
+            : 'Does not count: a DELEGATECALL, or a module call to the Safe or the engine, needs an Allow on exactly this function',
+        })
+      if (m.kind === Kind.DENY)
+        gates.push({
+          kind: 'deny',
+          verdict: 'deny',
+          callIndex: m.callIndex,
+          level: m.level,
+          attachmentId: m.attachmentId,
+          reasonText: `Denied by a Deny rule at ${levelLabel(m.level)}`,
+        })
+    }
+
+    const policies = [
+      ...new Set(found.filter((m) => m.kind === Kind.POLICY).map((m) => getAddress(m.policy))),
+    ]
+    const runs = await Promise.all(
+      policies.map(async (policy): Promise<Gate> => {
+        const matches = found
+          .filter((m) => m.kind === Kind.POLICY && isAddressEqual(m.policy, policy))
+          .map((m) => ({ callIndex: m.callIndex, level: m.level, attachmentId: m.attachmentId }))
+        const data = encodeFunctionData({
+          abi: policyAbi,
+          functionName: 'check',
+          args: [{ safe, actor, txHash }, calls as readonly RawCall[], matches],
+        })
+        const result = await simulateCheck(client, deployment.engine, policy, data)
+        const base = {
+          kind: 'policy' as const,
+          policy,
+          policyName: policyNameOf(deployment, policy),
+          matches,
+        }
+        if (result.passed) return { ...base, verdict: 'pass', reasonText: 'Passes' }
+        const d = result.reason
+          ? describeReason(result.reason, ctx)
+          : { text: 'did not return the pass value', error: undefined, needs: undefined }
+        return {
+          ...base,
+          verdict: 'deny',
+          reason: result.reason,
+          error: d.error,
+          needs: d.needs,
+          reasonText: d.text,
+        }
+      }),
+    )
+    gates.push(...runs)
+    return { ok: true, outcome: previewOutcome(gates, calls as readonly RawCall[], txHash) }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message.split('\n')[0]! : String(error) }
+  }
+}
+
+/** Decides (pure): the engine error first, else the first denying policy in first-match order. */
+export function previewOutcome(
+  gates: readonly Gate[],
+  calls: readonly RawCall[],
+  txHash: Hex,
+): PreviewOutcome {
+  const denies = gates.filter((g) => g.verdict === 'deny')
   const allowed = denies.length === 0
-  const onlyNeeds = !allowed && denies.every((g) => g.needs !== undefined)
+  const deciding = allowed
+    ? gates.find((g) => g.verdict === 'grant')
+    : (gates.find((g) => g.kind === 'engine') ??
+      gates.find((g) => g.kind === 'policy' && g.verdict === 'deny'))
   return {
     allowed,
-    deciding: allowed ? calls.flatMap((c) => c.granting)[0] : decidingDeny(calls, transaction),
+    deciding,
+    gates: [...gates],
+    calls: [...calls],
     denies,
     needs: [...new Set(denies.flatMap((g) => (g.needs ? [g.needs] : [])))],
-    onlyNeeds,
-    calls,
-    transaction,
+    onlyNeeds: !allowed && denies.every((g) => g.needs !== undefined),
+    txHash,
   }
 }
 
-/**
- * One row per policy run: a call-level policy matched at several scopes yields one gate per
- * attachment with the same verdict (SPEC §6.7); the UI shows them as one chip.
- */
-export function collapseGates(gates: readonly Gate[]): (Gate & { attachmentIds: Hex[] })[] {
-  const rows: (Gate & { attachmentIds: Hex[] })[] = []
-  for (const g of gates) {
-    const last = rows[rows.length - 1]
-    if (
-      last &&
-      g.kind === GateKind.POLICY &&
-      last.kind === GateKind.POLICY &&
-      last.callIndex === g.callIndex &&
-      isAddressEqual(last.policy, g.policy) &&
-      last.verdict === g.verdict &&
-      last.reason === g.reason
-    ) {
-      last.attachmentIds.push(g.attachmentId)
-      continue
-    }
-    rows.push({ ...g, attachmentIds: [g.attachmentId] })
-  }
-  return rows
+/** `Allow`, `Deny`, `Timelock`, `NotGranted`. */
+export const gateName = (g: Gate): string => {
+  if (g.kind === 'allow') return 'Allow'
+  if (g.kind === 'deny') return 'Deny'
+  if (g.kind === 'engine') return g.error?.name ?? 'Engine rule'
+  return g.policyName ? POLICY_INFO[g.policyName].label : 'Policy'
 }
 
-/** `Actor · one function on a contract`, `engine rule`, `transaction`. */
-export const gateLevelLabel = (g: Gate): string =>
-  g.scopeLevel === NO_LEVEL ? 'engine rule' : (LEVEL_LABELS[g.scopeLevel] ?? `level ${g.scopeLevel}`)
-
-// ---------------------------------------------------------------------------------------------
-// Probes
-// ---------------------------------------------------------------------------------------------
-
-const ownerManagementAbi = parseAbi([
-  'function swapOwner(address prevOwner, address oldOwner, address newOwner)',
-])
-
-const SENTINEL_OWNERS: Address = '0x0000000000000000000000000000000000000001'
-
-/**
- * The call a Recovery actor makes (`swapOwner` with the right `prevOwner` from the Safe's owner
- * list): preview it as the recovery module, during a freeze too, for the "recovery still passes"
- * check. It should be denied only for needs (`schedule` / `wait`), never by a Freeze.
- */
-export function swapOwnerCall(
-  safe: Address,
-  owners: readonly Address[],
-  oldOwner: Address,
-  newOwner: Address,
-): PreviewCall {
-  const index = owners.findIndex((o) => isAddressEqual(o, oldOwner))
-  if (index < 0) throw new Error(`${oldOwner} is not an owner`)
-  const prevOwner = index === 0 ? SENTINEL_OWNERS : getAddress(owners[index - 1]!)
-  return {
-    to: safe,
-    value: 0n,
-    data: encodeFunctionData({
-      abi: ownerManagementAbi,
-      functionName: 'swapOwner',
-      args: [prevOwner, oldOwner, newOwner],
-    }),
-    operation: Operation.CALL,
-  }
+/** The attachment a policy deny names (Limit, Args, CoSigner, Timelock errors carry it). */
+export const deniedAttachmentId = (g: Gate): Hex | undefined => {
+  if (!g.error) return undefined
+  const args = g.error.args
+  const id = args.find((x) => typeof x === 'string' && /^0x[0-9a-fA-F]{64}$/.test(x)) as Hex | undefined
+  return g.error.name === 'NotScheduled' || g.error.name === 'NotReady' || g.error.name === 'ScheduleExpired'
+    ? undefined
+    : id
 }
-
-/** Recovery passes iff the preview only asks for a schedule / the delay (never a Freeze deny). */
-export const recoveryStillPasses = (outcome: PreviewOutcome): boolean =>
-  outcome.allowed || (outcome.onlyNeeds && outcome.needs.every((n) => n === 'schedule' || n === 'wait'))
-
-/** `CALL`, `DELEGATECALL` of a preview call, for the gate header. */
-export const operationLabel = (operation: Operation): string => opMaskLabel(opBit(operation))

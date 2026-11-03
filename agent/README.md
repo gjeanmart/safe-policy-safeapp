@@ -124,33 +124,67 @@ safe-role simulate <id>
 safe-role exec <id>                                            # y/N in the signer terminal
 ```
 
-## Policy Engine V2
+## Policy Engine V2 (rev 3)
 
-The CLI detects the engine from the Safe's guard (`supportsInterface` for ITransactionGuard,
-IModuleGuard and IPolicyEngineV2). V1 Safes behave as before. On a V2 Safe:
+The CLI detects the engine from the Safe's guard: a guard whose `supportsInterface` answers true
+for `IPolicyGuard` (`0x0f8d6033`) is a rev 3 engine. Other guards keep the V1 behaviour.
 
-| Command               | What changes                                                                                                                                     |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `status`              | engine section, and the freeze state of the Safe and of this role: active, frozen until, cooling down until                                      |
-| `policies`            | the role's view: grants (Allow that applies to it), protections on it, protections on everyone, each budget with what is left and when it resets |
-| `simulate <id>`       | the engine's `preview`: every gate (Allow / pass / Deny), the deciding gate, `needs` and `next`, plus a dry run of the real call                 |
-| `schedule <id>` (new) | the role schedules a timelocked call with `TimelockPolicy.scheduleModuleTx` (signed by the signer, y/N in ask mode)                              |
-| `queue` (new)         | the role's schedules: waiting (countdown), ready, expired, cleared by a freeze, with the plan id to exec                                         |
+On rev 3 only an **Allow** for the role grants a call, a **Deny** refuses it, and every matching
+**policy** passes or reverts with a reason (SPEC: `contracts/contracts/v2/SPEC.md`):
 
-`simulate`, `policies` and `queue` print a text view on a V2 Safe; add `--json` for JSON. MCP
-tools always return JSON. A timelocked action: `plan` → `simulate` (needs: schedule) → `schedule`
-→ `queue` until ready → `simulate` → `exec`.
+| Command                             | What it does on V2                                                                                                                                                           |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`                            | engine section, and the freeze state of every Timelock attachment (active, frozen until, cooling down until), with the ones that apply to the role                           |
+| `policies`                          | what the role can do (Allows and their conditions), what limits it (budget left and reset), what protects it (Timelock delay, guardians, co-signers), freeze state, duties   |
+| `simulate <id>`                     | `matches` plus an `eth_call` of each matched policy's `check` from the engine: every gate per (call, scope, policy), the deciding one, `needs`, `blocked`, and the next step |
+| `schedule <id>`                     | the role schedules its own call (`TimelockPolicy.scheduleModuleTx`, `msg.sender` = the role key); replaces an expired or voided schedule                                     |
+| `queue`                             | the role's schedules: waiting (countdown), ready, expired, void, with the plan id                                                                                            |
+| `cancel <id\|callHash>`             | cancels a schedule the role made, or one it is a listed canceller of                                                                                                         |
+| `approve <txHash> [--valid-for 1h]` | for a role that is a Co-signer approver: approves a hash until `validUntil`                                                                                                  |
+| `freeze [ids…]`, `lift [id]`        | for a role that is a Timelock guardian (freeze, lift) or lifter (lift)                                                                                                       |
 
-V2 addresses come from `src/config/contracts.ts` (any exported value shaped like `V2Deployment`).
-Until they are there, pass the JSON block printed by `pnpm deploy:v2:sepolia`:
+`simulate`, `policies` and `queue` print text; add `--json` for JSON. MCP tools always return JSON
+(`safe_role_cancel`, `safe_role_approve`, `safe_role_freeze` and `safe_role_lift` are new). Every
+signed action goes through the signer: it re-validates against the chain (the policy addresses come
+from the Safe's own attachments), simulates, asks y/N in ask mode, writes an audit entry, then sends.
+
+A timelocked action: `plan` → `simulate` (needs: schedule) → `schedule` → `queue` until ready →
+`simulate` → `exec`. A co-signed action: `simulate` (needs: approval, with the hash and the
+EIP-712 digest) → an approver approves → `simulate` → `exec`.
+
+Rev 3 addresses come from `src/config/contracts.ts` (any rev 3 deployment it exports, also inside a
+`{ label, deployment }` wrapper). Otherwise pass the JSON printed by the deploy script, inline or as
+a file, to both the CLI and the signer:
 
 ```sh
-export SAFE_ROLE_V2_DEPLOYMENT=./v2-deployment.json    # or the JSON itself; or --v2-deployment <file>
-safe-role signer                                        # the signer needs it too (simulate, schedule)
+export SAFE_ROLE_V2_DEPLOYMENT=./v2-rev3.json    # or the JSON itself; or --v2-deployment <file>
+safe-role signer
 ```
 
-Policies are shared by both engines, so the CLI also works on an engine that is not listed, as long
-as one deployment is known.
+```json
+{
+  "engine": "0x…",
+  "engineConfig": "0x…",
+  "trustedBatches": ["0x…"],
+  "policies": {
+    "timelock": "0x…",
+    "timelockQueue": "0x…",
+    "args": "0x…",
+    "limit": "0x…",
+    "coSigner": "0x…",
+    "safenet": "0x0000000000000000000000000000000000000000"
+  },
+  "fromBlock": 12345678
+}
+```
+
+Without addresses the CLI still reads an installed rev 3 engine (it identifies the policies from
+the Safe's attachments); the addresses add names and `fromBlock`, where the queue scan starts. The
+V2-only commands fail with "Policy Engine V2 rev 3 is not deployed" when neither the Safe nor the
+config has one.
+
+`agent/src/v2/` is a small self-contained rev 3 client with its own ABIs (`abi.ts`, generated from
+the compiled interfaces). It duplicates part of the app's `src/lib/v2` on purpose for now.
 
 ## Security notes
 

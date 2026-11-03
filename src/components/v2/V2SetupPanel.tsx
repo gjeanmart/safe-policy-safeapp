@@ -1,49 +1,34 @@
 import { useState } from 'react'
 import type { Hex } from 'viem'
-import { V2_ENGINES } from '../../config/contracts'
 import { useSandbox } from '../../context'
 import { useAsync } from '../../hooks/useAsync'
 import { describeError } from '../../lib/errors'
 import {
-  type AttachmentChange,
-  type ChangeSet,
-  type FreezeRole,
-  combineChangeSets,
+  type Change,
+  type OwnerCall,
+  changeAttachmentId,
   detachChange,
   lint,
-  mergeChange,
+  mergeChanges,
   projectAttachments,
+  sortForApply,
 } from '../../lib/v2'
 import { SafeStatus } from '../setup/SafeStatus'
 import { Card, Notice } from '../ui'
 import { DraftPanel } from './DraftPanel'
 import { Erc1271Notice } from './Erc1271Notice'
-import { FreezePanel } from './FreezePanel'
 import { OrgChart, diffAttachments } from './OrgChart'
-import { PendingV2Configs } from './PendingV2Configs'
+import { Queue } from './Queue'
 import { ScopeBuilder } from './ScopeBuilder'
-import { TimelockQueue } from './TimelockQueue'
 import { readFallbackHandler } from './ownerCalls'
 import { useV2, useV2Draft } from './useV2'
-
-/** Roles after the draft's role changes (pure). */
-function projectRoles(
-  roles: { guardians: readonly Hex[]; lifters: readonly Hex[] },
-  changes: ChangeSet['roles'],
-): { guardians: Hex[]; lifters: Hex[] } {
-  const members: Record<FreezeRole, Hex[]> = { 0: [...roles.guardians], 1: [...roles.lifters] }
-  for (const c of changes) {
-    const list = members[c.role].filter((m) => m.toLowerCase() !== c.account.toLowerCase())
-    members[c.role] = c.enabled ? [...list, c.account] : list
-  }
-  return { guardians: members[0], lifters: members[1] }
-}
 
 function V2Screens() {
   const { safe, state, v2Installed } = useSandbox()
   const view = useV2()
   const [draft, setDraft] = useV2Draft()
-  const [preview, setPreview] = useState<AttachmentChange>()
+  const [preview, setPreview] = useState<Change[]>()
+  const [prefill, setPrefill] = useState<OwnerCall>()
   const { deployment } = view.engine
   const handler = useAsync(() => readFallbackHandler(safe), `${safe}:handler`, 30_000)
 
@@ -53,83 +38,61 @@ function V2Screens() {
   const model = view.model
 
   const isAttached = (id: Hex) => model.attachments.some((a) => a.attachmentId === id)
-  const projected = projectAttachments(model.attachments, draft.changes, deployment)
-  // The builder's change, shown as a dashed chip (only when it is not already in the draft).
-  const previewed = preview ? projectAttachments([], [preview], deployment) : []
+  // Before install, the batch detaches leftovers the draft does not keep.
+  const touched = new Set(draft.map(changeAttachmentId))
+  const base = v2Installed ? model.attachments : model.attachments.filter((a) => touched.has(a.attachmentId))
+  const projected = projectAttachments(base, sortForApply(deployment, draft), deployment)
+  const previewed = preview ? projectAttachments([], preview, deployment) : []
   const items = diffAttachments(model.attachments, projected, previewed)
-  const roles = projectRoles(model.roles, draft.roles)
-  const findings = view.info
-    ? lint({
-        safe,
-        deployment,
-        attachments: projected,
-        roles,
-        owners: state.owners,
-        modules: state.modules,
-        engine: { delay: view.info.delay, maxFreeze: view.info.maxFreeze },
-        fallbackHandler: v2Installed ? handler.data : undefined,
-        ctx: view.ctx,
-      })
-    : []
-  const freezes = new Map(model.actors.flatMap((a) => (a.freeze ? [[a.actor, a.freeze] as const] : [])))
+  const findings = lint({ safe, deployment, attachments: projected, modules: state.modules, ctx: view.ctx })
+  const add = (changes: Change[]) => setDraft(mergeChanges(draft, changes, isAttached))
 
   return (
     <>
-      {v2Installed ? (
-        <Erc1271Notice handler={handler.data} policyHandler={deployment.fallbackHandler} />
-      ) : (
+      <Erc1271Notice handler={handler.data} />
+      {!v2Installed && (
         <Notice>
-          V2 is not installed on this Safe yet. Build the configuration below (start with the Owners
-          template), then propose the install batch: configureImmediately, the PolicyFallbackHandler, the
-          module guard, the guard last. Note: once installed, the owners&apos; off-chain signatures (messages,
-          permits, CoW orders) are refused.
+          V2 is not installed on this Safe yet. Build the configuration (start with the Owners template), then
+          propose the install batch: configure, setModuleGuard, setGuard.
         </Notice>
       )}
-      <FreezePanel
-        deployment={deployment}
-        info={view.info}
-        model={model}
-        draft={draft}
-        setDraft={setDraft}
-        ctx={view.ctx}
-      />
       <OrgChart
         deployment={deployment}
-        current={model.attachments}
         items={items}
-        freezeSafe={model.freeze}
-        freezes={freezes}
-        guardians={model.roles.guardians}
         ctx={view.ctx}
-        onDetach={(a) =>
-          setDraft({ ...draft, changes: mergeChange(draft.changes, detachChange(a), isAttached) })
-        }
+        onDetach={(list) => add(list.map(detachChange))}
       />
       <ScopeBuilder
         deployment={deployment}
         ctx={view.ctx}
+        context={{ safe, attachments: projected }}
         onPreview={setPreview}
-        onAdd={(change) => setDraft({ ...draft, changes: mergeChange(draft.changes, change, isAttached) })}
-        onAddSet={(set) => setDraft(combineChangeSets([draft, set], isAttached))}
+        onAdd={add}
       />
       <DraftPanel
         deployment={deployment}
-        info={view.info}
-        model={model}
+        current={model.attachments}
         draft={draft}
         setDraft={setDraft}
         findings={findings}
         ctx={view.ctx}
+        onSchedule={setPrefill}
       />
       {v2Installed && (
-        <PendingV2Configs deployment={deployment} info={view.info} freeze={model.freeze} ctx={view.ctx} />
+        <Queue
+          engine={view.engine}
+          model={model}
+          ctx={view.ctx}
+          freezeLimits={view.freezeLimits}
+          prefill={prefill}
+          onChange={view.reload}
+        />
       )}
-      {v2Installed && <TimelockQueue engine={view.engine} model={model} ctx={view.ctx} />}
     </>
   )
 }
 
-/** The V2 setup tab: Safe status, then the V2 screens if V2 is deployed here and the Safe can run it. */
+/** The V2 setup tab: Safe status, then the V2 screens if V2 is deployed here. */
 export function V2SetupPanel() {
   const { v2 } = useSandbox()
   return (
@@ -140,9 +103,9 @@ export function V2SetupPanel() {
       ) : (
         <Card title="Policy Engine V2">
           <Notice tone="warn">
-            V2 not deployed on this chain: the {V2_ENGINES.length} engines in src/config/contracts.ts still
-            have placeholder (zero) addresses. Run <code>pnpm deploy:v2:sepolia</code> in{' '}
-            <code>contracts/</code> and paste the printed JSON blocks there.
+            V2 not deployed on this chain: the rev 3 entry in src/config/contracts.ts still has placeholder
+            (zero) addresses. Run <code>pnpm deploy:v2:sepolia</code> in <code>contracts/</code> and paste the
+            printed entry there.
           </Notice>
         </Card>
       )}

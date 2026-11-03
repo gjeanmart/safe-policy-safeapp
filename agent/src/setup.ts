@@ -21,7 +21,7 @@ import {
 import { MCP_TOKEN_PATH, ensureToken, httpSigner, mcpEndpoint } from './http'
 import { MIN_PASSWORD_LENGTH, keystoreAddress, prompt, requireTty, writeKeystore } from './keystore'
 import { CliError, printResult } from './output'
-import { detectV2 } from './v2'
+import { detectV2 } from './v2/role'
 import type { SignMode } from './signer'
 
 /** Where to enable the role and write policies. */

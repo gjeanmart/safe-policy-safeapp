@@ -1,50 +1,43 @@
 import {
   type Address,
   type Hex,
-  concat,
   encodeFunctionData,
-  encodePacked,
   getAddress,
   isAddressEqual,
   parseAbi,
   size,
   zeroAddress,
 } from 'viem'
-import { policyEngineV2Abi } from './abi'
+import { policyGuardAbi } from './abi'
 import type { Attachment } from './attachments'
 import { POLICY_INFO, SELECTORS, type V2Deployment, policyNameOf, selectorName } from './policies'
 import {
-  ANY,
-  type AttachmentChange,
-  AttachmentKind,
+  ACTOR_LEVEL_OFFSET,
   CallMatch,
-  ChangeType,
   EXACT_LEVEL,
-  type FreezeRole,
+  Kind,
+  LEVEL_COUNT,
   MAX_ATTACHMENTS_PER_SCOPE,
-  MAX_BATCH_CALLS,
-  MAX_ROLE_MEMBERS,
   OP_ALL,
   OP_CALL,
   OP_DELEGATECALL,
-  OWNERS,
   Operation,
-  PolicyLevel,
-  type RoleChange,
   type Scope,
   actorLabel,
   attachmentId,
-  configurationRoot,
+  isAny,
   isNormalized,
+  isOwners,
   levelOf,
-  namesTo,
   normalizeOpMask,
   normalizeScope,
+  scopeAt,
   scopeKey,
 } from './scopes'
 import {
   type LabelContext,
   type PolicySettings,
+  type TimelockSettings,
   decodeSettings,
   encodeSettings,
   settingsLabel,
@@ -52,86 +45,78 @@ import {
 } from './settings'
 
 /**
- * Configuration changes (SPEC §5): AttachmentChange / RoleChange builders, a draft that merges
- * edits by attachment id, local validation mirroring the engine's apply rules (§5.2), the
- * configuration root, the calldata of request / apply / invalidate, and MultiSend batching.
+ * Configuration changes (SPEC.md §3.2–3.3). Configuration is an ordinary owner transaction
+ * `engine.configure(Change[])`, judged like any other call: the owners' Timelock delays it, their
+ * freeze blocks it. This module builds changes, merges a draft by attachment id, projects the
+ * result, mirrors every configure-time engine and policy rule, and builds the owner calls (configure,
+ * and the install batch `[configure, setModuleGuard, setGuard]`).
  *
  * @example
- * const set: ChangeSet = { changes: [allowChange({ actor: ops, to: USDC, selector: SELECTORS.transfer, callMatch: CallMatch.TO_SELECTOR })], roles: [] }
- * const root = changeSetRoot(set)                       // = engine.configurationRoot(changes, roles)
- * const txs = [engineCalls.requestConfiguration(engine, root)]       // owners sign, wait DELAY,
- * const later = [engineCalls.applyConfiguration(engine, set)]        // then apply the same set
+ * const draft = [allowChange(onFunction(ops, USDC, SELECTORS.transfer))]
+ * const problems = validateChanges(model.attachments, draft, { deployment, safe })
+ * const tx = configureCall(deployment.engine, draft)       // one owner transaction, never batched
  */
 
-export type ChangeSet = { changes: AttachmentChange[]; roles: RoleChange[] }
-
-export const emptyChangeSet = (): ChangeSet => ({ changes: [], roles: [] })
+export type Change = {
+  /** Remove the attachment `(scope, kind, policy)`; `opMask` and `settings` are ignored. */
+  detach: boolean
+  scope: Scope
+  kind: Kind
+  policy: Address
+  /** 0 = default (CALL for ALLOW, both ops for DENY / POLICY). */
+  opMask: number
+  settings: Hex
+}
 
 // ---------------------------------------------------------------------------------------------
 // Builders
 // ---------------------------------------------------------------------------------------------
 
-const checksumScope = (scope: Scope): Scope => {
-  const normalized = normalizeScope(scope)
-  return { ...normalized, actor: getAddress(normalized.actor), to: getAddress(normalized.to) }
-}
-
-/** A SET change; the scope is normalized (open parts zeroed) so the root matches the engine's. */
-export function setChange(
+/** An attach (or update) change; the scope is normalized and checksummed. */
+export const attachChange = (
   scope: Scope,
-  kind: AttachmentKind,
+  kind: Kind,
   policy: Address,
   opMask: number,
-  data: Hex,
-): AttachmentChange {
-  return {
-    changeType: ChangeType.SET,
-    scope: checksumScope(scope),
-    kind,
-    policy: getAddress(policy),
-    opMask,
-    data,
-  }
-}
+  settings: Hex,
+): Change => ({
+  detach: false,
+  scope: normalizeScope(scope),
+  kind,
+  policy: getAddress(policy),
+  opMask,
+  settings,
+})
 
-/** Built-in ALLOW. CALL only by default; DELEGATECALL is only accepted at the exact level (§6.3). */
-export const allowChange = (scope: Scope, opMask: number = OP_CALL): AttachmentChange =>
-  setChange(scope, AttachmentKind.ALLOW, zeroAddress, opMask, '0x')
+/** Built-in ALLOW, CALL only unless asked (DELEGATECALL only at the exact level). */
+export const allowChange = (scope: Scope, opMask: number = OP_CALL): Change =>
+  attachChange(scope, Kind.ALLOW, zeroAddress, opMask, '0x')
 
-/** Built-in DENY; covers both operations by default (restrictions may cover DELEGATECALL anywhere). */
-export const denyChange = (scope: Scope, opMask: number = OP_ALL): AttachmentChange =>
-  setChange(scope, AttachmentKind.DENY, zeroAddress, opMask, '0x')
+/** Built-in DENY, both operations by default. */
+export const denyChange = (scope: Scope, opMask: number = OP_ALL): Change =>
+  attachChange(scope, Kind.DENY, zeroAddress, opMask, '0x')
 
-/**
- * Attaches a known policy with its settings. Defaults to both operations, so a DELEGATECALL the
- * actor is granted at the exact scope is still protected.
- */
+/** A known policy with its settings; both operations by default, so a granted DELEGATECALL is seen too. */
 export const policyChange = (
   deployment: V2Deployment,
   scope: Scope,
   value: PolicySettings,
   opMask: number = OP_ALL,
-): AttachmentChange =>
-  setChange(scope, AttachmentKind.POLICY, deployment.policies[value.policy], opMask, encodeSettings(value))
+): Change =>
+  attachChange(scope, Kind.POLICY, deployment.policies[value.policy], opMask, encodeSettings(value))
 
-/** DETACH of an existing attachment (the engine ignores opMask and data). */
-export const detachChange = (a: Pick<Attachment, 'scope' | 'kind' | 'policy'>): AttachmentChange => ({
-  changeType: ChangeType.DETACH,
-  scope: checksumScope(a.scope),
+/** Detach of an existing attachment (the engine does not call the policy). */
+export const detachChange = (a: Pick<Attachment, 'scope' | 'kind' | 'policy'>): Change => ({
+  detach: true,
+  scope: normalizeScope(a.scope),
   kind: a.kind,
   policy: getAddress(a.policy),
   opMask: 0,
-  data: '0x',
-})
-
-export const roleChange = (role: FreezeRole, account: Address, enabled = true): RoleChange => ({
-  role,
-  account: getAddress(account),
-  enabled,
+  settings: '0x',
 })
 
 /** The attachment a change targets: `attachmentId(scopeKey(scope), kind, policy)`. */
-export const changeAttachmentId = (change: Pick<AttachmentChange, 'scope' | 'kind' | 'policy'>): Hex =>
+export const changeAttachmentId = (change: Pick<Change, 'scope' | 'kind' | 'policy'>): Hex =>
   attachmentId(scopeKey(normalizeScope(change.scope)), change.kind, change.policy)
 
 // ---------------------------------------------------------------------------------------------
@@ -140,53 +125,53 @@ export const changeAttachmentId = (change: Pick<AttachmentChange, 'scope' | 'kin
 
 /**
  * Adds `change` to a draft: a later edit of the same attachment replaces the earlier one, and a
- * DETACH of an attachment that only exists in the draft just drops it.
+ * detach of an attachment that only exists in the draft just drops it.
  */
 export function mergeChange(
-  draft: readonly AttachmentChange[],
-  change: AttachmentChange,
-  isAttached: (attachmentId: Hex) => boolean,
-): AttachmentChange[] {
+  draft: readonly Change[],
+  change: Change,
+  isAttached: (id: Hex) => boolean,
+): Change[] {
   const id = changeAttachmentId(change)
   const rest = draft.filter((c) => changeAttachmentId(c) !== id)
-  if (change.changeType === ChangeType.DETACH && !isAttached(id)) return rest
+  if (change.detach && !isAttached(id)) return rest
   return [...rest, change]
 }
 
-/** Same for roles: the last edit of `(role, account)` wins. */
-export const mergeRole = (draft: readonly RoleChange[], change: RoleChange): RoleChange[] => [
-  ...draft.filter((r) => !(r.role === change.role && isAddressEqual(r.account, change.account))),
-  change,
-]
+export const mergeChanges = (
+  draft: readonly Change[],
+  changes: readonly Change[],
+  isAttached: (id: Hex) => boolean,
+): Change[] => changes.reduce((acc, c) => mergeChange(acc, c, isAttached), [...draft])
 
-/** DETACHes first (they free slots for the SETs under the per-scope cap, `MAX_ATTACHMENTS_PER_SCOPE`), order otherwise kept. */
-export const sortForApply = (changes: readonly AttachmentChange[]): AttachmentChange[] => [
-  ...changes.filter((c) => c.changeType === ChangeType.DETACH),
-  ...changes.filter((c) => c.changeType === ChangeType.SET),
-]
+const isTimelockChange = (deployment: V2Deployment, c: Change) =>
+  c.kind === Kind.POLICY && policyNameOf(deployment, c.policy) === 'timelock'
 
-/** Merges change sets (templates on top of a draft), in order. */
-export function combineChangeSets(sets: readonly ChangeSet[], isAttached: (id: Hex) => boolean): ChangeSet {
-  let changes: AttachmentChange[] = []
-  let roles: RoleChange[] = []
-  for (const set of sets) {
-    for (const change of set.changes) changes = mergeChange(changes, change, isAttached)
-    for (const role of set.roles) roles = mergeRole(roles, role)
-  }
-  return { changes: sortForApply(changes), roles }
+/**
+ * The order `configure` needs: detaches first (they free slots under the per-scope cap), then
+ * everything else, Timelocks on `*` before narrower ones (a narrow owners' Timelock needs a covering
+ * one already attached, `TimelockNotCoveringConfiguration`).
+ */
+export function sortForApply(deployment: V2Deployment, changes: readonly Change[]): Change[] {
+  const attaches = changes.filter((c) => !c.detach)
+  const timelocks = attaches
+    .filter((c) => isTimelockChange(deployment, c))
+    .sort((a, b) => a.scope.callMatch - b.scope.callMatch)
+  return [
+    ...changes.filter((c) => c.detach),
+    ...attaches.filter((c) => !isTimelockChange(deployment, c)),
+    ...timelocks,
+  ]
 }
 
 // ---------------------------------------------------------------------------------------------
-// Projection and validation (mirror of SPEC §5.2, so the UI refuses what `apply` would revert)
+// Projection and validation (so the UI refuses what `configure` would revert)
 // ---------------------------------------------------------------------------------------------
 
-/**
- * The attachments after applying `changes` to `current`, in order (pure). Settings are decoded from
- * the change data for known policies, so the org chart and lint can show the draft.
- */
+/** The attachments after applying `changes` to `current`, in order (pure). Freeze state is kept. */
 export function projectAttachments(
   current: readonly Attachment[],
-  changes: readonly AttachmentChange[],
+  changes: readonly Change[],
   deployment: V2Deployment,
 ): Attachment[] {
   const result = [...current]
@@ -195,17 +180,16 @@ export function projectAttachments(
     const key = scopeKey(scope)
     const id = attachmentId(key, change.kind, change.policy)
     const index = result.findIndex((a) => a.attachmentId === id)
-    if (change.changeType === ChangeType.DETACH) {
+    if (change.detach) {
       if (index >= 0) result.splice(index, 1)
       continue
     }
-    const policyName =
-      change.kind === AttachmentKind.POLICY ? policyNameOf(deployment, change.policy) : undefined
+    const policyName = change.kind === Kind.POLICY ? policyNameOf(deployment, change.policy) : undefined
     let settings: PolicySettings | undefined
     let settingsError: string | undefined
     if (policyName) {
       try {
-        settings = decodeSettings(policyName, change.data)
+        settings = decodeSettings(policyName, change.settings)
       } catch (error) {
         settingsError = error instanceof Error ? error.message : String(error)
       }
@@ -215,15 +199,13 @@ export function projectAttachments(
       scopeKey: key,
       scope,
       kind: change.kind,
-      policy: change.policy,
-      opMask: normalizeOpMask(change.opMask),
-      policyLevel: policyName
-        ? POLICY_INFO[policyName].level
-        : (result[index]?.policyLevel ?? PolicyLevel.CALL),
+      policy: getAddress(change.policy),
+      opMask: normalizeOpMask(change.kind, change.opMask),
       level: levelOf(scope),
       policyName,
       settings,
       settingsError,
+      freeze: result[index]?.freeze,
     }
     if (index >= 0) result[index] = next
     else result.push(next)
@@ -231,101 +213,115 @@ export function projectAttachments(
   return result
 }
 
-export type ChangeProblem = {
-  /** Index in `set.changes`, or in `set.roles` when `role` is true; undefined for the whole set. */
-  index?: number
-  role?: boolean
-  message: string
+export type ChangeProblem = { index: number; message: string }
+
+/** The ids a Timelock must sit at to cover `actor`'s call to `engine.configure` (SPEC.md §5.1). */
+export const configureCoverIds = (deployment: V2Deployment, actor: Address): Hex[] =>
+  Array.from({ length: isAny(actor) ? ACTOR_LEVEL_OFFSET : LEVEL_COUNT }, (_, level) =>
+    attachmentId(
+      scopeKey(scopeAt(level, actor, deployment.engine, SELECTORS.configure)),
+      Kind.POLICY,
+      deployment.policies.timelock,
+    ),
+  )
+
+/**
+ * `TimelockNotCoveringConfiguration`: a Timelock with `delay > 0` at OWNERS or ANY needs a Timelock
+ * attachment (CALL in its mask, delay at least as long) matching that actor's `engine.configure`
+ * call, attached before it or itself.
+ */
+export function coversConfiguration(
+  deployment: V2Deployment,
+  state: readonly Attachment[],
+  id: Hex,
+  actor: Address,
+  opMask: number,
+  delay: number,
+): boolean {
+  for (const cover of configureCoverIds(deployment, actor)) {
+    if (cover === id) {
+      if (opMask & OP_CALL) return true
+      continue
+    }
+    const a = state.find((x) => x.attachmentId === cover)
+    const s = a?.settings?.policy === 'timelock' ? a.settings.settings : undefined
+    if (a && s && s.delay >= delay && a.opMask & OP_CALL) return true
+  }
+  return false
 }
 
 /**
- * Problems that would make `applyConfiguration` (or `configureImmediately`) revert, checked
- * locally: scope normalization, op mask, built-in shape, DELEGATECALL grant level, 6 attachments
- * per scope, DETACH of something not attached, `DELAY ≥` timelock delay at ANY / OWNERS, settings,
- * role caps. Unknown policy contracts are only checked for shape (the engine checks ERC-165).
+ * Every configure-time rule of the engine (SPEC.md §3.2) and of the known policies, applied in order
+ * on a projection: `InvalidScope`, `AllowNotPerActor`, `DelegateCallNotExact`, `InvalidOpMask`,
+ * `InvalidPolicy` (shape only: the engine checks ERC-165), the policies' `InvalidSettings` and
+ * `TimelockNotCoveringConfiguration`, `TooManyAttachments`, `NotAttached`.
  */
-export function validateChangeSet(
+export function validateChanges(
   current: readonly Attachment[],
-  set: ChangeSet,
-  context: {
-    deployment: V2Deployment
-    delay: bigint
-    roles: { guardians: readonly Address[]; lifters: readonly Address[] }
-  },
+  changes: readonly Change[],
+  context: { deployment: V2Deployment; safe: Address },
 ): ChangeProblem[] {
+  const { deployment } = context
   const problems: ChangeProblem[] = []
   let state = [...current]
-  set.changes.forEach((change, index) => {
+  changes.forEach((change, index) => {
     const add = (message: string) => problems.push({ index, message })
     const { scope } = change
-    if (!isNormalized(scope) || (namesTo(scope.callMatch) && isAddressEqual(scope.to, zeroAddress))) {
-      add('Invalid scope: open parts must be zero and a named target cannot be the zero address')
+    if (!isNormalized(scope)) {
+      add('Invalid scope: a named contract cannot be the zero address, open parts must be zero')
       return
     }
     const id = changeAttachmentId(change)
-    if (change.changeType === ChangeType.DETACH) {
+    if (change.detach) {
       if (!state.some((a) => a.attachmentId === id)) add('Not attached')
-      state = projectAttachments(state, [change], context.deployment)
+      state = projectAttachments(state, [change], deployment)
       return
     }
-    const opMask = normalizeOpMask(change.opMask)
-    if (opMask > OP_ALL) add(`Invalid op mask ${change.opMask}`)
-    if (change.kind !== AttachmentKind.POLICY) {
-      if (!isAddressEqual(change.policy, zeroAddress) || size(change.data) !== 0)
-        add('Allow / Deny take no policy and no settings')
-      if (change.kind === AttachmentKind.ALLOW && opMask & OP_DELEGATECALL && levelOf(scope) !== EXACT_LEVEL)
-        add('DELEGATECALL can only be allowed for one actor on one function of one contract')
-    } else {
-      const name = policyNameOf(context.deployment, change.policy)
+    if (change.opMask > OP_ALL || change.opMask < 0) add(`Invalid op mask ${change.opMask}`)
+    const opMask = normalizeOpMask(change.kind, change.opMask)
+    if (change.kind === Kind.POLICY) {
       if (isAddressEqual(change.policy, zeroAddress)) add('Pick a policy')
+      const name = policyNameOf(deployment, change.policy)
       if (name) {
         try {
-          const value = decodeSettings(name, change.data)
-          for (const message of validateSettings(value)) add(message)
-          const actor = scope.actor
+          const value = decodeSettings(name, change.settings)
+          for (const message of validateSettings(value, { safe: context.safe, actor: scope.actor }))
+            add(message)
           if (
             value.policy === 'timelock' &&
-            (isAddressEqual(actor, ANY) || isAddressEqual(actor, OWNERS)) &&
-            BigInt(value.settings.delay) > context.delay
+            value.settings.delay > 0 &&
+            (isAny(scope.actor) || isOwners(scope.actor)) &&
+            !coversConfiguration(deployment, state, id, scope.actor, opMask, value.settings.delay)
           )
-            add(`Timelock longer than the configuration delay (${context.delay}s): the engine refuses it`)
+            add(
+              `A ${actorLabel(scope.actor)} Timelock needs one at least as long covering engine.configure ` +
+                '(attach a Timelock at (Owners, *) first): otherwise the owners could detach it faster than it delays',
+            )
         } catch {
           add('Settings do not decode')
         }
       }
+    } else {
+      if (!isAddressEqual(change.policy, zeroAddress) || size(change.settings) !== 0)
+        add('Allow / Deny take no policy and no settings')
+      if (change.kind === Kind.ALLOW) {
+        if (isAny(scope.actor)) add('An Allow must name an actor (Owners or a module), never Everyone')
+        if (opMask & OP_DELEGATECALL && levelOf(scope) !== EXACT_LEVEL)
+          add('DELEGATECALL can only be allowed for one actor on one function of one contract')
+      }
     }
-    const key = scopeKey(scope)
+    const key = scopeKey(normalizeScope(scope))
     const exists = state.some((a) => a.attachmentId === id)
     if (!exists && state.filter((a) => a.scopeKey === key).length >= MAX_ATTACHMENTS_PER_SCOPE)
       add(`At most ${MAX_ATTACHMENTS_PER_SCOPE} attachments per scope`)
-    state = projectAttachments(state, [change], context.deployment)
-  })
-
-  const members = {
-    0: [...context.roles.guardians],
-    1: [...context.roles.lifters],
-  } as Record<FreezeRole, Address[]>
-  set.roles.forEach((change, index) => {
-    if (isAddressEqual(change.account, zeroAddress)) {
-      problems.push({ index, role: true, message: 'A role member cannot be the zero address' })
-      return
-    }
-    const list = members[change.role]
-    const at = list.findIndex((m) => isAddressEqual(m, change.account))
-    if (change.enabled && at < 0) list.push(change.account)
-    if (!change.enabled && at >= 0) list.splice(at, 1)
-    if (list.length > MAX_ROLE_MEMBERS)
-      problems.push({ index, role: true, message: `At most ${MAX_ROLE_MEMBERS} members per role` })
+    state = projectAttachments(state, [change], deployment)
   })
   return problems
 }
 
 // ---------------------------------------------------------------------------------------------
-// Root and calldata
+// Owner calls
 // ---------------------------------------------------------------------------------------------
-
-/** `keccak256(abi.encode(changes, roles))`, what `requestConfiguration` commits to. */
-export const changeSetRoot = (set: ChangeSet): Hex => configurationRoot(set.changes, set.roles)
 
 /** A transaction the owners sign (execTransaction fields minus gas, which V2 requires to be zero). */
 export type OwnerCall = { to: Address; value: bigint; data: Hex; operation: Operation; description: string }
@@ -341,77 +337,22 @@ const call = (to: Address, data: Hex, description: string): OwnerCall => ({
 const safeAdminAbi = parseAbi([
   'function setGuard(address guard)',
   'function setModuleGuard(address moduleGuard)',
-  'function setFallbackHandler(address handler)',
-  'function multiSend(bytes transactions) payable',
 ])
 
-const count = (set: ChangeSet) =>
-  `${set.changes.length} change${set.changes.length === 1 ? '' : 's'}, ${set.roles.length} role${set.roles.length === 1 ? '' : 's'}`
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
-/** Builders for the engine calls a Safe makes (msg.sender is the Safe). */
-export const engineCalls = {
-  /** Only before the engine is the Safe's guard or module guard (`GuardAlreadyEnabled`). */
-  configureImmediately: (engine: Address, set: ChangeSet): OwnerCall =>
-    call(
-      engine,
-      encodeFunctionData({
-        abi: policyEngineV2Abi,
-        functionName: 'configureImmediately',
-        args: [set.changes, set.roles],
-      }),
-      `configureImmediately(${count(set)})`,
-    ),
+/**
+ * `engine.configure(changes)` as an owner transaction. Once the engine guards the Safe it must be a
+ * top-level CALL with zero value (never inside a batch, `GuardTargetDenied`); the owners' Timelock,
+ * freeze and co-signer apply to it.
+ */
+export const configureCall = (engine: Address, changes: readonly Change[]): OwnerCall =>
+  call(
+    engine,
+    encodeFunctionData({ abi: policyGuardAbi, functionName: 'configure', args: [changes] }),
+    `configure(${plural(changes.length, 'change')})`,
+  )
 
-  requestConfiguration: (engine: Address, root: Hex): OwnerCall =>
-    call(
-      engine,
-      encodeFunctionData({ abi: policyEngineV2Abi, functionName: 'requestConfiguration', args: [root] }),
-      `requestConfiguration(${root})`,
-    ),
-
-  applyConfiguration: (engine: Address, set: ChangeSet): OwnerCall =>
-    call(
-      engine,
-      encodeFunctionData({
-        abi: policyEngineV2Abi,
-        functionName: 'applyConfiguration',
-        args: [set.changes, set.roles],
-      }),
-      `applyConfiguration(${count(set)})`,
-    ),
-
-  invalidateRoot: (engine: Address, root: Hex): OwnerCall =>
-    call(
-      engine,
-      encodeFunctionData({ abi: policyEngineV2Abi, functionName: 'invalidateRoot', args: [root] }),
-      `invalidateRoot(${root})`,
-    ),
-
-  /** A guardian (EOA or Safe) freezes every listed Safe; frozen / cooling ones are skipped. */
-  freeze: (engine: Address, safes: readonly Address[]): OwnerCall =>
-    call(
-      engine,
-      encodeFunctionData({ abi: policyEngineV2Abi, functionName: 'freeze', args: [safes] }),
-      `freeze(${safes.length} Safe${safes.length === 1 ? '' : 's'})`,
-    ),
-
-  freezeActor: (engine: Address, safe: Address, actor: Address): OwnerCall =>
-    call(
-      engine,
-      encodeFunctionData({ abi: policyEngineV2Abi, functionName: 'freezeActor', args: [safe, actor] }),
-      `freezeActor(${actor})`,
-    ),
-
-  /** `actor = ANY` lifts the Safe-wide freeze. */
-  lift: (engine: Address, safe: Address, actor: Address): OwnerCall =>
-    call(
-      engine,
-      encodeFunctionData({ abi: policyEngineV2Abi, functionName: 'lift', args: [safe, actor] }),
-      `lift(${actorLabel(actor)})`,
-    ),
-}
-
-/** Safe self-calls used when installing the engine. */
 export const safeCalls = {
   setGuard: (safe: Address, guard: Address): OwnerCall =>
     call(
@@ -425,30 +366,27 @@ export const safeCalls = {
       encodeFunctionData({ abi: safeAdminAbi, functionName: 'setModuleGuard', args: [guard] }),
       `setModuleGuard(${guard})`,
     ),
-  setFallbackHandler: (safe: Address, handler: Address): OwnerCall =>
-    call(
-      safe,
-      encodeFunctionData({ abi: safeAdminAbi, functionName: 'setFallbackHandler', args: [handler] }),
-      `setFallbackHandler(${handler})`,
-    ),
 }
 
 /**
- * Installs V2 on a Safe that has no V2 guard yet, in the only order that also works one
- * transaction at a time (WP7a, `Install.test.ts`): configure first (`GuardAlreadyEnabled` once
- * either guard is set), then the fallback handler (ERC-1271 only accepts on-chain approvals), the
- * module guard, and the transaction guard last (after `setGuard` every further owner transaction
- * is checked, so `setModuleGuard` would need the owners' Allow and wait their Timelock). As one
- * MultiSend batch the guard checks the batch once, before any of it runs. `configureImmediately`
- * only takes an empty configuration (SPEC §14 D-25): a Safe with leftovers changes them through
- * the delayed path first.
+ * Installs the engine (SPEC.md §3.3): `[configure, setModuleGuard, setGuard]` in one owner batch,
+ * before any guard runs. Leftovers from an earlier install are detached first in the same
+ * `configure`. The fallback handler is left alone (the app recommends `TokenCallbackHandler`).
  */
-export const installCalls = (safe: Address, deployment: V2Deployment, set: ChangeSet): OwnerCall[] => [
-  engineCalls.configureImmediately(deployment.engine, set),
-  safeCalls.setFallbackHandler(safe, deployment.fallbackHandler),
-  safeCalls.setModuleGuard(safe, deployment.engine),
-  safeCalls.setGuard(safe, deployment.engine),
-]
+export function installCalls(
+  safe: Address,
+  deployment: V2Deployment,
+  changes: readonly Change[],
+  leftovers: readonly Attachment[] = [],
+): OwnerCall[] {
+  const touched = new Set(changes.map(changeAttachmentId))
+  const detaches = leftovers.filter((a) => !touched.has(a.attachmentId)).map(detachChange)
+  return [
+    configureCall(deployment.engine, sortForApply(deployment, [...detaches, ...changes])),
+    safeCalls.setModuleGuard(safe, deployment.engine),
+    safeCalls.setGuard(safe, deployment.engine),
+  ]
+}
 
 /**
  * V2 needs Safe ≥ 1.5.0: older Safes have no module guard, so every module would run unchecked.
@@ -459,143 +397,82 @@ export function supportsV2(version: string): boolean {
   return major > 1 || (major === 1 && minor >= 5)
 }
 
-// ---------------------------------------------------------------------------------------------
-// MultiSend batching
-// ---------------------------------------------------------------------------------------------
-
-/** `multiSend(bytes)` payload: packed `(uint8 op, address to, uint256 value, uint256 len, bytes data)`. */
-export const encodeMultiSend = (
-  calls: readonly Pick<OwnerCall, 'to' | 'value' | 'data' | 'operation'>[],
-): Hex =>
-  encodeFunctionData({
-    abi: safeAdminAbi,
-    functionName: 'multiSend',
-    args: [
-      concat(
-        calls.map((c) =>
-          encodePacked(
-            ['uint8', 'address', 'uint256', 'uint256', 'bytes'],
-            [c.operation, c.to, c.value, BigInt(size(c.data)), c.data],
-          ),
-        ),
-      ),
-    ],
-  })
-
-/** One DELEGATECALL to a trusted batch contract (MultiSendCallOnly when every call is a CALL). */
-export const batchCall = (multiSend: Address, calls: readonly OwnerCall[]): OwnerCall => ({
-  to: getAddress(multiSend),
-  value: 0n,
-  data: encodeMultiSend(calls),
-  operation: Operation.DELEGATECALL,
-  description: calls.map((c) => c.description).join(' + '),
-})
-
-const CONFIG_SELECTORS: readonly Hex[] = [
-  SELECTORS.requestConfiguration,
-  SELECTORS.applyConfiguration,
-  SELECTORS.invalidateRoot,
-]
-
-/** Calls the engine only accepts as a top-level zero-value CALL (SPEC §5.1), never inside a batch. */
-export const isConfigurationCall = (engine: Address, c: Pick<OwnerCall, 'to' | 'data'>): boolean =>
+/** A top-level `engine.configure` CALL: what TimelockPolicy marks `isConfiguration`. */
+export const isConfigurationCall = (
+  engine: Address,
+  c: Pick<OwnerCall, 'to' | 'data' | 'operation'>,
+): boolean =>
+  c.operation === Operation.CALL &&
   isAddressEqual(c.to, engine) &&
   size(c.data) >= 4 &&
-  CONFIG_SELECTORS.includes(c.data.slice(0, 10).toLowerCase() as Hex)
-
-/**
- * Turns a list of calls into the fewest owner transactions: configuration-path calls alone, the
- * rest batched in order through `multiSend` (≤ 8 calls per batch, the engine's cap), a single call
- * left as is.
- */
-export function planOwnerTransactions(
-  engine: Address,
-  multiSend: Address,
-  calls: readonly OwnerCall[],
-): OwnerCall[] {
-  const out: OwnerCall[] = []
-  let pending: OwnerCall[] = []
-  const flush = () => {
-    for (let i = 0; i < pending.length; i += MAX_BATCH_CALLS) {
-      const chunk = pending.slice(i, i + MAX_BATCH_CALLS)
-      out.push(chunk.length === 1 ? chunk[0]! : batchCall(multiSend, chunk))
-    }
-    pending = []
-  }
-  for (const c of calls) {
-    if (isConfigurationCall(engine, c)) {
-      flush()
-      out.push(c)
-    } else pending.push(c)
-  }
-  flush()
-  return out
-}
+  c.data.slice(0, 10).toLowerCase() === SELECTORS.configure
 
 // ---------------------------------------------------------------------------------------------
 // Sentences
 // ---------------------------------------------------------------------------------------------
 
-/** `any call`, `any function on USDC`, `transfer on any contract`, `USDC.transfer`. */
+const shortAddress = (address: Address) => `${address.slice(0, 6)}…${address.slice(-4)}`
+
+/** `any call`, `any function of USDC`, `USDC.transfer`. */
 export function callPhrase(scope: Scope, ctx: LabelContext = {}): string {
-  const target = () => ctx.nameOf?.(getAddress(scope.to)) ?? `${scope.to.slice(0, 6)}…${scope.to.slice(-4)}`
-  const fn = () => selectorName(scope.selector) ?? scope.selector
-  switch (scope.callMatch) {
-    case CallMatch.ANY:
-      return 'any call'
-    case CallMatch.TO:
-      return `any function on ${target()}`
-    case CallMatch.SELECTOR:
-      return `${fn()} on any contract`
-    case CallMatch.TO_SELECTOR:
-      return `${target()}.${fn()}`
-  }
+  if (scope.callMatch === CallMatch.ANY) return 'any call'
+  const target = ctx.nameOf?.(getAddress(scope.to)) ?? shortAddress(scope.to)
+  if (scope.callMatch === CallMatch.CONTRACT) return `any function of ${target}`
+  return `${target}.${selectorName(scope.selector) ?? scope.selector}`
+}
+
+const opsPhrase = (kind: Kind, opMask: number): string => {
+  const mask = normalizeOpMask(kind, opMask)
+  if (kind === Kind.ALLOW)
+    return mask & OP_DELEGATECALL
+      ? mask & OP_CALL
+        ? ' (CALL and DELEGATECALL)'
+        : ' (DELEGATECALL only)'
+      : ''
+  return mask === OP_ALL ? '' : mask === OP_CALL ? ' (CALL only)' : ' (DELEGATECALL only)'
+}
+
+/** What re-configuring an attached policy resets. */
+const RECONFIGURE_NOTE: Partial<Record<string, string>> = {
+  limit: ' (resets the budget: spent goes back to 0)',
+  timelock: ' (schedules wait the full delay again, from the change; the freeze state is kept)',
 }
 
 /**
- * The builder's live sentence: `Attaches Limit 5,000 USDC / month to Ops, any call`,
- * `Allows Ops: USDC.transfer`, `Removes Timelock 24h from Owners, any call`.
+ * The builder's live sentence: `Ops may call USDC.transfer`, `Ops may call USDC.transfer, with
+ * conditions: to Vendor A`, `Owners: Timelock 24h, guardians G on any call`, `Removes ...`.
  */
 export function describeChange(
-  change: AttachmentChange,
+  change: Change,
   deployment: V2Deployment,
   ctx: LabelContext = {},
-  /** The attachment already exists: a SET re-configures it (a Limit starts fresh budgets). */
+  /** The attachment already exists: an attach re-configures it. */
   attached = false,
 ): string {
   const who = actorLabel(change.scope.actor, ctx.nameOf)
   const what = callPhrase(change.scope, ctx)
-  const ops = normalizeOpMask(change.opMask) & OP_DELEGATECALL ? ' (DELEGATECALL included)' : ''
+  const ops = opsPhrase(change.kind, change.opMask)
   const name = policyNameOf(deployment, change.policy)
   const policyLabel = (): string => {
-    if (!name) return `policy ${change.policy}`
-    if (change.changeType === ChangeType.DETACH) return POLICY_INFO[name].label
+    if (!name) return `policy ${shortAddress(change.policy)}`
+    if (change.detach) return POLICY_INFO[name].label
     try {
-      return settingsLabel(decodeSettings(name, change.data), ctx)
+      return settingsLabel(decodeSettings(name, change.settings), ctx)
     } catch {
       return `${POLICY_INFO[name].label} (bad settings)`
     }
   }
-  const detach = change.changeType === ChangeType.DETACH
   switch (change.kind) {
-    case AttachmentKind.ALLOW:
-      return `${detach ? 'Stops allowing' : 'Allows'} ${who}: ${what}${detach ? '' : ops}`
-    case AttachmentKind.DENY:
-      return `${detach ? 'Stops denying' : 'Denies'} ${who}: ${what}`
+    case Kind.ALLOW:
+      return change.detach ? `${who} may no longer call ${what}` : `${who} may call ${what}${ops}`
+    case Kind.DENY:
+      return change.detach ? `Stops denying ${who}: ${what}` : `Denies ${who}: ${what}${ops}`
     default:
-      if (detach) return `Removes ${policyLabel()} from ${who}, ${what}`
-      if (!attached) return `Attaches ${policyLabel()} to ${who}, ${what}`
-      // LimitPolicy versions its budgets on every configure (review F10).
-      return `Re-configures ${policyLabel()} for ${who}, ${what}${RECONFIGURE_NOTE[name ?? ''] ?? ''}`
+      if (change.detach) return `Removes ${policyLabel()} from ${who}, ${what}`
+      return `${attached ? 'Re-configures' : 'Adds'} ${policyLabel()} for ${who}, ${what}${ops}${attached ? (RECONFIGURE_NOTE[name ?? ''] ?? '') : ''}`
   }
 }
 
-/** What re-configuring an attached policy resets (LimitPolicy versions its budgets, review F10). */
-const RECONFIGURE_NOTE: Record<string, string> = {
-  limit: ' (resets the budget: spent goes back to 0)',
-  // TimelockPolicy counts the delay from the latest configuration (SPEC §14 D-20).
-  timelock: ' (calls already scheduled wait the full delay again, from the change)',
-}
-
-export const describeRoleChange = (change: RoleChange, ctx: LabelContext = {}): string =>
-  `${change.enabled ? 'Adds' : 'Removes'} ${ctx.nameOf?.(getAddress(change.account)) ?? change.account} ${change.enabled ? 'as' : 'from'} ${change.role === 0 ? 'guardian' : 'lifter'}`
+/** Timelock settings of the given attachments. */
+export const timelockSettingsOf = (attachments: readonly Attachment[]): TimelockSettings[] =>
+  attachments.flatMap((a) => (a.settings?.policy === 'timelock' ? [a.settings.settings] : []))

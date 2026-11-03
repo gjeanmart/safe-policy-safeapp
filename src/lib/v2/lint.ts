@@ -1,68 +1,54 @@
 import { type Address, type Hex, isAddressEqual } from 'viem'
-import type { Attachment, Roles } from './attachments'
+import type { Attachment } from './attachments'
+import { configureCoverIds } from './changes'
 import {
-  AUTHORITY_TARGETS,
-  CONFIG_SELECTORS,
+  NFT_SELECTORS,
   OWNER_MANAGEMENT_SELECTORS,
-  POLICY_INFO,
-  PRICED_SIGN_LIB_SELECTORS,
-  PRICED_TOKEN_SELECTORS,
   SELECTORS,
+  SPEND_SELECTORS,
   type V2Deployment,
 } from './policies'
 import {
-  ANY,
-  AttachmentKind,
   CallMatch,
+  EXACT_LEVEL,
+  Kind,
+  OP_CALL,
   OP_DELEGATECALL,
   OWNERS,
   actorLabel,
   callLabel,
-  namesSelector,
-  namesTo,
+  isAny,
+  isOwners,
+  scopeCovers,
 } from './scopes'
-import { type LabelContext, type TimelockSettings, durationLabel } from './settings'
+import type { LabelContext } from './settings'
 
 /**
- * Lint rules over a (projected) configuration (PLAN §5 "Lint panel"). Pure: give it the
- * attachments after the draft (`projectAttachments`), the roles, the Safe's owners and modules and
- * the engine timings. `block` findings need an explicit confirmation in the UI; `warn` ones are
- * advice.
+ * Lint over a (projected) rev 3 configuration (DESIGN §9.6, ~12 rules). Pure: give it the
+ * attachments after the draft (`projectAttachments`) and the Safe's modules. `block` findings need
+ * an explicit confirmation in the UI; `warn` ones are advice. The engine's own configure rules are
+ * not repeated here: `validateChanges` refuses those.
  *
  * @example
- * lint({ safe, deployment, attachments: [allow(Agent, *)], roles, owners, modules: [agent], engine })
- * // → [{ rule: 'wildcard-allow-module', severity: 'block', message: 'Agent may call anything …', attachmentIds: [id] },
- * //    { rule: 'allow-without-freeze', severity: 'block', message: 'Agent has an Allow and no Freeze …', … }]
+ * lint({ safe, deployment, attachments: [allow (Agent, *)], modules: [agent] })
+ * // → [{ rule: 'wildcard-allow-module', severity: 'block', ... }, { rule: 'actor-no-guardian', ... }]
  */
 
 export type LintSeverity = 'block' | 'warn'
 
 export type LintRule =
   | 'wildcard-allow-module'
-  | 'call-wide-allow-module'
   | 'delegatecall-grant'
-  | 'global-policy'
-  | 'global-freeze'
-  | 'timelock-order'
-  | 'delay-below-timelock'
-  | 'limit-unpriceable-allow'
-  | 'limit-owners-unpriced'
-  | 'allow-without-freeze'
-  | 'freeze-misses-actor'
-  | 'freeze-on-recovery'
   | 'safe-target-allow-not-exact'
-  | 'quorum-on-module'
-  | 'module-timelock-no-window'
-  | 'no-guardian'
-  | 'owner-can-lift'
-  | 'fallback-handler'
-  | 'unknown-policy'
   | 'actor-not-module'
-  | 'config-path-unprotected'
-  | 'config-path-freeze'
-  | 'config-path-deny'
-  | 'raw-message-approval'
-  | 'authority-target-allow'
+  | 'unknown-policy'
+  | 'no-owners-timelock'
+  | 'timelock-not-covering-configure'
+  | 'actor-no-guardian'
+  | 'no-way-back'
+  | 'deny-covers-configure'
+  | 'limit-unlisted-spend'
+  | 'limit-nft-actor'
 
 export type LintFinding = { rule: LintRule; severity: LintSeverity; message: string; attachmentIds: Hex[] }
 
@@ -70,427 +56,213 @@ export type LintInput = {
   safe: Address
   deployment: V2Deployment
   attachments: readonly Attachment[]
-  roles: Roles
-  owners: readonly Address[]
   modules: readonly Address[]
-  engine: { delay: bigint; maxFreeze: bigint }
-  /** The Safe's current fallback handler, if known. */
-  fallbackHandler?: Address
   ctx?: LabelContext
 }
 
-const isAny = (a: Address) => isAddressEqual(a, ANY)
-const isOwners = (a: Address) => isAddressEqual(a, OWNERS)
-const same = (a: Address, b: Address) => isAddressEqual(a, b)
+const timelockOf = (a: Attachment) => (a.settings?.policy === 'timelock' ? a.settings.settings : undefined)
 
-const timelockDelay = (a: Attachment): bigint =>
-  a.settings?.policy === 'timelock' ? BigInt((a.settings.settings as TimelockSettings).delay) : 0n
-
-/** Actors with an exact ALLOW on the Safe's owner management: the Recovery role(s). */
-export function recoveryActors(safe: Address, attachments: readonly Attachment[]): Address[] {
-  const found: Address[] = []
-  for (const a of attachments) {
-    if (
-      a.kind === AttachmentKind.ALLOW &&
-      !isAny(a.scope.actor) &&
-      !isOwners(a.scope.actor) &&
-      a.scope.callMatch === CallMatch.TO_SELECTOR &&
-      same(a.scope.to, safe) &&
-      OWNER_MANAGEMENT_SELECTORS.includes(a.scope.selector.toLowerCase() as Hex) &&
-      !found.some((f) => same(f, a.scope.actor))
-    )
-      found.push(a.scope.actor)
-  }
-  return found
-}
-
-/** Can some call match both scopes (actor, target and selector compatible)? */
-const overlaps = (a: Attachment['scope'], b: Attachment['scope']): boolean =>
-  (isAny(a.actor) || isAny(b.actor) || same(a.actor, b.actor)) &&
-  (!namesTo(a.callMatch) || !namesTo(b.callMatch) || same(a.to, b.to)) &&
-  (!namesSelector(a.callMatch) ||
-    !namesSelector(b.callMatch) ||
-    a.selector.toLowerCase() === b.selector.toLowerCase())
-
-/** Whether LimitPolicy prices every call an ALLOW at this scope grants (SPEC §8.4). */
-function isPriceable(scope: Attachment['scope'], signLib: Address): boolean {
-  if (!namesSelector(scope.callMatch)) return false
-  const selector = scope.selector.toLowerCase() as Hex
-  if (BigInt(selector) === 0n) return true // empty calldata: native value only
-  if (PRICED_TOKEN_SELECTORS.includes(selector)) return true
-  return (
-    PRICED_SIGN_LIB_SELECTORS.includes(selector) && (!namesTo(scope.callMatch) || same(scope.to, signLib))
-  )
-}
-
-/** Can an ALLOW at this scope grant `PolicySignLib.signMessage` (matched as a CALL, SPEC §14 D-22)? */
-function grantsRawMessage(scope: Attachment['scope'], signLib: Address): boolean {
-  const message = scope.selector.toLowerCase() === SELECTORS.signMessage.toLowerCase()
-  switch (scope.callMatch) {
-    case CallMatch.ANY:
-      return true
-    case CallMatch.TO:
-      return same(scope.to, signLib)
-    case CallMatch.SELECTOR:
-      return message
-    default:
-      return message && same(scope.to, signLib)
-  }
-}
-
-/** An exact scope `(Owners | Everyone, engine.<configuration selector>)`: the configuration path. */
-const isConfigScope = (scope: Attachment['scope'], engine: Address): boolean =>
-  (isOwners(scope.actor) || isAny(scope.actor)) &&
-  scope.callMatch === CallMatch.TO_SELECTOR &&
-  same(scope.to, engine) &&
-  CONFIG_SELECTORS.includes(scope.selector.toLowerCase() as Hex)
-
-/** Runs every rule; `block` findings first. */
 export function lint(input: LintInput): LintFinding[] {
-  const { safe, deployment, attachments, roles, owners, modules, engine, ctx = {} } = input
+  const { safe, deployment, attachments, modules, ctx = {} } = input
+  const { engine } = deployment
   const findings: LintFinding[] = []
-  const add = (rule: LintRule, severity: LintSeverity, message: string, ids: Hex[] = []) =>
-    findings.push({ rule, severity, message, attachmentIds: ids })
+  const add = (rule: LintRule, severity: LintSeverity, message: string, list: readonly Attachment[]) =>
+    findings.push({ rule, severity, message, attachmentIds: list.map((a) => a.attachmentId) })
   const who = (actor: Address) => actorLabel(actor, ctx.nameOf)
-  const what = (a: Attachment) => callLabel(a.scope, ctx.nameOf)
+  const where = (a: Attachment) => callLabel(a.scope, ctx.nameOf)
+  const isModule = (actor: Address) => modules.some((m) => isAddressEqual(m, actor))
+  const allows = attachments.filter((a) => a.kind === Kind.ALLOW)
+  /** What applies to `actor`: its own attachments and Everyone's. */
+  const reaching = (actor: Address) =>
+    attachments.filter((a) => isAny(a.scope.actor) || isAddressEqual(a.scope.actor, actor))
+  const actors = [...new Set(attachments.map((a) => a.scope.actor))].filter((a) => !isAny(a))
 
-  const allows = attachments.filter((a) => a.kind === AttachmentKind.ALLOW)
-  const policies = attachments.filter((a) => a.kind === AttachmentKind.POLICY)
-  const recovery = recoveryActors(safe, attachments)
-  const isRecovery = (actor: Address) => recovery.some((r) => same(r, actor))
-
-  // --- Grants ---
+  // 1. A module granted a whole contract or everything.
   for (const a of allows) {
-    const { actor, callMatch } = a.scope
-    if (callMatch === CallMatch.ANY && !isOwners(actor)) {
-      add(
-        'wildcard-allow-module',
-        'block',
-        isAny(actor)
-          ? 'Allow for everyone on any call: every module, present and future, can do anything (calls to the Safe itself excepted)'
-          : `${who(actor)} may call anything (any contract, any function). Calls to the Safe itself still need an exact Allow`,
-        [a.attachmentId],
-      )
-    } else if (callMatch === CallMatch.SELECTOR && !isOwners(actor)) {
-      add(
-        'call-wide-allow-module',
-        'warn',
-        `${isAny(actor) ? 'Everyone' : who(actor)} may call ${what(a)} on any contract (every token, every vault): pair it with Recipients / Limit / Args`,
-        [a.attachmentId],
-      )
-    }
+    if (isOwners(a.scope.actor)) continue
+    if (a.scope.callMatch === CallMatch.ANY)
+      add('wildcard-allow-module', 'block', `${who(a.scope.actor)} may call anything, on any contract.`, [a])
+    else if (a.scope.callMatch === CallMatch.CONTRACT)
+      add('wildcard-allow-module', 'warn', `${who(a.scope.actor)} may call any function of ${where(a)}.`, [a])
+  }
+
+  // 2. DELEGATECALL grants run code with the Safe's storage.
+  for (const a of allows)
     if (a.opMask & OP_DELEGATECALL)
       add(
         'delegatecall-grant',
         'block',
-        `DELEGATECALL granted to ${who(actor)} on ${what(a)}: the target runs with the Safe's storage and can rewrite its guard, modules and owners`,
-        [a.attachmentId],
+        `${who(a.scope.actor)} may DELEGATECALL ${where(a)}: that code runs as the Safe and can change anything (owners, modules, guards).`,
+        [a],
       )
-    if (!isOwners(actor) && a.level !== 7 && namesTo(callMatch) && same(a.scope.to, safe))
+
+  // 3. Allows on the Safe or the engine should name one function.
+  for (const a of allows)
+    if (
+      a.scope.callMatch === CallMatch.CONTRACT &&
+      (isAddressEqual(a.scope.to, safe) || isAddressEqual(a.scope.to, engine))
+    )
       add(
         'safe-target-allow-not-exact',
-        'warn',
-        `This Allow does not let ${isAny(actor) ? 'modules' : who(actor)} call the Safe itself: that needs an Allow on one actor and one function`,
-        [a.attachmentId],
+        isOwners(a.scope.actor) ? 'warn' : 'block',
+        isOwners(a.scope.actor)
+          ? `The owners may call any function of ${where(a)}: name the functions.`
+          : `${who(a.scope.actor)}'s Allow on ${where(a)} does not count on the module path (F5): grant each function at its exact scope.`,
+        [a],
       )
-  }
 
-  // --- Raw message approvals (PolicySignLib.signMessage, a CALL since D-22) ---
-  const ownerSide = (p: Attachment) => isOwners(p.scope.actor) || isAny(p.scope.actor)
-  for (const a of allows.filter((a) => grantsRawMessage(a.scope, deployment.signLib))) {
-    const { actor, callMatch } = a.scope
-    if (isOwners(actor)) continue
-    // A module's (X, *) is already blocked as a wildcard.
-    if (callMatch === CallMatch.ANY) continue
-    add(
-      'raw-message-approval',
-      'block',
-      `${isAny(actor) ? 'Every module' : who(actor)} may approve any message as the Safe (PolicySignLib.signMessage): a permit for any token, an order, another Safe's transaction, which no budget or recipients list can see. Grant the typed entries (signPermit, signCowOrder) instead`,
-      [a.attachmentId],
-    )
-  }
-  const ownersRawMessage = allows.filter(
-    (a) => isOwners(a.scope.actor) && grantsRawMessage(a.scope, deployment.signLib),
+  // 4. Attachments on an actor that is not an enabled module.
+  for (const actor of actors)
+    if (!isOwners(actor) && !isModule(actor))
+      add(
+        'actor-not-module',
+        'warn',
+        `${who(actor)} is not an enabled module of this Safe: its attachments do nothing until it is.`,
+        attachments.filter((a) => isAddressEqual(a.scope.actor, actor)),
+      )
+
+  // 5. A policy contract the app does not know.
+  for (const a of attachments)
+    if (a.kind === Kind.POLICY && !a.policyName)
+      add(
+        'unknown-policy',
+        'block',
+        `${who(a.scope.actor)}, ${where(a)}: ${a.policy} is not a policy of this deployment. Only attach audited code: a policy runs on every matched transaction.`,
+        [a],
+      )
+
+  // 6. Configuration is instant without an owners' Timelock covering engine.configure.
+  const ownersCovers = new Set(configureCoverIds(deployment, OWNERS))
+  const ownersConfigTimelocks = attachments.filter(
+    (a) => ownersCovers.has(a.attachmentId) && (timelockOf(a)?.delay ?? 0) > 0 && a.opMask & OP_CALL,
   )
-  const ownersPricing = policies.filter(
-    (p) => ownerSide(p) && (p.policyName === 'limit' || p.policyName === 'recipients'),
-  )
-  if (ownersRawMessage.length > 0 && ownersPricing.length > 0)
+  if (ownersConfigTimelocks.length === 0)
     add(
-      'raw-message-approval',
+      'no-owners-timelock',
       'warn',
-      "The owners can approve raw messages (PolicySignLib.signMessage: nested-Safe signatures, logins). Their budget and recipients list cannot see what a message approves: only the owners' Timelock, Co-signer, Safenet and Quorum apply to it",
-      [...ownersRawMessage, ...ownersPricing].map((a) => a.attachmentId),
-    )
-
-  // --- Contracts that trust the Safe (review L-6): F5 only protects the Safe and the engine ---
-  for (const a of allows) {
-    const { actor, callMatch } = a.scope
-    if (isOwners(actor) || callMatch !== CallMatch.TO) continue
-    const target = AUTHORITY_TARGETS.find((t) => same(t.address, a.scope.to))
-    const module = modules.find((m) => same(m, a.scope.to) && !same(m, actor))
-    if (!target && !module) continue
-    add(
-      'authority-target-allow',
-      'warn',
-      target
-        ? `${isAny(actor) ? 'Every module' : who(actor)} may call any function of ${target.name}, which ${target.risk}: allow the functions it needs, one by one, with Recipients / Limit / Args`
-        : `${isAny(actor) ? 'Every module' : who(actor)} may call any function of the module ${who(module!)}, including its admin functions (they trust calls from the Safe): allow the functions it needs, one by one`,
-      [a.attachmentId],
-    )
-  }
-
-  // --- Configuration path (SPEC §5.1, §14 D-19): only exact-scope policies run there ---
-  const configAttachments = attachments.filter((a) => isConfigScope(a.scope, deployment.engine))
-  for (const p of policies.filter(
-    (p) =>
-      ownerSide(p) &&
-      p.scope.callMatch === CallMatch.ANY &&
-      (p.policyName === 'coSigner' || p.policyName === 'safenet' || p.policyName === 'quorum'),
-  )) {
-    const missing = [SELECTORS.requestConfiguration, SELECTORS.applyConfiguration].filter(
-      (selector) =>
-        !configAttachments.some(
-          (c) =>
-            c.kind === AttachmentKind.POLICY &&
-            same(c.policy, p.policy) &&
-            c.scope.selector.toLowerCase() === selector.toLowerCase(),
-        ),
-    )
-    if (missing.length === 0) continue
-    add(
-      'config-path-unprotected',
-      'warn',
-      `${POLICY_INFO[p.policyName!].label} at (${who(p.scope.actor)}, *) does not cover configuration changes (only the configuration delay does): attach it at (Owners, Policy engine.${missing
-        .map((m) => (m === SELECTORS.requestConfiguration ? 'requestConfiguration' : 'applyConfiguration'))
-        .join(') and (Owners, Policy engine.')}) too, or two owners can detach it`,
-      [p.attachmentId],
-    )
-  }
-  for (const c of configAttachments) {
-    if (c.policyName === 'freeze')
-      add(
-        'config-path-freeze',
-        'block',
-        `Freeze on ${what(c)} blocks the owners' configuration during a freeze: against a rogue guardian, configuration is their only way out`,
-        [c.attachmentId],
-      )
-    if (c.kind === AttachmentKind.DENY)
-      add(
-        'config-path-deny',
-        'warn',
-        `Deny on ${what(c)} never applies: the configuration path ignores Allow and Deny, so a Safe cannot lock itself out`,
-        [c.attachmentId],
-      )
-  }
-
-  // --- Global placement ---
-  for (const p of policies.filter((p) => isAny(p.scope.actor))) {
-    // Modules never reach the configuration path: there "everyone" is the owners.
-    if (isConfigScope(p.scope, deployment.engine)) continue
-    if (p.policyName === 'freeze') {
-      // WP7a: a Freeze at (Everyone, *) denies Recovery's swapOwner too, so "freeze, then recover" fails.
-      add(
-        'global-freeze',
-        'block',
-        "Freeze for everyone also blocks Recovery's swapOwner during a freeze (freeze, then recover no longer works): attach it per actor (Owners, Ops, Agent…) and leave Recovery out",
-        [p.attachmentId],
-      )
-      continue
-    }
-    const why: Partial<Record<NonNullable<Attachment['policyName']>, string>> = {
-      coSigner: 'recovery and every module then depend on the co-signer service',
-      safenet: 'recovery and every module then depend on Safenet',
-      quorum: 'Quorum denies every module transaction, recovery included',
-      timelock: 'it also delays recovery and every module, and binds the configuration delay',
-    }
-    add(
-      'global-policy',
-      'block',
-      `${p.policyName ? POLICY_INFO[p.policyName].label : 'A policy'} at (Everyone, ${what(p)}) applies to every actor, Recovery included${
-        p.policyName && why[p.policyName] ? `: ${why[p.policyName]}` : ''
-      }`,
-      [p.attachmentId],
-    )
-  }
-
-  // --- Delays: DELAY ≥ T (engine rule) and T < R < F ---
-  const ownersTimelocks = policies.filter(
-    (p) => p.policyName === 'timelock' && (isAny(p.scope.actor) || isOwners(p.scope.actor)),
-  )
-  for (const p of ownersTimelocks) {
-    if (timelockDelay(p) > engine.delay)
-      add(
-        'delay-below-timelock',
-        'block',
-        `Timelock ${durationLabel(timelockDelay(p))} is longer than the configuration delay ${durationLabel(engine.delay)}: the engine refuses it (owners could otherwise skip it through a configuration change)`,
-        [p.attachmentId],
-      )
-  }
-  const ownerWide = ownersTimelocks.filter((p) => p.scope.callMatch === CallMatch.ANY)
-  const T = ownerWide.reduce((max, p) => (timelockDelay(p) > max ? timelockDelay(p) : max), 0n)
-  for (const r of recovery) {
-    const own = policies.filter(
-      (p) =>
-        p.policyName === 'timelock' &&
-        p.scope.callMatch === CallMatch.ANY &&
-        (same(p.scope.actor, r) || isAny(p.scope.actor)),
-    )
-    const R = own.reduce((max, p) => (timelockDelay(p) > max ? timelockDelay(p) : max), 0n)
-    const ids = [...own, ...ownerWide].map((p) => p.attachmentId)
-    if (R === 0n)
-      add(
-        'timelock-order',
-        'block',
-        `${who(r)} can change owners with no delay: attach a Timelock at (${who(r)}, *)`,
-        ids,
-      )
-    else if (R <= T)
-      add(
-        'timelock-order',
-        'block',
-        `T < R broken: the owners' timelock (${durationLabel(T)}) is not shorter than ${who(r)}'s (${durationLabel(R)}), so owners cannot remove a rogue recovery in time`,
-        ids,
-      )
-    if (R !== 0n && R >= engine.maxFreeze)
-      add(
-        'timelock-order',
-        'block',
-        `R < F broken: ${who(r)}'s timelock (${durationLabel(R)}) outlasts the longest freeze (${durationLabel(engine.maxFreeze)}), so recovery cannot finish while the Safe is frozen`,
-        own.map((p) => p.attachmentId),
-      )
-  }
-
-  // --- Limit next to unpriceable Allows ---
-  for (const limit of policies.filter((p) => p.policyName === 'limit')) {
-    const passUnpriced = limit.settings?.policy === 'limit' && limit.settings.settings.passUnpriced
-    const onOwners =
-      (isOwners(limit.scope.actor) || isAny(limit.scope.actor)) && limit.scope.callMatch === CallMatch.ANY
-    if (onOwners && !passUnpriced) {
-      // WP7a: the owners' calls are mostly unpriceable (setGuard, enableModule, swaps…).
-      add(
-        'limit-owners-unpriced',
-        'block',
-        `The budget at (${who(limit.scope.actor)}, *) denies every owner call it cannot price (Safe settings, module changes, swaps, configuration of other contracts): tick "unpriced calls pass" or keep the budget off the owners`,
-        [limit.attachmentId],
-      )
-      continue
-    }
-    const unpriced = allows.filter(
-      (a) => overlaps(a.scope, limit.scope) && !isPriceable(a.scope, deployment.signLib),
-    )
-    if (unpriced.length === 0) continue
-    const list = unpriced.map((a) => `(${who(a.scope.actor)}, ${what(a)})`).join(', ')
-    add(
-      'limit-unpriceable-allow',
-      // Owners can do anything else after their timelock anyway: a budget that lets their unpriced calls pass is the intended set-up.
-      passUnpriced && !onOwners ? 'block' : 'warn',
-      passUnpriced
-        ? `The budget at (${who(limit.scope.actor)}, ${what(limit)}) lets unpriced calls pass, and ${list} grants calls it cannot price: they bypass the budget`
-        : `The budget at (${who(limit.scope.actor)}, ${what(limit)}) cannot price the calls ${list} grants: they will always be denied`,
-      [limit.attachmentId, ...unpriced.map((a) => a.attachmentId)],
-    )
-  }
-
-  // --- Freeze coverage ---
-  const freezes = policies.filter((p) => p.policyName === 'freeze' && p.scope.callMatch === CallMatch.ANY)
-  const actorsWithAllow = [...new Set(allows.map((a) => a.scope.actor.toLowerCase()))]
-    .map((lower) => allows.find((a) => a.scope.actor.toLowerCase() === lower)!.scope.actor)
-    .filter((actor) => !isAny(actor))
-  for (const actor of actorsWithAllow) {
-    if (isRecovery(actor)) continue
-    const covering = freezes.filter((f) => isAny(f.scope.actor) || same(f.scope.actor, actor))
-    const flags = covering.map((f) => (f.settings?.policy === 'freeze' ? f.settings.settings : undefined))
-    const ids = allows.filter((a) => same(a.scope.actor, actor)).map((a) => a.attachmentId)
-    if (!flags.some((f) => f?.safeWide))
-      add(
-        'allow-without-freeze',
-        'block',
-        `${who(actor)} has an Allow and no Freeze at (${who(actor)}, *): a guardian's freeze would not stop it`,
-        ids,
-      )
-    else if (!isOwners(actor) && !flags.some((f) => f?.actor))
-      add(
-        'freeze-misses-actor',
-        'warn',
-        `${who(actor)}'s Freeze does not read its own freeze: the kill switch (freezeActor) would not stop it`,
-        covering.map((f) => f.attachmentId),
-      )
-  }
-  for (const f of policies.filter((p) => p.policyName === 'freeze' && isRecovery(p.scope.actor)))
-    add(
-      'freeze-on-recovery',
-      'warn',
-      `Freeze on ${who(f.scope.actor)}: recovery would be blocked during a freeze (freeze, then recover)`,
-      [f.attachmentId],
-    )
-
-  // --- Policy-specific ---
-  for (const p of policies) {
-    const actor = p.scope.actor
-    if (p.policyName === 'quorum' && !isAny(actor) && !isOwners(actor))
-      add(
-        'quorum-on-module',
-        'warn',
-        `Quorum on ${who(actor)} denies all its transactions (owner path only)`,
-        [p.attachmentId],
-      )
-    if (
-      p.policyName === 'timelock' &&
-      !isAny(actor) &&
-      !isOwners(actor) &&
-      p.settings?.policy === 'timelock' &&
-      p.settings.settings.window === 0
-    )
-      add(
-        'module-timelock-no-window',
-        'warn',
-        `${who(actor)}'s Timelock has no execution window: a module schedule has no nonce and stays executable forever`,
-        [p.attachmentId],
-      )
-    if (!p.policyName)
-      add('unknown-policy', 'warn', `Unknown policy contract ${p.policy} at (${who(actor)}, ${what(p)})`, [
-        p.attachmentId,
-      ])
-  }
-
-  // --- Roles and actors ---
-  if (freezes.length > 0 && roles.guardians.length === 0)
-    add('no-guardian', 'warn', 'Freeze is attached but nobody is a guardian: nobody can freeze', [])
-  for (const account of [...roles.guardians, ...roles.lifters]) {
-    if (owners.some((o) => same(o, account)))
-      add(
-        'owner-can-lift',
-        'warn',
-        `Owner ${who(account)} is a ${roles.guardians.some((g) => same(g, account)) ? 'guardian' : 'lifter'}: a compromised owner could lift the freeze meant to stop the owners`,
-        [],
-      )
-  }
-  if (input.fallbackHandler && !same(input.fallbackHandler, deployment.fallbackHandler))
-    add(
-      'fallback-handler',
-      'warn',
-      'The fallback handler accepts off-chain ERC-1271 signatures: a Permit or CoW order signed by the owners bypasses every policy. Switch to PolicyFallbackHandler',
+      "No owners' Timelock covers engine.configure: the owners (or anyone holding their keys) can change every rule at once. Attach a Timelock at (Owners, *) (Owners template).",
       [],
     )
-  const seen = new Set<string>()
-  for (const a of attachments) {
-    const actor = a.scope.actor
-    if (
-      isAny(actor) ||
-      isOwners(actor) ||
-      modules.some((m) => same(m, actor)) ||
-      seen.has(actor.toLowerCase())
-    )
+
+  // 7. A module that may configure, without a Timelock on it.
+  for (const a of allows) {
+    if (isOwners(a.scope.actor) || a.level !== EXACT_LEVEL) continue
+    if (!isAddressEqual(a.scope.to, engine) || a.scope.selector.toLowerCase() !== SELECTORS.configure)
       continue
-    seen.add(actor.toLowerCase())
-    add(
-      'actor-not-module',
-      'warn',
-      `${who(actor)} is not an enabled module: its attachments apply only once it is enabled`,
-      attachments.filter((b) => same(b.scope.actor, actor)).map((b) => b.attachmentId),
-    )
+    const covers = new Set(configureCoverIds(deployment, a.scope.actor))
+    if (!attachments.some((t) => covers.has(t.attachmentId) && (timelockOf(t)?.delay ?? 0) > 0))
+      add(
+        'timelock-not-covering-configure',
+        'block',
+        `${who(a.scope.actor)} may call engine.configure with no Timelock on it: it can rewrite every rule at once.`,
+        [a],
+      )
   }
 
-  return [...findings.filter((f) => f.severity === 'block'), ...findings.filter((f) => f.severity === 'warn')]
+  // 8. An actor nobody can stop: no guardian on any Timelock that reaches it. Recovery (only
+  //    owner management and configure) is meant to have none.
+  for (const actor of actors) {
+    const own = allows.filter((a) => isAddressEqual(a.scope.actor, actor))
+    if (own.length === 0) continue
+    const recoveryShape = own.every(
+      (a) =>
+        a.level === EXACT_LEVEL &&
+        ((isAddressEqual(a.scope.to, safe) &&
+          OWNER_MANAGEMENT_SELECTORS.includes(a.scope.selector.toLowerCase() as Hex)) ||
+          (isAddressEqual(a.scope.to, engine) && a.scope.selector.toLowerCase() === SELECTORS.configure)),
+    )
+    if (recoveryShape) continue
+    const guarded = reaching(actor).some((t) => (timelockOf(t)?.guardians.length ?? 0) > 0)
+    if (!guarded)
+      add(
+        'actor-no-guardian',
+        'warn',
+        `Nobody can freeze ${who(actor)}: add a guardian (a Timelock, delay 0 for a kill switch, at (${who(actor)}, *)).`,
+        own,
+      )
+  }
+
+  // 9. No way back: a co-signer reaches the owners' configure and no recovery can configure.
+  const ownersConfigCoSigners = attachments.filter(
+    (a) => a.policyName === 'coSigner' && scopeCovers(a.scope, OWNERS, engine, SELECTORS.configure),
+  )
+  const recoveryCanConfigure = allows.some(
+    (a) =>
+      !isOwners(a.scope.actor) &&
+      isModule(a.scope.actor) &&
+      a.level === EXACT_LEVEL &&
+      isAddressEqual(a.scope.to, engine) &&
+      a.scope.selector.toLowerCase() === SELECTORS.configure &&
+      !attachments.some(
+        (c) =>
+          c.policyName === 'coSigner' && scopeCovers(c.scope, a.scope.actor, engine, SELECTORS.configure),
+      ),
+  )
+  if (ownersConfigCoSigners.length > 0 && !recoveryCanConfigure)
+    add(
+      'no-way-back',
+      'block',
+      'A co-signer must approve every configuration change and no recovery module can configure without it: if the co-signer disappears, nothing can ever be changed again. Add a Recovery with engine.configure.',
+      ownersConfigCoSigners,
+    )
+
+  // 10. A Deny covering configure locks the configuration.
+  for (const a of attachments)
+    if (
+      a.kind === Kind.DENY &&
+      scopeCovers(a.scope, isAny(a.scope.actor) ? OWNERS : a.scope.actor, engine, SELECTORS.configure) &&
+      a.opMask & OP_CALL
+    )
+      add(
+        'deny-covers-configure',
+        isAny(a.scope.actor) || isOwners(a.scope.actor) ? 'block' : 'warn',
+        `Deny at ${where(a)} for ${who(a.scope.actor)} also denies engine.configure${isAny(a.scope.actor) || isOwners(a.scope.actor) ? ': the owners could never change the configuration again' : ''}.`,
+        [a],
+      )
+
+  // 11 and 12. Limits that cannot price what the actor is granted.
+  for (const limit of attachments) {
+    if (limit.settings?.policy !== 'limit') continue
+    const { limits, passUnpriced } = limit.settings.settings
+    const listed = (token: Address) => limits.some((l) => isAddressEqual(l.token, token))
+    const actor = limit.scope.actor
+    const granted = allows.filter(
+      (a) =>
+        (isAny(actor) || isAddressEqual(a.scope.actor, actor)) &&
+        a.scope.callMatch !== CallMatch.ANY &&
+        (limit.scope.callMatch === CallMatch.ANY || isAddressEqual(limit.scope.to, a.scope.to)),
+    )
+    const spends = granted.filter(
+      (a) =>
+        a.scope.callMatch === CallMatch.FUNCTION &&
+        SPEND_SELECTORS.includes(a.scope.selector.toLowerCase() as Hex) &&
+        !listed(a.scope.to),
+    )
+    if (spends.length > 0)
+      add(
+        'limit-unlisted-spend',
+        'warn',
+        `${spends.map(where).join(', ')}: the budget at ${where(limit)} does not list that token, so these calls are always denied (Unpriced${passUnpriced ? ', even with "other calls pass"' : ''}). List the token.`,
+        [limit, ...spends],
+      )
+    const nft = granted.filter(
+      (a) =>
+        (a.scope.callMatch === CallMatch.FUNCTION &&
+          NFT_SELECTORS.includes(a.scope.selector.toLowerCase() as Hex)) ||
+        (a.scope.callMatch === CallMatch.FUNCTION &&
+          ([SELECTORS.transferFrom, SELECTORS.approve] as Hex[]).includes(
+            a.scope.selector.toLowerCase() as Hex,
+          ) &&
+          !listed(a.scope.to)),
+    )
+    if (limit.scope.callMatch === CallMatch.ANY && nft.length > 0)
+      add(
+        'limit-nft-actor',
+        'warn',
+        `${who(actor)} moves what looks like ERC-721 (${nft.map(where).join(', ')}) under a budget at (${who(actor)}, *): ERC-721 shares transferFrom / approve with ERC-20 and cannot be priced. Put the budget at (${who(actor)}, token.*) scopes instead.`,
+        [limit, ...nft],
+      )
+  }
+
+  return findings
 }

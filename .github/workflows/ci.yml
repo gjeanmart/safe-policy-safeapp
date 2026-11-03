@@ -51,8 +51,10 @@ jobs:
       - run: pnpm lint
       - run: pnpm format:check
 
-  # The Solidity package is its own pnpm root (contracts/pnpm-lock.yaml). `pnpm test` is `hardhat test`, which
-  # runs every file under contracts/test/ recursively: the V1 policy tests and all of test/v2/.
+  # The Solidity package is its own pnpm root (contracts/pnpm-lock.yaml), run under the normal hardhat.config.ts
+  # (with hardhat-toolbox). `pnpm test` is `hardhat test`, which runs every file under contracts/test/
+  # recursively: the V1 policy tests and all of test/v2/ (Sizes.test.ts keeps every V2 contract deployable on
+  # Sepolia). The dry run rehearses scripts/deploy-v2.ts on the in-process network: no key, no RPC.
   contracts:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -75,6 +77,7 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm deploy:v2:dry-run
 
   audit:
     runs-on: ubuntu-latest

@@ -1,12 +1,17 @@
 import { useState } from 'react'
 import { type Hex, getAddress, isAddress } from 'viem'
-import { TOKENS } from '../../config/contracts'
+import { COW, TOKENS } from '../../config/contracts'
 import { useSandbox } from '../../context'
 import {
   ANY,
-  type AttachmentChange,
+  ARGS_PRESETS,
+  ArgsOp,
+  ArgsTarget,
   CallMatch,
+  type Change,
+  HUMAN_LEVEL_LABELS,
   type LabelContext,
+  NO_SELECTOR,
   OP_ALL,
   OP_CALL,
   OP_DELEGATECALL,
@@ -16,11 +21,16 @@ import {
   type PolicyName,
   SELECTORS,
   TIMELOCK_PRESETS,
+  type TemplateContext,
   type V2Deployment,
   allowChange,
+  argsLabel,
+  changeAttachmentId,
   deployedPolicies,
   denyChange,
   describeChange,
+  humanLevel,
+  levelOf,
   namesSelector,
   namesTo,
   policyChange,
@@ -30,39 +40,37 @@ import { rolesStore } from '../../store'
 import { AddressShortcuts } from '../AddressShortcuts'
 import { InfoTip } from '../Tooltip'
 import { Card, Field, Notice } from '../ui'
-import { NATIVE, type RawSettings, buildSettings, initialRaw } from './settingsForm'
+import { NATIVE, type RawSettings, buildConditions, buildSettings, initialRaw } from './settingsForm'
 import { TemplatePicker } from './TemplatePicker'
 
 type Kind = 'allow' | 'deny' | PolicyName
 
-const CALL_MATCHES = [
+const WHAT = [
   { value: CallMatch.ANY, label: 'Any call' },
-  { value: CallMatch.TO, label: 'Any function on a contract' },
-  { value: CallMatch.SELECTOR, label: 'One function on any contract' },
-  { value: CallMatch.TO_SELECTOR, label: 'One function on a contract' },
+  { value: CallMatch.CONTRACT, label: 'Any function of a contract' },
+  { value: CallMatch.FUNCTION, label: 'One function of a contract' },
 ] as const
 
 const KNOWN_FUNCTIONS = [
   'transfer',
   'approve',
   'transferFrom',
+  'setPreSignature',
   'swapOwner',
   'addOwnerWithThreshold',
-  'signCowOrder',
-  'signPermit',
+  'configure',
 ] as const satisfies readonly (keyof typeof SELECTORS)[]
 
-const POLICY_HELP: Record<Kind, string> = {
-  allow: 'Grants the calls (CALL only unless DELEGATECALL is ticked, which needs one actor on one function).',
-  deny: 'Denies the calls, whoever else allows them.',
-  freeze: "Denies while the guardian's freeze is active (Safe-wide and/or this actor's kill switch).",
-  timelock: 'The transaction must be scheduled first and wait the delay.',
-  recipients: 'Payments and approvals only to listed addresses (native value included).',
-  limit: 'A transfer budget per period: transfers, approvals, native value and CoW orders count.',
-  args: 'A constraint on a static argument of a function.',
-  coSigner: 'A co-signature from this address, on both paths.',
-  safenet: 'A Safenet attestation, on both paths.',
-  quorum: 'More owner signatures than the threshold (owner path only).',
+const HELP: Record<Kind, string> = {
+  allow:
+    'Grants the calls to this actor (only an Allow grants; deny by default). Add conditions to pin arguments.',
+  deny: 'Denies the calls, whatever else allows them.',
+  timelock:
+    'Delay (schedule first, wait), freeze by guardians (at most F, then a cooldown C), cancel by cancellers. Delay 0 = a kill switch only.',
+  args: 'Conditions on the static arguments, target or value of every matched call.',
+  limit: 'A budget per token and period: transfers, approvals (in full) and native value count.',
+  coSigner: 'M-of-N approvals pushed on-chain before execution, on both paths.',
+  safenet: 'A Safenet attestation pushed on-chain before execution, on both paths.',
 }
 
 const tokenOptions = [
@@ -80,8 +88,26 @@ function SettingsFields({
   raw: RawSettings
   set: (patch: Partial<RawSettings>) => void
 }) {
-  const text = (key: keyof RawSettings, label: string, info?: string, placeholder?: string) => (
-    <Field label={label} info={info}>
+  const text = (
+    key: keyof RawSettings,
+    label: string,
+    info?: string,
+    placeholder?: string,
+    shortcuts = false,
+  ) => (
+    <Field
+      label={label}
+      info={info}
+      after={
+        shortcuts ? (
+          <AddressShortcuts
+            onPick={(a) =>
+              set({ [key]: (raw[key] as string).trim() ? `${raw[key]}, ${a}` : a } as Partial<RawSettings>)
+            }
+          />
+        ) : undefined
+      }
+    >
       <input
         value={raw[key] as string}
         placeholder={placeholder}
@@ -100,33 +126,11 @@ function SettingsFields({
       {info && <InfoTip>{info}</InfoTip>}
     </label>
   )
-  const token = (key: 'token' | 'tierToken') => (
-    <Field label="Token">
-      <select value={raw[key]} onChange={(e) => set({ [key]: e.target.value })}>
-        {tokenOptions.map((t) => (
-          <option key={t.value} value={t.value}>
-            {t.label}
-          </option>
-        ))}
-      </select>
-    </Field>
-  )
   switch (policy) {
-    case 'freeze':
-      return (
-        <div className="row wrap">
-          {check('safeWide', 'Reads the Safe-wide freeze')}
-          {check(
-            'actorFreeze',
-            "Reads this actor's own freeze (kill switch)",
-            'Owners are only frozen Safe-wide.',
-          )}
-        </div>
-      )
     case 'timelock':
       return (
         <div className="grid-2">
-          <Field label="Delay (seconds)">
+          <Field label="Delay (seconds, 0 = kill switch only)">
             <input value={raw.delay} onChange={(e) => set({ delay: e.target.value })} />
             <span className="preset-links small">
               {TIMELOCK_PRESETS.map((p) => (
@@ -147,27 +151,34 @@ function SettingsFields({
             'A ready schedule expires after this window.',
           )}
           {text(
+            'guardians',
+            'Guardians',
+            'May freeze (and lift) this attachment. Not at Everyone.',
+            '0x…, 0x…',
+            true,
+          )}
+          {text('lifters', 'Lifters', 'May lift a freeze only (e.g. the recovery module).', '0x…', true)}
+          {text(
             'cancellers',
             'Cancellers',
-            'Addresses that may cancel a queued call (e.g. another Safe).',
-            '0x…, 0x…',
+            'May cancel a schedule this attachment matched (e.g. another Safe).',
+            '0x…',
+            true,
           )}
-          {check('clearOnFreeze', 'A freeze clears the queue', 'True for owners; false for Recovery.')}
-        </div>
-      )
-    case 'recipients':
-      return (
-        <div className="grid-2">
-          {text('recipients', 'Recipients', 'Payees of transfer / transferFrom / native value.', '0x…, 0x…')}
-          {text('spenders', 'Spenders', 'Who may be approved.', '0x…, 0x…')}
-          {text('maxApproval', 'Max approval (base units, empty = unlimited)')}
-          {check('strict', 'Deny calls that are not payments or approvals')}
         </div>
       )
     case 'limit':
       return (
         <div className="grid-2">
-          {token('token')}
+          <Field label="Token">
+            <select value={raw.token} onChange={(e) => set({ token: e.target.value })}>
+              {tokenOptions.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </Field>
           {text('amount', 'Budget (token units)')}
           <Field label="Period">
             <select value={raw.period} onChange={(e) => set({ period: e.target.value })}>
@@ -180,43 +191,132 @@ function SettingsFields({
           </Field>
           {check(
             'passUnpriced',
-            'Unpriced calls pass',
-            'By default the budget denies any call it cannot price (e.g. a swap). Tick it for owners.',
+            'Other calls pass (passUnpriced)',
+            'By default the budget denies any call it cannot price (a protocol call, a DELEGATECALL). A spend of an unlisted token is always denied.',
           )}
+        </div>
+      )
+    case 'coSigner':
+      return (
+        <div className="grid-2">
+          {text('approvers', 'Approvers', 'EOAs or ERC-1271 contracts; never the Safe.', '0x…, 0x…', true)}
+          {text('required', 'Required approvals')}
         </div>
       )
     case 'args':
       return (
         <div className="grid-2">
-          {text('argSelector', 'Function', undefined, 'deposit(uint256,address)')}
-          {text('argIndex', 'Argument index (0-based, static args)')}
+          {text('argSelector', 'Function (empty = any call)', undefined, 'deposit(uint256,address)')}
+          <Field label="Reads">
+            <select value={raw.argTarget} onChange={(e) => set({ argTarget: e.target.value })}>
+              <option value={String(ArgsTarget.WORD)}>an argument</option>
+              <option value={String(ArgsTarget.CALL_TO)}>the target</option>
+              <option value={String(ArgsTarget.VALUE)}>the native value</option>
+            </select>
+          </Field>
+          {Number(raw.argTarget) === ArgsTarget.WORD &&
+            text('argIndex', 'Argument index (0-based, static head word)')}
           <Field label="Comparison">
             <select value={raw.argOp} onChange={(e) => set({ argOp: e.target.value })}>
-              {['==', '!=', 'in', 'not in', '≤', '≥', '== the Safe'].map((label, i) => (
-                <option key={label} value={String(i)}>
+              {Object.entries({
+                '=': ArgsOp.EQ,
+                '≠': ArgsOp.NEQ,
+                in: ArgsOp.IN,
+                'not in': ArgsOp.NOT_IN,
+                '≤': ArgsOp.LTE,
+                '≥': ArgsOp.GTE,
+                'is the Safe': ArgsOp.EQ_SAFE,
+              }).map(([label, op]) => (
+                <option key={label} value={String(op)}>
                   {label}
                 </option>
               ))}
             </select>
           </Field>
-          {text('argValues', 'Values (numbers or addresses)', undefined, '0x…, 100')}
-          {check('strict', 'Deny functions without a constraint')}
+          {Number(raw.argOp) !== ArgsOp.EQ_SAFE &&
+            text('argValues', 'Values (numbers or addresses)', undefined, '0x…, 100')}
+          {check('strict', 'Deny calls no condition applies to')}
         </div>
       )
-    case 'coSigner':
-      return <div className="grid-2">{text('cosigner', 'Co-signer address')}</div>
     case 'safenet':
       return <p className="muted small">No settings.</p>
-    case 'quorum':
-      return (
-        <div className="grid-2">
-          {text('required', 'Signatures required')}
-          {token('tierToken')}
-          {text('tierAbove', 'Tier: above this amount (empty = no tier)')}
-          {text('tierRequired', 'Tier: signatures required')}
-        </div>
-      )
   }
+}
+
+/** The Allow row's optional conditions (ArgsPolicy at the same scope), with the three presets. */
+function ConditionsFields({
+  raw,
+  set,
+  hasFunction,
+}: {
+  raw: RawSettings
+  set: (patch: Partial<RawSettings>) => void
+  hasFunction: boolean
+}) {
+  return (
+    <div className="stack">
+      <Field
+        label="Conditions"
+        hint={raw.conditions === 'none' ? undefined : ARGS_PRESETS[raw.conditions].help}
+      >
+        <select
+          value={raw.conditions}
+          onChange={(e) => set({ conditions: e.target.value as RawSettings['conditions'] })}
+        >
+          <option value="none">None</option>
+          {(Object.keys(ARGS_PRESETS) as (keyof typeof ARGS_PRESETS)[]).map((p) => (
+            <option key={p} value={p} disabled={p === 'receiverIsSafe' && !hasFunction}>
+              {ARGS_PRESETS[p].label}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {(raw.conditions === 'recipients' || raw.conditions === 'spenders') && (
+        <div className="grid-2">
+          <Field
+            label={raw.conditions === 'recipients' ? 'Recipients' : 'Spenders'}
+            after={
+              <span className="row wrap small">
+                {raw.conditions === 'spenders' && (
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => set({ condAddresses: COW.vaultRelayer })}
+                  >
+                    CoW VaultRelayer
+                  </button>
+                )}
+                <AddressShortcuts
+                  onPick={(a) =>
+                    set({ condAddresses: raw.condAddresses.trim() ? `${raw.condAddresses}, ${a}` : a })
+                  }
+                />
+              </span>
+            }
+          >
+            <input
+              value={raw.condAddresses}
+              onChange={(e) => set({ condAddresses: e.target.value })}
+              placeholder="0x…, 0x…"
+            />
+          </Field>
+          {raw.conditions === 'spenders' && (
+            <Field label="Cap per approval (base units, empty = none)">
+              <input value={raw.condCap} onChange={(e) => set({ condCap: e.target.value })} />
+            </Field>
+          )}
+        </div>
+      )}
+      {raw.conditions === 'receiverIsSafe' && (
+        <Field
+          label="Receiver argument index (0-based)"
+          info="E.g. Aave supply onBehalfOf = 2, Uniswap exactInputSingle recipient = 3."
+        >
+          <input value={raw.condIndex} onChange={(e) => set({ condIndex: e.target.value })} />
+        </Field>
+      )}
+    </div>
+  )
 }
 
 /** Who the scope is for: Everyone, Owners, a module, a local role or any address. */
@@ -235,22 +335,30 @@ function useActorOptions() {
   return options
 }
 
+type OpChoice = 'default' | 'call' | 'delegatecall' | 'both'
+const OP_MASKS: Record<Exclude<OpChoice, 'default'>, number> = {
+  call: OP_CALL,
+  delegatecall: OP_DELEGATECALL,
+  both: OP_ALL,
+}
+
 /**
- * Who → Doing what → Policy + settings, with a live sentence. `onPreview` shows the change on the
- * org chart before it is added; `onAdd` merges it into the draft.
+ * Who (Everyone / an actor) × What (any call / a contract / one function) × Op, then Allow (with
+ * optional conditions), Deny or a policy with its settings, and a live sentence. `onPreview` shows
+ * the changes on the org chart before they are added; `onAdd` merges them into the draft.
  */
 export function ScopeBuilder({
   deployment,
   ctx,
+  context,
   onPreview,
   onAdd,
-  onAddSet,
 }: {
   deployment: V2Deployment
   ctx: LabelContext
-  onPreview: (change: AttachmentChange | undefined) => void
-  onAdd: (change: AttachmentChange) => void
-  onAddSet: Parameters<typeof TemplatePicker>[0]['onAdd']
+  context: TemplateContext
+  onPreview: (changes: Change[] | undefined) => void
+  onAdd: (changes: Change[]) => void
 }) {
   const actors = useActorOptions()
   const [mode, setMode] = useState<'template' | 'custom'>('template')
@@ -260,8 +368,9 @@ export function ScopeBuilder({
   const [target, setTarget] = useState('')
   const [fn, setFn] = useState('')
   const [kind, setKind] = useState<Kind>('allow')
-  const [delegate, setDelegate] = useState(false)
+  const [op, setOp] = useState<OpChoice>('default')
   const [raw, setRaw] = useState<RawSettings>(initialRaw)
+  const set = (patch: Partial<RawSettings>) => setRaw((r) => ({ ...r, ...patch }))
   const policies = deployedPolicies(deployment)
 
   const who = actor === 'custom' ? customActor.trim() : actor
@@ -271,29 +380,46 @@ export function ScopeBuilder({
   const selector = parseSelectorInput(fn)
   if (namesSelector(callMatch) && (!selector.ok || !fn.trim()))
     problems.push(selector.ok ? 'Enter the function' : selector.error)
+  const selectorValue = namesSelector(callMatch) && selector.ok ? (selector.value as Hex) : undefined
 
-  const opMask = kind === 'allow' ? (delegate ? OP_CALL | OP_DELEGATECALL : OP_CALL) : OP_ALL
-  const settings = kind === 'allow' || kind === 'deny' ? undefined : buildSettings(kind, raw)
+  const opMask = op === 'default' ? 0 : OP_MASKS[op]
+  const settingsContext = {
+    safe: context.safe,
+    actor: isAddress(who, { strict: false }) ? getAddress(who) : ANY,
+  }
+  const settings = kind === 'allow' || kind === 'deny' ? undefined : buildSettings(kind, raw, settingsContext)
   if (settings?.error) problems.push(settings.error)
+  const conditions = kind === 'allow' ? buildConditions(raw, selectorValue) : undefined
+  if (conditions?.error) problems.push(conditions.error)
 
-  let change: AttachmentChange | undefined
+  let changes: Change[] | undefined
   if (problems.length === 0) {
     const scope = {
       actor: getAddress(who),
       to: namesTo(callMatch) ? getAddress(target.trim()) : ANY,
-      selector: (namesSelector(callMatch) && selector.ok ? selector.value : '0x00000000') as Hex,
+      selector: selectorValue ?? NO_SELECTOR,
       callMatch,
     }
-    change =
+    changes =
       kind === 'allow'
-        ? allowChange(scope, opMask)
+        ? [
+            allowChange(scope, opMask || OP_CALL),
+            ...(conditions?.value
+              ? [policyChange(deployment, scope, { policy: 'args', settings: conditions.value })]
+              : []),
+          ]
         : kind === 'deny'
-          ? denyChange(scope)
-          : policyChange(deployment, scope, settings!.value!)
+          ? [denyChange(scope, opMask || OP_ALL)]
+          : [policyChange(deployment, scope, settings!.value!, opMask || OP_ALL)]
   }
-  const sentence = change ? describeChange(change, deployment, ctx) : undefined
+  const isAttached = (c: Change) => context.attachments.some((a) => a.attachmentId === changeAttachmentId(c))
+  const sentence = changes
+    ? kind === 'allow' && conditions?.value
+      ? `${describeChange(changes[0]!, deployment, ctx)}, with conditions: ${argsLabel(conditions.value, ctx)}`
+      : describeChange(changes[0]!, deployment, ctx, isAttached(changes[0]!))
+    : undefined
+  const level = isAddress(who, { strict: false }) ? levelOf({ actor: getAddress(who), callMatch }) : undefined
 
-  const reset = () => onPreview(undefined)
   return (
     <Card
       title="Scope builder"
@@ -306,14 +432,14 @@ export function ScopeBuilder({
               className={mode === m ? 'tab active' : 'tab'}
               onClick={() => setMode(m)}
             >
-              {m === 'template' ? 'From a template' : 'One attachment'}
+              {m === 'template' ? 'From a template' : 'One rule'}
             </button>
           ))}
         </div>
       }
     >
       {mode === 'template' ? (
-        <TemplatePicker deployment={deployment} onAdd={onAddSet} />
+        <TemplatePicker deployment={deployment} context={context} ctx={ctx} onAdd={onAdd} />
       ) : (
         <div className="stack">
           <h3>1 · Who</h3>
@@ -339,11 +465,14 @@ export function ScopeBuilder({
             )}
           </div>
 
-          <h3>2 · Doing what</h3>
+          <h3>2 · What</h3>
           <div className="grid-2">
-            <Field label="Calls">
+            <Field
+              label="Calls"
+              hint={level !== undefined ? `Level: ${HUMAN_LEVEL_LABELS[humanLevel(level)]}` : undefined}
+            >
               <select value={callMatch} onChange={(e) => setCallMatch(Number(e.target.value) as CallMatch)}>
-                {CALL_MATCHES.map((c) => (
+                {WHAT.map((c) => (
                   <option key={c.value} value={c.value}>
                     {c.label}
                   </option>
@@ -365,8 +494,11 @@ export function ScopeBuilder({
                         {t.symbol}
                       </button>
                     ))}
-                    <button type="button" className="link" onClick={() => setTarget(deployment.signLib)}>
-                      PolicySignLib
+                    <button type="button" className="link" onClick={() => setTarget(COW.settlement)}>
+                      CoW Settlement
+                    </button>
+                    <button type="button" className="link" onClick={() => setTarget(deployment.engine)}>
+                      Policy engine
                     </button>
                     <AddressShortcuts onPick={setTarget} />
                   </span>
@@ -378,7 +510,7 @@ export function ScopeBuilder({
             {namesSelector(callMatch) && (
               <Field
                 label="Function"
-                info="A selector (0x…) or a signature such as transfer(address,uint256)."
+                info="A selector (0x…) or a signature such as transfer(address,uint256). 0x00000000 = empty calldata (plain native transfer)."
                 after={
                   <span className="row wrap small">
                     {KNOWN_FUNCTIONS.map((name) => (
@@ -401,35 +533,37 @@ export function ScopeBuilder({
                 />
               </Field>
             )}
+            <Field
+              label="Operation"
+              info="A mask on the attachment, not part of the scope. Default: CALL for an Allow, both for a Deny or a policy (so a granted DELEGATECALL is still checked). DELEGATECALL can only be allowed for one actor on one function."
+            >
+              <select value={op} onChange={(e) => setOp(e.target.value as OpChoice)}>
+                <option value="default">Default ({kind === 'allow' ? 'CALL' : 'CALL + DELEGATECALL'})</option>
+                <option value="call">CALL</option>
+                <option value="delegatecall">DELEGATECALL</option>
+                <option value="both">CALL + DELEGATECALL</option>
+              </select>
+            </Field>
           </div>
 
-          <h3>3 · Policy</h3>
+          <h3>3 · Rule</h3>
           <div className="grid-2">
-            <Field label="Attach" hint={POLICY_HELP[kind]}>
+            <Field label="Attach" hint={HELP[kind]}>
               <select value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
                 <option value="allow">Allow</option>
                 <option value="deny">Deny</option>
                 {policies.map((p) => (
                   <option key={p} value={p}>
-                    {POLICY_INFO[p].label}
+                    {POLICY_INFO[p].label} ({POLICY_INFO[p].contract})
                   </option>
                 ))}
               </select>
             </Field>
-            {kind === 'allow' && (
-              <label className="row">
-                <input type="checkbox" checked={delegate} onChange={(e) => setDelegate(e.target.checked)} />
-                DELEGATECALL too
-                <InfoTip>
-                  The target then runs with the Safe&apos;s storage. Only accepted for one actor on one
-                  function of one contract.
-                </InfoTip>
-              </label>
-            )}
           </div>
-          {kind !== 'allow' && kind !== 'deny' && (
-            <SettingsFields policy={kind} raw={raw} set={(patch) => setRaw((r) => ({ ...r, ...patch }))} />
+          {kind === 'allow' && policies.includes('args') && (
+            <ConditionsFields raw={raw} set={set} hasFunction={selectorValue !== undefined} />
           )}
+          {kind !== 'allow' && kind !== 'deny' && <SettingsFields policy={kind} raw={raw} set={set} />}
 
           {sentence ? (
             <Notice>
@@ -439,19 +573,19 @@ export function ScopeBuilder({
             <p className="muted small">{problems[0]}</p>
           )}
           <div className="row">
-            <button type="button" className="btn" disabled={!change} onClick={() => onPreview(change)}>
+            <button type="button" className="btn" disabled={!changes} onClick={() => onPreview(changes)}>
               Preview on the chart
             </button>
-            <button type="button" className="link" onClick={reset}>
+            <button type="button" className="link" onClick={() => onPreview(undefined)}>
               clear preview
             </button>
             <button
               type="button"
               className="btn btn-primary"
-              disabled={!change}
+              disabled={!changes}
               onClick={() => {
-                onAdd(change!)
-                reset()
+                onAdd(changes!)
+                onPreview(undefined)
               }}
             >
               Add to draft

@@ -1,91 +1,74 @@
 import { useState } from 'react'
+import { type Hex, isAddressEqual } from 'viem'
+import { chain, publicClient } from '../../config/client'
 import { EXPLORER, type V2Engine } from '../../config/contracts'
-import { publicClient } from '../../config/client'
 import { useSandbox } from '../../context'
 import type { Step } from '../../lib/runner'
 import { sendCallAsRole, simulateCallAsRole } from '../../lib/roleExec'
 import {
   type Gate,
-  GateKind,
   type LabelContext,
-  POLICY_INFO,
   type PreviewResult,
-  VERDICT_LABELS,
-  Verdict,
-  collapseGates,
-  gateLevelLabel,
+  coSignerCalls,
+  gateName,
+  levelLabel,
+  readPolicySettings,
   runPreview,
   timelockCalls,
 } from '../../lib/v2'
-import { type Role, logActivity } from '../../store'
+import { type Role, logActivity, roleKind, rolesStore } from '../../store'
 import { AsyncButton, Badge, Notice } from '../ui'
 import { Chip, type ChipTone } from './Chip'
 import { useLabelContext } from './useV2'
 
-const verdictTone = (v: Verdict): ChipTone =>
-  v === Verdict.ALLOW ? 'allow' : v === Verdict.DENY ? 'deny' : 'neutral'
+/** Approvals pushed from the playground are valid for an hour. */
+const APPROVAL_LIFETIME = 3600n
 
-const gateName = (g: Gate): string => {
-  if (g.kind === GateKind.ALLOW) return 'Allow'
-  if (g.kind === GateKind.DENY) return 'Deny'
-  if (g.kind === GateKind.RULE) return g.error?.name ?? 'Engine rule'
-  return g.policyName ? POLICY_INFO[g.policyName].label : 'Policy'
+const TONES: Record<Gate['verdict'], ChipTone> = {
+  grant: 'allow',
+  'not-counted': 'neutral',
+  pass: 'protect',
+  deny: 'deny',
+}
+const VERDICTS: Record<Gate['verdict'], string> = {
+  grant: 'grants',
+  'not-counted': 'does not count',
+  pass: 'pass',
+  deny: 'deny',
 }
 
 function GateChips({ gates, deciding }: { gates: readonly Gate[]; deciding?: Gate }) {
   return (
     <div className="chip-list">
-      {collapseGates(gates).map((g, i) => {
-        const isDeciding =
-          deciding !== undefined &&
-          g.attachmentIds.includes(deciding.attachmentId) &&
-          g.verdict === deciding.verdict &&
-          g.callIndex === deciding.callIndex &&
-          g.kind === deciding.kind
-        return (
-          <span key={i} className={isDeciding ? 'gate gate-deciding' : 'gate'}>
-            <Chip
-              tone={verdictTone(g.verdict)}
-              title={
-                <>
-                  {gateLevelLabel(g)}
-                  {g.attachmentIds.length > 1 && ` · ${g.attachmentIds.length} attachments`}
-                  {g.reasonText && (
-                    <>
-                      <br />
-                      {g.reasonText}
-                    </>
-                  )}
-                </>
-              }
-            >
-              {gateName(g)}: {VERDICT_LABELS[g.verdict]}
-            </Chip>
-          </span>
-        )
-      })}
+      {gates.map((g, i) => (
+        <span key={i} className={g === deciding ? 'gate gate-deciding' : 'gate'}>
+          <Chip
+            tone={TONES[g.verdict]}
+            title={
+              <>
+                {g.level !== undefined && levelLabel(g.level)}
+                {g.callIndex !== undefined && ` · call ${g.callIndex}`}
+                {g.matches && ` · ${g.matches.length} match${g.matches.length === 1 ? '' : 'es'}`}
+                <br />
+                {g.reasonText}
+              </>
+            }
+          >
+            {gateName(g)}: {VERDICTS[g.verdict]}
+          </Chip>
+        </span>
+      ))}
     </div>
   )
 }
 
-/** The per-gate result of `preview` for one step: every gate, the deciding one, what is still needed. */
 function PreviewView({ result }: { result: PreviewResult }) {
   if (!result.ok) return <Notice tone="bad">Preview failed: {result.reason}</Notice>
   const { outcome } = result
   return (
     <div className="stack gate-preview">
-      {outcome.calls.map((c) => (
-        <div key={c.callIndex}>
-          {outcome.calls.length > 1 && <span className="field-label">Sub-call {c.callIndex}</span>}
-          <GateChips gates={c.gates} deciding={outcome.deciding} />
-        </div>
-      ))}
-      {outcome.transaction.length > 0 && (
-        <div>
-          <span className="field-label">Transaction</span>
-          <GateChips gates={outcome.transaction} deciding={outcome.deciding} />
-        </div>
-      )}
+      {outcome.calls.length > 1 && <span className="field-label">Batch of {outcome.calls.length} calls</span>}
+      <GateChips gates={outcome.gates} deciding={outcome.deciding} />
       <div className="row wrap">
         {outcome.allowed ? (
           <Badge tone="ok">allowed</Badge>
@@ -94,9 +77,7 @@ function PreviewView({ result }: { result: PreviewResult }) {
         )}
         {outcome.deciding?.reasonText && <span className="small">{outcome.deciding.reasonText}</span>}
         {!outcome.allowed && outcome.deciding && (
-          <span className="muted small">
-            deciding gate: {gateName(outcome.deciding)} ({gateLevelLabel(outcome.deciding)})
-          </span>
+          <span className="muted small">deciding gate: {gateName(outcome.deciding)}</span>
         )}
       </div>
     </div>
@@ -104,9 +85,10 @@ function PreviewView({ result }: { result: PreviewResult }) {
 }
 
 /**
- * V2 replacement of "Resolve policy" in the playground: runs the engine's `preview` for each step as
- * this role (chips per gate, verdicts, the deciding gate) and, when a Timelock asks for a schedule,
- * a Schedule step sent by the role itself (`scheduleModuleTx`: the module is `msg.sender`).
+ * The playground's V2 gate preview: `matches` plus an `eth_call` of each matched policy's `check`
+ * from the engine (chips per gate, the deciding one, what is still needed). When a Timelock asks
+ * for a schedule, the role schedules its own call (`scheduleModuleTx`); when a co-signer approval
+ * is missing and a local key is an approver, it approves on-chain.
  */
 export function GatePreview({
   role,
@@ -118,6 +100,7 @@ export function GatePreview({
   engine: V2Engine
 }) {
   const { safe } = useSandbox()
+  const roles = rolesStore.use()
   const ctx: LabelContext = useLabelContext(engine)
   const [results, setResults] = useState<{ key: string; value: PreviewResult[] }>()
   const key =
@@ -125,31 +108,69 @@ export function GatePreview({
 
   const preview = async () => {
     const value = await Promise.all(
-      steps.map((s) => runPreview(publicClient, engine.deployment, safe, role.address, s.tx, ctx)),
+      steps.map((s) =>
+        runPreview(publicClient, engine.deployment, safe, role.address, s.tx, { chainId: chain.id, ctx }),
+      ),
     )
     setResults({ key, value })
   }
   const current = results?.key === key ? results.value : undefined
-  const needsSchedule = current?.some((r) => r.ok && r.outcome.needs.includes('schedule'))
+  const needs = (n: string) => current?.some((r) => r.ok && r.outcome.needs.includes(n as never))
+
+  const send = async (
+    from: Role,
+    call: { to: `0x${string}`; data: Hex; description: string },
+    label: string,
+  ) => {
+    const denied = await simulateCallAsRole(from, call)
+    if (denied) throw new Error(denied)
+    const hash = await sendCallAsRole(from, call)
+    logActivity({
+      role: from.address,
+      mode: 'execute',
+      label,
+      status: 'sent',
+      txHash: hash,
+      link: `${EXPLORER}/tx/${hash}`,
+    })
+    await publicClient.waitForTransactionReceipt({ hash })
+  }
 
   const schedule = async () => {
     for (const [i, s] of steps.entries()) {
       const r = current?.[i]
       if (!r?.ok || !r.outcome.needs.includes('schedule')) continue
-      const call = timelockCalls.scheduleModuleTx(engine.deployment, safe, s.tx)
-      const denied = await simulateCallAsRole(role, call)
-      if (denied) throw new Error(denied)
-      const hash = await sendCallAsRole(role, call)
-      logActivity({
-        role: role.address,
-        mode: 'execute',
-        label: `schedule: ${s.label}`,
-        status: 'sent',
-        txHash: hash,
-        link: `${EXPLORER}/tx/${hash}`,
-      })
-      await publicClient.waitForTransactionReceipt({ hash })
+      await send(role, timelockCalls.scheduleModuleTx(engine.deployment, safe, s.tx), `schedule: ${s.label}`)
     }
+    await preview()
+  }
+
+  const approve = async () => {
+    const until = BigInt(Math.floor(Date.now() / 1000)) + APPROVAL_LIFETIME
+    let sent = 0
+    for (const [i, s] of steps.entries()) {
+      const r = current?.[i]
+      if (!r?.ok) continue
+      for (const g of r.outcome.denies.filter((d) => d.error?.name === 'MissingApprovals')) {
+        const id = g.error!.args[0] as Hex
+        const settings = await readPolicySettings(publicClient, engine.deployment, safe, 'coSigner', id)
+        if (settings.policy !== 'coSigner') continue
+        for (const approver of settings.settings.approvers) {
+          const local = roles.find((x) => roleKind(x) === 'eoa' && isAddressEqual(x.address, approver))
+          if (!local) continue
+          await send(
+            local,
+            coSignerCalls.approve(engine.deployment, safe, r.outcome.txHash, until),
+            `approve: ${s.label}`,
+          )
+          sent++
+        }
+      }
+    }
+    if (sent === 0)
+      throw new Error(
+        'No local key is an approver of the missing co-signer: approve from the co-signer service',
+      )
     await preview()
   }
 
@@ -158,17 +179,26 @@ export function GatePreview({
       <div className="row wrap">
         <AsyncButton
           onClick={preview}
-          title="Runs every gate of the V2 engine (preview, eth_call): nothing is sent"
+          title="engine.matches, then each matched policy's check as an eth_call from the engine: nothing is sent"
         >
           Preview gates
         </AsyncButton>
-        {needsSchedule && (
+        {needs('schedule') && (
           <AsyncButton
             variant="primary"
             onClick={schedule}
-            title={`${role.label} sends TimelockPolicy.scheduleModuleTx for this exact call; execute it once the delay has passed (Timelock queue)`}
+            title={`${role.label} sends TimelockPolicy.scheduleModuleTx for this exact call; execute it once the delay has passed (Queue)`}
           >
             Schedule (Timelock)
+          </AsyncButton>
+        )}
+        {needs('approval') && (
+          <AsyncButton
+            variant="primary"
+            onClick={approve}
+            title="A local key listed as approver calls CoSignerPolicy.approve for this transaction hash (valid 1h, consumed on execution)"
+          >
+            Approve (Co-signer)
           </AsyncButton>
         )}
       </div>

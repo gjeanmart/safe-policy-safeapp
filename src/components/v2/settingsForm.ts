@@ -1,84 +1,88 @@
-import {
-  type Address,
-  type Hex,
-  isAddress,
-  maxUint256,
-  numberToHex,
-  pad,
-  parseUnits,
-  zeroAddress,
-} from 'viem'
+import { type Address, type Hex, isAddress, numberToHex, pad, parseUnits, zeroAddress } from 'viem'
 import { TOKENS } from '../../config/contracts'
-import { ArgOp, DAY, MONTH, type PolicyName, type PolicySettings, validateSettings } from '../../lib/v2'
+import {
+  ANY_SELECTOR,
+  type ArgsConstraint,
+  ArgsOp,
+  type ArgsPreset,
+  type ArgsSettings,
+  ArgsTarget,
+  DAY,
+  MONTH,
+  type PolicyName,
+  type PolicySettings,
+  type SettingsContext,
+  receiverIsSafeConstraint,
+  recipientsConstraints,
+  spendersConstraints,
+  validateSettings,
+} from '../../lib/v2'
 import { parseAddressList, parseSelectorInput } from '../../lib/validation'
 
 /**
- * Raw form fields of the scope builder's policy settings, and their conversion into
- * `PolicySettings` (pure). One flat record keeps every policy's inputs while the user switches
- * between policies.
+ * Raw form fields of the scope builder's settings and the Allow row's conditions, and their
+ * conversion into `PolicySettings` (pure). One flat record keeps every policy's inputs while the
+ * user switches between policies.
  */
 export type RawSettings = {
-  safeWide: boolean
-  actorFreeze: boolean
   delay: string
   window: string
-  clearOnFreeze: boolean
+  guardians: string
+  lifters: string
   cancellers: string
-  recipients: string
-  spenders: string
-  maxApproval: string
-  strict: boolean
   token: string
   amount: string
   period: string
   passUnpriced: boolean
+  approvers: string
+  required: string
   argSelector: string
+  argTarget: string
   argIndex: string
   argOp: string
   argValues: string
-  cosigner: string
-  required: string
-  tierToken: string
-  tierAbove: string
-  tierRequired: string
+  strict: boolean
+  /** The Allow row's conditions (ArgsPolicy at the same scope). */
+  conditions: 'none' | ArgsPreset
+  condAddresses: string
+  condCap: string
+  condIndex: string
 }
 
 export const NATIVE = 'native'
 
 export const initialRaw: RawSettings = {
-  safeWide: true,
-  actorFreeze: true,
   delay: String(DAY),
   window: '0',
-  clearOnFreeze: true,
+  guardians: '',
+  lifters: '',
   cancellers: '',
-  recipients: '',
-  spenders: '',
-  maxApproval: '',
-  strict: false,
   token: TOKENS.USDC.address,
   amount: '5000',
   period: String(MONTH),
   passUnpriced: false,
+  approvers: '',
+  required: '1',
   argSelector: '',
+  argTarget: String(ArgsTarget.WORD),
   argIndex: '0',
-  argOp: String(ArgOp.EQ_SAFE),
+  argOp: String(ArgsOp.EQ_SAFE),
   argValues: '',
-  cosigner: '',
-  required: '2',
-  tierToken: TOKENS.USDC.address,
-  tierAbove: '10000',
-  tierRequired: '3',
+  strict: false,
+  conditions: 'none',
+  condAddresses: '',
+  condCap: '',
+  condIndex: '0',
 }
 
-const decimalsOf = (token: string): number =>
+export const decimalsOf = (token: string): number =>
   token === NATIVE
     ? 18
     : (Object.values(TOKENS).find((t) => t.address.toLowerCase() === token.toLowerCase())?.decimals ?? 0)
 
 const tokenAddress = (token: string): Address => (token === NATIVE ? zeroAddress : (token as Address))
 
-const optionalList = (input: string): Address[] | string => {
+const list = (input: string): Address[] | string => {
   if (!input.trim()) return []
   const parsed = parseAddressList(input)
   return parsed.ok ? parsed.value : parsed.error
@@ -89,14 +93,6 @@ const integer = (input: string, what: string): number | string => {
   return Number.isInteger(n) && n >= 0 ? n : `${what} must be a whole number`
 }
 
-const amount = (input: string, token: string, what: string): bigint | string => {
-  try {
-    return parseUnits(input.trim() || '0', decimalsOf(token))
-  } catch {
-    return `${what} is not a number`
-  }
-}
-
 /** A 32-byte word from a decimal number or an address. */
 const word = (input: string): Hex | undefined => {
   const value = input.trim()
@@ -105,94 +101,111 @@ const word = (input: string): Hex | undefined => {
   return undefined
 }
 
+type Built<T> = { value?: T; error?: string }
+
 /** `{ value }` when the fields make valid settings, else the first problem. */
 export function buildSettings(
   policy: PolicyName,
   raw: RawSettings,
-): { value?: PolicySettings; error?: string } {
+  context: SettingsContext,
+): Built<PolicySettings> {
   const fail = (error: string) => ({ error })
   let value: PolicySettings
   switch (policy) {
-    case 'freeze':
-      value = { policy, settings: { safeWide: raw.safeWide, actor: raw.actorFreeze } }
-      break
     case 'timelock': {
       const delay = integer(raw.delay, 'Delay')
       const window = integer(raw.window, 'Window')
-      const cancellers = optionalList(raw.cancellers)
+      const guardians = list(raw.guardians)
+      const lifters = list(raw.lifters)
+      const cancellers = list(raw.cancellers)
       if (typeof delay === 'string') return fail(delay)
       if (typeof window === 'string') return fail(window)
+      if (typeof guardians === 'string') return fail(`Guardians: ${guardians}`)
+      if (typeof lifters === 'string') return fail(`Lifters: ${lifters}`)
       if (typeof cancellers === 'string') return fail(`Cancellers: ${cancellers}`)
-      value = { policy, settings: { delay, window, clearOnFreeze: raw.clearOnFreeze, cancellers } }
-      break
-    }
-    case 'recipients': {
-      const recipients = optionalList(raw.recipients)
-      const spenders = optionalList(raw.spenders)
-      if (typeof recipients === 'string') return fail(`Recipients: ${recipients}`)
-      if (typeof spenders === 'string') return fail(`Spenders: ${spenders}`)
-      let maxApproval = maxUint256
-      if (raw.maxApproval.trim()) {
-        if (!/^\d+$/.test(raw.maxApproval.trim())) return fail('Max approval is a whole number of base units')
-        maxApproval = BigInt(raw.maxApproval.trim())
-      }
-      value = { policy, settings: { recipients, spenders, maxApproval, strict: raw.strict } }
+      value = { policy, settings: { delay, window, guardians, lifters, cancellers } }
       break
     }
     case 'limit': {
-      const parsed = amount(raw.amount, raw.token, 'Amount')
-      if (typeof parsed === 'string') return fail(parsed)
+      let amount: bigint
+      try {
+        amount = parseUnits(raw.amount.trim() || '0', decimalsOf(raw.token))
+      } catch {
+        return fail('Amount is not a number')
+      }
       const period = integer(raw.period, 'Period')
       if (typeof period === 'string') return fail(period)
       value = {
         policy,
         settings: {
-          limits: [{ token: tokenAddress(raw.token), amount: parsed, period: BigInt(period) }],
+          limits: [{ token: tokenAddress(raw.token), amount, period: BigInt(period) }],
           passUnpriced: raw.passUnpriced,
         },
       }
       break
     }
+    case 'coSigner': {
+      const approvers = list(raw.approvers)
+      if (typeof approvers === 'string') return fail(`Approvers: ${approvers}`)
+      const required = integer(raw.required, 'Required')
+      if (typeof required === 'string') return fail(required)
+      value = { policy, settings: { approvers, required } }
+      break
+    }
     case 'args': {
-      const selector = parseSelectorInput(raw.argSelector)
-      if (!selector.ok) return fail(selector.error)
-      const argIndex = integer(raw.argIndex, 'Argument index')
-      if (typeof argIndex === 'string') return fail(argIndex)
-      const op = Number(raw.argOp) as ArgOp
+      const selector = raw.argSelector.trim() ? parseSelectorInput(raw.argSelector) : undefined
+      if (selector && !selector.ok) return fail(selector.error)
+      const index = integer(raw.argIndex, 'Argument index')
+      if (typeof index === 'string') return fail(index)
       const values: Hex[] = []
       for (const part of raw.argValues.split(/[\s,]+/).filter(Boolean)) {
         const w = word(part)
         if (!w) return fail(`"${part}" is neither a number nor an address`)
         values.push(w)
       }
-      value = {
-        policy,
-        settings: { constraints: [{ selector: selector.value, argIndex, op, values }], strict: raw.strict },
+      const target = Number(raw.argTarget) as ArgsTarget
+      const constraint: ArgsConstraint = {
+        selector: selector?.ok ? selector.value : ANY_SELECTOR,
+        target,
+        index: target === ArgsTarget.WORD ? index : 0,
+        op: Number(raw.argOp) as ArgsOp,
+        values,
       }
+      value = { policy, settings: { constraints: [constraint], strict: raw.strict } }
       break
     }
-    case 'coSigner':
-      if (!isAddress(raw.cosigner.trim(), { strict: false })) return fail('Enter the co-signer address')
-      value = { policy, settings: { cosigner: raw.cosigner.trim() as Address } }
-      break
     case 'safenet':
       value = { policy, settings: null }
       break
-    case 'quorum': {
-      const required = integer(raw.required, 'Required signatures')
-      if (typeof required === 'string') return fail(required)
-      const tiers = []
-      if (raw.tierAbove.trim()) {
-        const above = amount(raw.tierAbove, raw.tierToken, 'Tier amount')
-        const tierRequired = integer(raw.tierRequired, 'Tier signatures')
-        if (typeof above === 'string') return fail(above)
-        if (typeof tierRequired === 'string') return fail(tierRequired)
-        tiers.push({ token: tokenAddress(raw.tierToken), above, required: tierRequired })
-      }
-      value = { policy, settings: { required, tiers } }
-      break
-    }
   }
-  const problems = validateSettings(value)
+  const problems = validateSettings(value, context)
   return problems.length ? { value, error: problems[0] } : { value }
+}
+
+/**
+ * The Allow row's optional conditions, as ArgsPolicy settings at the same scope (undefined: none).
+ * `selector` is the scope's function (Receiver-is-the-Safe needs one).
+ */
+export function buildConditions(
+  raw: RawSettings,
+  selector: Hex | undefined,
+): Built<ArgsSettings | undefined> {
+  if (raw.conditions === 'none') return {}
+  if (raw.conditions === 'receiverIsSafe') {
+    if (!selector) return { error: 'Receiver-is-the-Safe needs one function in the scope' }
+    const index = integer(raw.condIndex, 'Argument index')
+    if (typeof index === 'string') return { error: index }
+    return { value: { constraints: [receiverIsSafeConstraint(selector, index)], strict: false } }
+  }
+  const addresses = list(raw.condAddresses)
+  if (typeof addresses === 'string') return { error: addresses }
+  if (addresses.length === 0) return { error: 'Enter at least one address' }
+  if (raw.conditions === 'recipients')
+    return { value: { constraints: recipientsConstraints(addresses), strict: false } }
+  let cap: bigint | undefined
+  if (raw.condCap.trim()) {
+    if (!/^\d+$/.test(raw.condCap.trim())) return { error: 'The cap is a whole number of base units' }
+    cap = BigInt(raw.condCap.trim())
+  }
+  return { value: { constraints: spendersConstraints(addresses, cap), strict: false } }
 }
