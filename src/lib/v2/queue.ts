@@ -45,6 +45,8 @@ export type QueueEntry = {
   readyAt: bigint
   isConfiguration: boolean
   scheduledBlock: bigint
+  /** The transaction that scheduled it (its sender is who scheduled: a relayer or the module). */
+  scheduledTx?: Hex
   state: QueueState
   /** `Cancelled.by`: a canceller, the scheduling module, or the Safe (owners' signatures). */
   cancelledBy?: Address
@@ -65,6 +67,7 @@ export type TimelockLog = {
   args: Record<string, unknown>
   blockNumber: bigint | null
   logIndex: number | null
+  transactionHash?: Hex | null
 }
 
 const chronological = (a: TimelockLog, b: TimelockLog) =>
@@ -93,6 +96,7 @@ export function foldTimelockEvents(logs: readonly TimelockLog[]): QueueEntry[] {
         readyAt: a.readyAt as bigint,
         isConfiguration: Boolean(a.isConfiguration),
         scheduledBlock: log.blockNumber ?? 0n,
+        scheduledTx: log.transactionHash ?? undefined,
         state: 'scheduled',
       })
       continue

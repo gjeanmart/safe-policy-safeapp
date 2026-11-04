@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { type Address, type Hex, encodeFunctionData, isAddressEqual } from 'viem'
 import { safeAbi } from '../../abi'
 import { chain, publicClient } from '../../config/client'
@@ -7,7 +7,7 @@ import { useSandbox } from '../../context'
 import { useAsync } from '../../hooks/useAsync'
 import { useNow } from '../../hooks/useNow'
 import { describeCall } from '../../lib/describeTx'
-import { formatClock, formatDuration } from '../../lib/format'
+import { formatAgo, formatClock, formatDuration, formatTime, shortAddress } from '../../lib/format'
 import { execTransactionCall, signHashAsRole } from '../../lib/roleExec'
 import { runSteps } from '../../lib/runner'
 import {
@@ -34,6 +34,7 @@ import {
   type TrackedOwnerTx,
   hasLocalKey,
   markOwnerTxExecuted,
+  noteOwnerTx,
   roleKind,
   rolesStore,
   settleProposal,
@@ -41,11 +42,13 @@ import {
 } from '../../store'
 import { ConfirmIconButton } from '../ConfirmIconButton'
 import { Term } from '../Term'
-import { AsyncButton, Badge, ErrorLine, ShortHash } from '../ui'
+import { BotIcon, UsersIcon } from '../icons'
+import { AsyncButton, ErrorLine, ShortHash } from '../ui'
 import { useDescribeContext } from '../useDescribe'
 import { PreviewView } from './GatePreview'
-import { type OwnerStep, OwnerTxTimeline } from './OwnerTxTimeline'
+import { type AuditEvent, AuditLog } from './OwnerTxTimeline'
 import {
+  type OwnerRowData,
   type TimedSimulation,
   hasGasFields,
   readMergedTimelock,
@@ -53,7 +56,9 @@ import {
   simulateAtTime,
 } from './ownerTx'
 import { type RelayLog, relay, useRelayer } from './relayer'
+import { type ChipTone, QueueItem } from './QueueItem'
 import { useSafeNonce } from './useQueueData'
+import { useLabelContext } from './useV2'
 
 const ROW_REFRESH_MS = 15_000
 
@@ -66,44 +71,6 @@ export function useLocalOwners(): Role[] {
   return rolesStore
     .use()
     .filter((r) => roleKind(r) === 'eoa' && (state?.owners ?? []).some((o) => isAddressEqual(o, r.address)))
-}
-
-/** Countdown, ready, frozen, void or expired, as the Timelock check would judge it now. */
-function StatusBadge({
-  status,
-  frozenUntil,
-  isConfiguration,
-}: {
-  status: { status: ScheduleStatus; readyAt: bigint; expiresAt?: bigint }
-  frozenUntil: bigint
-  isConfiguration: boolean
-}) {
-  const now = BigInt(useNow())
-  switch (status.status) {
-    case 'waiting':
-      return (
-        <Badge tone="warn">
-          ready in {formatDuration(status.readyAt - now)} ({formatClock(status.readyAt)})
-        </Badge>
-      )
-    case 'ready':
-      return (
-        <Badge tone="ok">
-          ready{status.expiresAt !== undefined && ` · expires in ${formatDuration(status.expiresAt - now)}`}
-        </Badge>
-      )
-    case 'frozen':
-      return (
-        <Badge tone="bad">
-          frozen until {formatClock(frozenUntil)}
-          {!isConfiguration && ', then void'}
-        </Badge>
-      )
-    case 'void':
-      return <Badge tone="bad">void after a freeze: schedule again</Badge>
-    case 'expired':
-      return <Badge tone="bad">expired: schedule again</Badge>
-  }
 }
 
 /**
@@ -243,25 +210,170 @@ function useRowDescribe(model: SafeV2Model) {
   return useDescribeContext(isAttached)
 }
 
-/** The decoded parts of a transaction (configure changes, batch calls), folded. */
-function Lines({ lines, what }: { lines: readonly string[]; what: string }) {
-  if (lines.length === 0) return null
+/** The decoded call: its title, each change or batch call, then identifiers in small print. */
+function CallDetails({ title, lines, meta }: { title: string; lines: readonly string[]; meta: ReactNode }) {
   return (
-    <details className="queue-lines small">
-      <summary>{what}</summary>
-      <ul>
-        {lines.map((l, i) => (
-          <li key={i}>{l}</li>
-        ))}
-      </ul>
-    </details>
+    <>
+      <strong>{title}</strong>
+      {lines.length > 0 && (
+        <ul className="queue-lines small">
+          {lines.map((l, i) => (
+            <li key={i}>{l}</li>
+          ))}
+        </ul>
+      )}
+      <div className="queue-meta">{meta}</div>
+    </>
   )
+}
+
+/** Who sent a transaction: for a schedule, the relayer (owners) or the module itself. */
+function useSender(tx?: Hex) {
+  return useAsync(
+    async () => (tx ? (await publicClient.getTransaction({ hash: tx })).from : undefined),
+    tx ?? 'none',
+  ).data
+}
+
+const at = (seconds: bigint) => formatTime(Number(seconds) * 1000)
+
+/** Scheduled / ready / executed lines of the audit log, shared by owner and module schedules. */
+function scheduleEvents({
+  schedule,
+  status,
+  scheduledBy,
+  executed,
+  now,
+}: {
+  schedule?: { scheduledAt: bigint }
+  status?: { status: ScheduleStatus; readyAt: bigint; expiresAt?: bigint }
+  scheduledBy?: string
+  executed: boolean
+  now: bigint
+}): AuditEvent[] {
+  const s = status?.status
+  const lapsed = s === 'void' || s === 'expired'
+  return [
+    {
+      key: 'scheduled',
+      label: lapsed ? (s === 'void' ? 'Void after a freeze' : 'Expired') : 'Scheduled',
+      detail: schedule
+        ? `${scheduledBy ? `by ${scheduledBy} · ` : ''}${at(schedule.scheduledAt)}${lapsed ? ' · schedule it again' : ''}`
+        : undefined,
+      state: lapsed ? 'bad' : schedule ? 'done' : 'current',
+    },
+    {
+      key: 'ready',
+      label:
+        status && s !== 'ready' && !executed && !lapsed
+          ? s === 'frozen'
+            ? 'Frozen'
+            : `Ready in ${formatDuration(status.readyAt - now)}`
+          : 'Ready',
+      detail: status
+        ? `${at(status.readyAt)}${status.expiresAt !== undefined ? ` · expires ${formatClock(status.expiresAt)}` : ''}`
+        : undefined,
+      state:
+        executed || s === 'ready' ? 'done' : s === 'frozen' ? 'bad' : s === 'waiting' ? 'current' : 'todo',
+    },
+    {
+      key: 'executed',
+      label: 'Executed',
+      state: executed ? 'done' : s === 'ready' ? 'current' : 'todo',
+    },
+  ]
+}
+
+/** What one owner row knows, derived the same way for the store note and the render. */
+function ownerFacts(
+  d: OwnerRowData | undefined,
+  entry: QueueEntry | undefined,
+  tracked: TrackedOwnerTx | undefined,
+  currentNonce: bigint | undefined,
+) {
+  const nonce = d?.data?.tx.nonce ?? entry?.nonce ?? tracked?.nonce
+  const nonceState =
+    nonce !== undefined && currentNonce !== undefined ? ownerNonceState(nonce, currentNonce) : undefined
+  const executed = !!d?.data?.executed || entry?.state === 'executed' || !!tracked?.executed
+  const cancelled = !executed && entry?.state === 'cancelled'
+  const closed: TrackedOwnerTx['closed'] = executed
+    ? 'executed'
+    : cancelled
+      ? 'cancelled'
+      : nonceState === 'stale'
+        ? 'replaced'
+        : undefined
+  return { nonce, nonceState, executed, cancelled, closed }
+}
+
+/** The owners' audit log: proposed, signed, scheduled (by whom), ready, executed. */
+function OwnerLog({
+  d,
+  tracked,
+  threshold,
+  status,
+  scheduledTx,
+  executed,
+  closed,
+  nameOf,
+}: {
+  d: OwnerRowData
+  tracked?: TrackedOwnerTx
+  threshold: number
+  status?: { status: ScheduleStatus; readyAt: bigint; expiresAt?: bigint }
+  scheduledTx?: Hex
+  executed: boolean
+  closed?: TrackedOwnerTx['closed']
+  nameOf: (a: Address) => string
+}) {
+  const now = BigInt(useNow())
+  const sender = useSender(scheduledTx)
+  const data = d.data
+  const signed = !!data && data.count >= threshold
+  const proposedAt = data?.proposedAt ?? tracked?.addedAt
+  const events: AuditEvent[] = [
+    {
+      key: 'created',
+      label: data?.proposer ? `Proposed by ${nameOf(data.proposer)}` : tracked ? 'Created here' : 'Created',
+      detail: proposedAt ? formatTime(proposedAt) : undefined,
+      state: 'done',
+    },
+    {
+      key: 'signed',
+      label: data ? `Signed (${data.count}/${threshold})` : 'Signed',
+      detail: data?.signers?.length
+        ? data.signers.map((s) => nameOf(s.signer)).join(', ')
+        : !data
+          ? 'Signatures not readable here'
+          : undefined,
+      // A schedule or an execution needed the signatures, even when they cannot be read here.
+      state: signed || executed || d.schedule ? 'done' : 'current',
+    },
+    ...(d.route?.route === 'now' && !d.schedule
+      ? [
+          { key: 'now', label: 'No delay needed', state: 'done' as const },
+          { key: 'executed', label: 'Executed', state: executed ? ('done' as const) : ('current' as const) },
+        ]
+      : scheduleEvents({
+          schedule: d.schedule,
+          status,
+          scheduledBy: sender && nameOf(sender),
+          executed,
+          now,
+        }).map((e) =>
+          e.key === 'scheduled' && !signed && !d.schedule ? { ...e, state: 'todo' as const } : e,
+        )),
+  ]
+  if (closed === 'cancelled') events.push({ key: 'closed', label: 'Cancelled for good', state: 'bad' })
+  if (closed === 'replaced')
+    events.push({ key: 'closed', label: 'Nonce used by another transaction', state: 'bad' })
+  return <AuditLog events={events} />
 }
 
 /**
  * One owner transaction, from signatures to execution: tracked by this app (proposed or signed
- * here) or found scheduled on-chain. A human title, the timeline, the one next action, then the
- * nonce and Safe transaction hash in small print.
+ * here) or found scheduled on-chain. One line (nonce, title, time, signatures, status, next
+ * action), expanding to the decoded call and the audit log.
  */
 export function OwnerTxRow({
   hash,
@@ -271,6 +383,7 @@ export function OwnerTxRow({
   model,
   currentNonce,
   onChange,
+  showNonce = true,
 }: {
   hash: Hex
   entry?: QueueEntry
@@ -279,12 +392,15 @@ export function OwnerTxRow({
   model: SafeV2Model
   currentNonce?: bigint
   onChange: () => void
+  showNonce?: boolean
 }) {
   const { safe, state, getQueuedTx } = useSandbox()
   const { deployment } = engine
   const now = BigInt(useNow())
   const relayer = useRelayer()
   const describeCtx = useRowDescribe(model)
+  const ctx = useLabelContext(engine)
+  const nameOf = (a: Address) => ctx.nameOf?.(a) ?? shortAddress(a)
   const threshold = state?.threshold ?? 1
   const fallback = entry
     ? { to: entry.to, value: entry.value, data: entry.data, operation: entry.operation }
@@ -304,46 +420,61 @@ export function OwnerTxRow({
           : ROW_REFRESH_MS,
   )
   const d = live.data
+  const facts = ownerFacts(d, entry, tracked, currentNonce)
+  const isTracked = !!tracked
+  // Remember the nonce and the outcome, so the Queue groups and closes it before rows load.
+  useEffect(() => {
+    if (isTracked && facts.nonce !== undefined)
+      noteOwnerTx(safe, hash, { nonce: facts.nonce, closed: facts.closed })
+  }, [isTracked, safe, hash, facts.nonce, facts.closed])
+
   const remove = tracked && (
     <ConfirmIconButton
       title="Stop following it here (nothing changes on-chain)"
       onConfirm={() => untrackOwnerTx(safe, hash)}
     />
   )
+  const nonceCell = showNonce ? facts.nonce?.toString() : undefined
   if (!d) {
     return (
-      <li className="queue-entry">
-        <div className="queue-head">
-          <strong>{tracked?.label ?? 'Owner transaction'}</strong>
-          {live.error !== undefined ? (
-            <ErrorLine message={`Could not be read: ${String(live.error)}`} />
-          ) : (
-            <span className="muted small">loading…</span>
-          )}
-          <span className="queue-end">{remove}</span>
-        </div>
-      </li>
+      <QueueItem
+        nonce={nonceCell}
+        icon={<UsersIcon />}
+        title={tracked?.label ?? 'Owner transaction'}
+        status={
+          live.error !== undefined
+            ? { tone: 'bad', label: 'Could not be read' }
+            : { tone: 'neutral', label: 'Loading…' }
+        }
+        call={
+          <>
+            {live.error !== undefined && <ErrorLine message={String(live.error)} />}
+            <div className="queue-meta">
+              <ShortHash hash={hash} label="Safe tx" />
+              {remove}
+            </div>
+          </>
+        }
+        log={null}
+      />
     )
   }
 
+  const { nonce, nonceState, executed, cancelled, closed } = facts
   const tx = d.data?.tx
   const call = tx ?? fallback
   const summary = call ? describeCall(call, describeCtx) : undefined
   const title = summary?.title ?? tracked?.label ?? 'Owner transaction'
   const lines = summary?.lines ?? []
-  const nonce = tx?.nonce ?? entry?.nonce
-  const nonceState =
-    nonce !== undefined && currentNonce !== undefined ? ownerNonceState(nonce, currentNonce) : undefined
-  const executed = !!d.data?.executed || entry?.state === 'executed' || !!tracked?.executed
-  const cancelled = entry?.state === 'cancelled'
   const status = d.schedule && d.merged ? scheduleStatus(d.schedule, d.merged, now) : undefined
   const badGas = !!tx && hasGasFields(tx)
   const signed = !!d.data && d.data.count >= threshold && !d.data.unusable
-  const closed = executed || cancelled || nonceState === 'stale'
   const delay = d.merged && d.merged.delay > 0n ? durationLabel(d.merged.delay) : undefined
   const log: RelayLog = { label: title, safeTxHash: hash, nonce, lines }
+  const proposedAt =
+    d.data?.proposedAt ?? tracked?.addedAt ?? (d.schedule && Number(d.schedule.scheduledAt) * 1000)
 
-  const step: OwnerStep = executed
+  const step: 'sign' | 'schedule' | 'wait' | 'execute' | 'done' = executed
     ? 'done'
     : !d.schedule && !signed
       ? 'sign'
@@ -382,123 +513,158 @@ export function OwnerTxRow({
     return sent
   }
 
-  const by = relayer ? ` with ${relayer.label}` : ''
+  const by = relayer ? ` with ${relayer.label}` : ' (add a relayer in Roles first)'
+  const blocked = badGas || !!d.data?.unusable || d.route?.route === 'denied'
+  const chip: { tone: ChipTone; label: string } = executed
+    ? { tone: 'ok', label: 'Executed' }
+    : cancelled
+      ? { tone: 'bad', label: 'Cancelled' }
+      : closed === 'replaced'
+        ? { tone: 'bad', label: 'Replaced' }
+        : blocked
+          ? { tone: 'bad', label: 'Cannot run' }
+          : step === 'sign'
+            ? { tone: 'warn', label: 'Needs signatures' }
+            : step === 'schedule'
+              ? status
+                ? { tone: 'bad', label: status.status === 'void' ? 'Void' : 'Expired' }
+                : { tone: 'warn', label: 'Needs scheduling' }
+              : step === 'wait'
+                ? status?.status === 'frozen'
+                  ? { tone: 'bad', label: 'Frozen' }
+                  : { tone: 'neutral', label: 'Waiting' }
+                : nonceState === 'later'
+                  ? { tone: 'neutral', label: `After nonce ${currentNonce}` }
+                  : { tone: 'ok', label: 'Ready' }
+
+  const action =
+    closed || blocked ? undefined : step === 'schedule' && signed ? (
+      <AsyncButton
+        variant="primary"
+        disabled={!relayer}
+        onClick={schedule}
+        busyLabel="Scheduling…"
+        doneLabel="Scheduled"
+        title={`Sends the signatures to the Timelock${by}`}
+      >
+        Schedule
+      </AsyncButton>
+    ) : step === 'wait' && status?.status === 'waiting' ? (
+      <span className="qi-countdown small">in {formatDuration(status.readyAt - now)}</span>
+    ) : step === 'execute' && signed && nonceState === 'next' ? (
+      <AsyncButton
+        variant="primary"
+        disabled={!relayer}
+        onClick={execute}
+        busyLabel="Executing…"
+        doneLabel="Executed"
+        title={`execTransaction with the owners' signatures${by}`}
+      >
+        Execute
+      </AsyncButton>
+    ) : step === 'execute' && !signed && d.schedule ? (
+      // Only when the signatures cannot be read here (standalone): the app cannot send it itself.
+      <span className="small">Execute it in Safe{'{Wallet}'}</span>
+    ) : undefined
+
+  const more = !closed && (
+    <>
+      {step === 'wait' && signed && status && (
+        <ReadySimulation
+          readyAt={status.readyAt}
+          simulate={(time) =>
+            simulateAtTime(
+              relayer?.address ?? state?.owners[0] ?? safe,
+              execTransactionCall(safe, d.data!.tx, d.data!.signatures),
+              time,
+            )
+          }
+          fallback={() =>
+            runPreview(publicClient, deployment, safe, OWNERS, d.data!.tx, {
+              chainId: chain.id,
+              ownerNonce: d.data!.tx.nonce,
+              ctx: describeCtx,
+            })
+          }
+        />
+      )}
+      {d.schedule && !executed && (
+        <OwnerCancel
+          engine={engine}
+          model={model}
+          txHash={hash}
+          attachmentIds={d.schedule.attachmentIds}
+          isConfiguration={d.schedule.isConfiguration}
+          log={log}
+          onChange={onChange}
+        />
+      )}
+    </>
+  )
 
   return (
-    <li className="queue-entry">
-      <div className="queue-head">
-        <strong className="queue-title">{title}</strong>
-        {executed && <Badge tone="ok">executed</Badge>}
-        {!executed && cancelled && <Badge tone="bad">cancelled for good</Badge>}
-        {!executed && !cancelled && nonceState === 'stale' && (
-          <Badge tone="bad">dead: nonce already used</Badge>
-        )}
-        {!closed && status && d.merged && (
-          <StatusBadge
-            status={status}
-            frozenUntil={d.merged.frozenUntil}
-            isConfiguration={!!d.schedule?.isConfiguration}
+    <QueueItem
+      nonce={nonceCell}
+      icon={<UsersIcon />}
+      title={title}
+      time={proposedAt ? formatAgo(proposedAt, Number(now) * 1000) : undefined}
+      signatures={d.data && !executed ? { count: d.data.count, threshold } : undefined}
+      status={chip}
+      action={action}
+      more={more}
+      call={
+        <>
+          <CallDetails
+            title={title}
+            lines={lines}
+            meta={
+              <>
+                {nonce !== undefined && (
+                  <span>
+                    <Term k="nonce">nonce</Term> {nonce.toString()}
+                  </span>
+                )}
+                <ShortHash hash={hash} label="Safe tx" />
+                {delay && (
+                  <span>
+                    <Term k="timelock">delay</Term> {delay}
+                  </span>
+                )}
+                {remove}
+              </>
+            }
           />
-        )}
-        {!closed && nonceState === 'later' && (
-          <Badge tone="warn">after {(nonce! - currentNonce!).toString()} earlier owner transaction(s)</Badge>
-        )}
-        <span className="queue-end">{remove}</span>
-      </div>
-      <Lines lines={lines} what={lines.length === 1 ? '1 detail' : `${lines.length} details`} />
-      {!closed && <OwnerTxTimeline current={step} delay={delay} />}
-      {!closed && (
-        <div className="row wrap queue-actions">
           {!d.data && !d.schedule && (
-            <span className="muted small">
+            <p className="muted small">
               Signatures not found{getQueuedTx ? ' in Safe{Wallet}' : ''}: open the app inside Safe
               {'{Wallet}'} to read them.
-            </span>
+            </p>
+          )}
+          {step === 'sign' && d.data && !blocked && (
+            <p className="small">
+              Sign it in Safe{'{Wallet}'}, <strong>do not execute</strong>: the relayer schedules it.
+            </p>
           )}
           {d.data?.unusable && <ErrorLine message={d.data.unusable} />}
           {badGas && (
             <ErrorLine message="safeTxGas or gasPrice is set, which V2 refuses: propose it again." />
           )}
-          {step === 'sign' && d.data && !badGas && (
-            <span className="small">
-              {d.data.count}/{threshold} signatures: sign it in Safe{'{Wallet}'},{' '}
-              <strong>do not execute</strong>.
-            </span>
-          )}
-          {step === 'schedule' && signed && !badGas && d.route?.route !== 'denied' && (
-            <AsyncButton
-              variant="primary"
-              disabled={!relayer}
-              onClick={schedule}
-              busyLabel="Scheduling…"
-              doneLabel="Scheduled"
-              title={`Sends the signatures to the Timelock${by}`}
-            >
-              Schedule
-            </AsyncButton>
-          )}
           {d.route?.route === 'denied' && <ErrorLine message={d.route.reason} />}
-          {step === 'wait' && signed && status && (
-            <ReadySimulation
-              readyAt={status.readyAt}
-              simulate={(time) =>
-                simulateAtTime(
-                  relayer?.address ?? state?.owners[0] ?? safe,
-                  execTransactionCall(safe, d.data!.tx, d.data!.signatures),
-                  time,
-                )
-              }
-              fallback={() =>
-                runPreview(publicClient, deployment, safe, OWNERS, d.data!.tx, {
-                  chainId: chain.id,
-                  ownerNonce: d.data!.tx.nonce,
-                  ctx: describeCtx,
-                })
-              }
-            />
-          )}
-          {step === 'execute' && signed && !badGas && nonceState === 'next' && (
-            <AsyncButton
-              variant="primary"
-              disabled={!relayer}
-              onClick={execute}
-              busyLabel="Executing…"
-              doneLabel="Executed"
-              title={`execTransaction with the owners' signatures${by}`}
-            >
-              Execute
-            </AsyncButton>
-          )}
-          {step === 'execute' && !signed && d.schedule && (
-            <span className="small">Ready: execute it from the Safe{'{Wallet}'} queue.</span>
-          )}
-          {d.schedule && !executed && (
-            <OwnerCancel
-              engine={engine}
-              model={model}
-              txHash={hash}
-              attachmentIds={d.schedule.attachmentIds}
-              isConfiguration={d.schedule.isConfiguration}
-              log={log}
-              onChange={onChange}
-            />
-          )}
-        </div>
-      )}
-      <div className="queue-meta">
-        {nonce !== undefined && (
-          <span>
-            <Term k="nonce">nonce</Term> {nonce.toString()}
-          </span>
-        )}
-        <ShortHash hash={hash} label="Safe tx" />
-        {d.data && !executed && (
-          <span>
-            {d.data.count}/{threshold} signatures
-          </span>
-        )}
-      </div>
-    </li>
+        </>
+      }
+      log={
+        <OwnerLog
+          d={d}
+          tracked={tracked}
+          threshold={threshold}
+          status={status}
+          scheduledTx={entry?.scheduledTx}
+          executed={executed}
+          closed={closed}
+          nameOf={nameOf}
+        />
+      }
+    />
   )
 }
 
@@ -539,7 +705,21 @@ export function InlineOwnerTx({
 export type ModuleEntry = Pick<
   QueueEntry,
   'txHash' | 'actor' | 'to' | 'value' | 'data' | 'operation' | 'isConfiguration'
->
+> & { scheduledTx?: Hex }
+
+/** The module's audit log: scheduled (by the module), ready, executed. */
+function ModuleLog({
+  schedule,
+  status,
+  actor,
+}: {
+  schedule: { scheduledAt: bigint }
+  status: { status: ScheduleStatus; readyAt: bigint; expiresAt?: bigint }
+  actor: string
+}) {
+  const now = BigInt(useNow())
+  return <AuditLog events={scheduleEvents({ schedule, status, scheduledBy: actor, executed: false, now })} />
+}
 
 /** A module's own schedule: countdown, execute and cancel as that module when its key is here. */
 export function ModuleEntryRow({
@@ -575,7 +755,19 @@ export function ModuleEntryRow({
         : undefined,
   )
   const data = live.data
-  if (!data) return <li className="muted small queue-entry">loading…</li>
+  const actor = actorLabel(entry.actor, ctx.nameOf)
+  const summary = describeCall(entry, describeCtx)
+  const title = `${actor}: ${summary.title}`
+  if (!data)
+    return (
+      <QueueItem
+        icon={<BotIcon />}
+        title={title}
+        status={{ tone: 'neutral', label: 'Loading…' }}
+        call={<CallDetails title={title} lines={summary.lines} meta={null} />}
+        log={null}
+      />
+    )
   if (!data.schedule) return null
   const { merged } = data
   const status = scheduleStatus(data.schedule, merged, now)
@@ -590,11 +782,6 @@ export function ModuleEntryRow({
     (r) => hasLocalKey(r) && cancellers.some((c) => isAddressEqual(c, r.address)),
   )
   const actorRole = roles.find((r) => isAddressEqual(r.address, entry.actor))
-  const actor = actorLabel(entry.actor, ctx.nameOf)
-  const summary = describeCall(entry, describeCtx)
-  const title = `${actor}: ${summary.title}`
-  const step: OwnerStep =
-    status.status === 'ready' ? 'execute' : status.status === 'waiting' ? 'wait' : 'schedule'
   const call = { to: entry.to, value: entry.value, data: entry.data, operation: entry.operation }
   const cancelAs = (role: Role) => async () => {
     const hash = await relay(role, timelockCalls.cancel(deployment, safe, entry.txHash), {
@@ -605,90 +792,114 @@ export function ModuleEntryRow({
     onChange()
     return hash
   }
+  const chip: { tone: ChipTone; label: string } =
+    status.status === 'ready'
+      ? { tone: 'ok', label: 'Ready' }
+      : status.status === 'waiting'
+        ? { tone: 'neutral', label: 'Waiting' }
+        : {
+            tone: 'bad',
+            label: status.status === 'frozen' ? 'Frozen' : status.status === 'void' ? 'Void' : 'Expired',
+          }
+
+  const action =
+    status.status === 'ready' && actorRole ? (
+      <AsyncButton
+        variant="primary"
+        busyLabel="Executing…"
+        doneLabel="Executed"
+        onClick={async () => {
+          const ok = await runSteps(safe, actorRole, [{ label: summary.title, tx: call }], 'execute')
+          onChange()
+          if (!ok) throw new Error('Refused or reverted: see Activity')
+        }}
+        title={`Executes the scheduled call as ${actorRole.label}`}
+      >
+        Execute
+      </AsyncButton>
+    ) : status.status === 'waiting' ? (
+      <span className="qi-countdown small">in {formatDuration(status.readyAt - now)}</span>
+    ) : undefined
 
   return (
-    <li className="queue-entry">
-      <div className="queue-head">
-        <strong className="queue-title">{title}</strong>
-        <StatusBadge
-          status={status}
-          frozenUntil={merged.frozenUntil}
-          isConfiguration={entry.isConfiguration}
-        />
-      </div>
-      <Lines lines={summary.lines} what={`${summary.lines.length} details`} />
-      <OwnerTxTimeline module current={step} delay={durationLabel(merged.delay)} />
-      <div className="row wrap queue-actions">
-        {actorRole && status.status === 'ready' && (
-          <AsyncButton
-            variant="primary"
-            busyLabel="Executing…"
-            doneLabel="Executed"
-            onClick={async () => {
-              const ok = await runSteps(safe, actorRole, [{ label: summary.title, tx: call }], 'execute')
-              onChange()
-              if (!ok) throw new Error('Refused or reverted: see Activity')
-            }}
-            title={`Executes the scheduled call as ${actorRole.label}`}
-          >
-            Execute as {actorRole.label}
-          </AsyncButton>
-        )}
-        {status.status === 'waiting' && (
-          <ReadySimulation
-            readyAt={status.readyAt}
-            simulate={(time) =>
-              simulateAtTime(
-                entry.actor,
-                {
-                  to: safe,
-                  data: encodeFunctionData({
-                    abi: safeAbi,
-                    functionName: 'execTransactionFromModule',
-                    args: [entry.to, entry.value, entry.data, entry.operation],
-                  }),
-                },
-                time,
-              )
-            }
-            fallback={() =>
-              runPreview(publicClient, deployment, safe, entry.actor as Address, call, {
-                chainId: chain.id,
-                ctx: describeCtx,
-              })
+    <QueueItem
+      icon={<BotIcon />}
+      title={title}
+      time={formatAgo(Number(data.schedule.scheduledAt) * 1000, Number(now) * 1000)}
+      status={chip}
+      action={action}
+      more={
+        <>
+          {status.status === 'waiting' && (
+            <ReadySimulation
+              readyAt={status.readyAt}
+              simulate={(time) =>
+                simulateAtTime(
+                  entry.actor,
+                  {
+                    to: safe,
+                    data: encodeFunctionData({
+                      abi: safeAbi,
+                      functionName: 'execTransactionFromModule',
+                      args: [entry.to, entry.value, entry.data, entry.operation],
+                    }),
+                  },
+                  time,
+                )
+              }
+              fallback={() =>
+                runPreview(publicClient, deployment, safe, entry.actor as Address, call, {
+                  chainId: chain.id,
+                  ctx: describeCtx,
+                })
+              }
+            />
+          )}
+          {actorRole && roleKind(actorRole) === 'eoa' && (
+            <AsyncButton
+              variant="danger"
+              busyLabel="Cancelling…"
+              doneLabel="Cancelled"
+              onClick={cancelAs(actorRole)}
+              title={`${actorRole.label} scheduled it, so it may cancel it`}
+            >
+              Cancel as {actorRole.label}
+            </AsyncButton>
+          )}
+          {cancellerRole && (
+            <AsyncButton
+              variant="danger"
+              busyLabel="Cancelling…"
+              doneLabel="Cancelled"
+              onClick={cancelAs(cancellerRole)}
+              title={`${cancellerRole.label} is a listed canceller`}
+            >
+              Cancel as {cancellerRole.label}
+            </AsyncButton>
+          )}
+        </>
+      }
+      call={
+        <>
+          <CallDetails
+            title={summary.title}
+            lines={summary.lines}
+            meta={
+              <>
+                <span>
+                  <Term k="timelock">delay</Term> {durationLabel(merged.delay)}
+                  {merged.window > 0n && `, window ${durationLabel(merged.window)}`}
+                </span>
+                <ShortHash hash={entry.txHash} label="call" />
+              </>
             }
           />
-        )}
-        {actorRole && roleKind(actorRole) === 'eoa' && (
-          <AsyncButton
-            variant="danger"
-            busyLabel="Cancelling…"
-            doneLabel="Cancelled"
-            onClick={cancelAs(actorRole)}
-            title={`${actorRole.label} scheduled it, so it may cancel it`}
-          >
-            Cancel as {actorRole.label}
-          </AsyncButton>
-        )}
-        {cancellerRole && (
-          <AsyncButton
-            variant="danger"
-            busyLabel="Cancelling…"
-            doneLabel="Cancelled"
-            onClick={cancelAs(cancellerRole)}
-            title={`${cancellerRole.label} is a listed canceller`}
-          >
-            Cancel as {cancellerRole.label}
-          </AsyncButton>
-        )}
-      </div>
-      <div className="queue-meta">
-        <span>
-          <Term k="timelock">delay</Term> {durationLabel(merged.delay)}
-          {merged.window > 0n && `, window ${durationLabel(merged.window)}`}
-        </span>
-        <ShortHash hash={entry.txHash} label="call" />
-      </div>
-    </li>
+          {status.status === 'ready' && !actorRole && (
+            <p className="muted small">Ready: {actor} executes it itself (its key is not in this browser).</p>
+          )}
+        </>
+      }
+      log={<ModuleLog schedule={data.schedule} status={status} actor={actor} />}
+    />
   )
 }

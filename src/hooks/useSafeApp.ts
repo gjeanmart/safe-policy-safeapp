@@ -18,8 +18,35 @@ export type QueuedSafeTx = {
   refundReceiver: Address
   nonce: bigint
   confirmationsRequired: number
-  signatures: { signer: Address; signature: Hex }[]
+  /** `submittedAt`: when the owner confirmed, in ms. */
+  signatures: { signer: Address; signature: Hex; submittedAt?: number }[]
   executed: boolean
+  /** Who proposed it in Safe{Wallet}, and when (ms). */
+  proposer?: Address
+  submittedAt?: number
+}
+
+/** Which Safe Apps SDK signing call a message probe uses. */
+export type MessageProbeKind = 'signMessage' | 'signTypedMessage'
+
+/** Everything Safe{Wallet} answered to a test message signature, raw, for the Settings spike. */
+export type MessageProbe = {
+  kind: MessageProbeKind
+  /** From `sdk.safe.getInfo()`: whether off-chain (ERC-1271) signing can work depends on it. */
+  safe?: { version: string | null; fallbackHandler: string | null; threshold: number }
+  /** `sdk.eth.setSafeSettings([{ offChainSigning: true }])`: what Safe{Wallet} kept. */
+  settings?: unknown
+  /** EIP-191 / EIP-712 hash of the message itself (not the Safe message hash). */
+  messageHash: string
+  /** `{ messageHash }`: signed off-chain; `{ safeTxHash }`: a signMessage transaction was proposed. */
+  response?: unknown
+  /** `sdk.safe.getOffChainSignature(messageHash)`: the combined owner signatures once complete. */
+  offChainSignature?: string
+  /** The message as the Safe Client Gateway stores it (confirmations, prepared signature). */
+  gateway?: unknown
+  /** `sdk.safe.isMessageHashSigned`: the Safe's isValidSignature, through Safe{Wallet}'s RPC. */
+  validOnChain?: boolean
+  errors: { step: string; message: string }[]
 }
 
 export type SafeAppConnection =
@@ -31,6 +58,7 @@ export type SafeAppConnection =
       chainId: number
       propose: (txs: SafeTx[]) => Promise<string>
       getQueuedTx: (safeTxHash: string) => Promise<QueuedSafeTx>
+      probeMessageSigning: (kind: MessageProbeKind) => Promise<MessageProbe>
     }
 
 /**
@@ -48,6 +76,75 @@ const SAFE_WALLET_ORIGINS = [
 ]
 
 const sdk = new SafeAppsSDK({ allowedDomains: SAFE_WALLET_ORIGINS })
+
+const PROBE_TEXT = 'Safe Policy Sandbox: off-chain signing test'
+
+/** A minimal EIP-712 payload: one string field, domain bound to this chain. */
+const probeTypedData = () => ({
+  domain: { name: 'Safe Policy Sandbox', version: '1', chainId: chain.id },
+  types: { Test: [{ name: 'text', type: 'string' }] },
+  primaryType: 'Test',
+  message: { text: PROBE_TEXT },
+})
+
+const errorText = (error: unknown) =>
+  error instanceof Error ? error.message : typeof error === 'string' ? error : JSON.stringify(error)
+
+/**
+ * Asks Safe{Wallet} to sign a test message and records every answer, so the user can see whether
+ * this Safe signs off-chain (a message hash, then signatures) or proposes an on-chain signMessage
+ * transaction. Each step runs even when an earlier one failed.
+ */
+async function probeMessageSigning(kind: MessageProbeKind, chainId: number): Promise<MessageProbe> {
+  const errors: MessageProbe['errors'] = []
+  const attempt = async <T>(step: string, run: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      return await run()
+    } catch (error) {
+      errors.push({ step, message: errorText(error) })
+      return undefined
+    }
+  }
+  const typed = probeTypedData()
+  const info = await attempt('getInfo', () => sdk.safe.getInfo())
+  const settings = await attempt('setSafeSettings', () =>
+    sdk.eth.setSafeSettings([{ offChainSigning: true }]),
+  )
+  const messageHash =
+    kind === 'signMessage'
+      ? sdk.safe.calculateMessageHash(PROBE_TEXT)
+      : sdk.safe.calculateTypedMessageHash(typed)
+  const response = await attempt(kind, () =>
+    kind === 'signMessage' ? sdk.txs.signMessage(PROBE_TEXT) : sdk.txs.signTypedMessage(typed),
+  )
+  const safeMessageHash = response && 'messageHash' in response ? response.messageHash : undefined
+  const offChainSignature = safeMessageHash
+    ? await attempt('getOffChainSignature', () => sdk.safe.getOffChainSignature(safeMessageHash))
+    : undefined
+  const gateway = safeMessageHash
+    ? await attempt('gateway message', async () => {
+        const res = await fetch(
+          `https://safe-client.safe.global/v1/chains/${chainId}/messages/${safeMessageHash}`,
+        )
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return (await res.json()) as unknown
+      })
+    : undefined
+  const validOnChain = await attempt('isMessageHashSigned', () =>
+    sdk.safe.isMessageHashSigned(messageHash, offChainSignature || '0x'),
+  )
+  return {
+    kind,
+    safe: info && { version: info.version, fallbackHandler: info.fallbackHandler, threshold: info.threshold },
+    settings,
+    messageHash,
+    response,
+    offChainSignature,
+    gateway,
+    validOnChain,
+    errors,
+  }
+}
 
 /** How long to wait for Safe{Wallet} to answer before assuming we are not in its iframe. */
 const HANDSHAKE_TIMEOUT_MS = 1500
@@ -105,11 +202,22 @@ export function useSafeApp(): SafeAppConnection {
           nonce: BigInt(info.nonce),
           confirmationsRequired: info.confirmationsRequired,
           signatures: info.confirmations.flatMap((c) =>
-            c.signature ? [{ signer: getAddress(c.signer.value), signature: c.signature as Hex }] : [],
+            c.signature
+              ? [
+                  {
+                    signer: getAddress(c.signer.value),
+                    signature: c.signature as Hex,
+                    submittedAt: c.submittedAt,
+                  },
+                ]
+              : [],
           ),
           executed: details.executedAt != null,
+          proposer: info.proposer ? getAddress(info.proposer.value) : undefined,
+          submittedAt: info.submittedAt,
         }
       },
+      probeMessageSigning: (kind) => probeMessageSigning(kind, info.chainId),
     }
   }, [info])
 }

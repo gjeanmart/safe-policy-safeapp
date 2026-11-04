@@ -30,6 +30,10 @@ export type OwnerTxData = {
   executed: boolean
   /** A signature the guard cannot use (a contract owner): the reason. */
   unusable?: string
+  /** From Safe{Wallet}: who proposed it and when (ms), and who signed when. */
+  proposer?: Address
+  proposedAt?: number
+  signers?: { signer: Address; at?: number }[]
 }
 
 const fromQueued = (q: QueuedSafeTx): OwnerTxData => {
@@ -57,6 +61,9 @@ const fromQueued = (q: QueuedSafeTx): OwnerTxData => {
     count: q.signatures.length,
     executed: q.executed,
     unusable,
+    proposer: q.proposer,
+    proposedAt: q.submittedAt,
+    signers: q.signatures.map((x) => ({ signer: x.signer, at: x.submittedAt })),
   }
 }
 
@@ -77,7 +84,8 @@ export async function loadOwnerTx(
   }
   const wallet = getQueuedTx ? await getQueuedTx(hash).then(fromQueued, () => undefined) : undefined
   if (!wallet) return local
-  if (local && local.count > wallet.count) return { ...local, executed: wallet.executed }
+  if (local && local.count > wallet.count)
+    return { ...local, executed: wallet.executed, proposer: wallet.proposer, proposedAt: wallet.proposedAt }
   return wallet
 }
 

@@ -22,15 +22,17 @@ import {
   selectorName,
   timelockCalls,
 } from '../../lib/v2'
-import { hasLocalKey, roleKind, rolesStore, v2TrackedStore } from '../../store'
+import { hasLocalKey, relayStore, roleKind, rolesStore, v2TrackedStore } from '../../store'
 import { Term } from '../Term'
 import { InfoTip } from '../Tooltip'
+import { GearIcon } from '../icons'
 import { AsyncButton, Badge, CopyButton, Notice } from '../ui'
 import { FreezeBadge } from './OrgChart'
+import { QueueGroup } from './QueueItem'
 import { ModuleEntryRow, OwnerTxRow } from './QueueRows'
-import { RelayerBar, relay } from './relayer'
-import { countNeedingAction, useSafeNonce, useTimelockLogs } from './useQueueData'
-import { useV2 } from './useV2'
+import { RelayerBar, relay, useRelayer } from './relayer'
+import { countNeedingAction, isTrackedClosed, useSafeNonce, useTimelockLogs } from './useQueueData'
+import { useLabelContext, useV2 } from './useV2'
 
 export { useLocalOwners } from './QueueRows'
 
@@ -89,11 +91,7 @@ function FreezeControls({
       </p>
     )
   return (
-    <ul className="plain stack">
-      <li className="muted small">
-        A freeze stops new transactions of that actor. Allowances, operator rights and pre-signed orders stay
-        usable: revoke them separately.
-      </li>
+    <ul className="plain qi-list">
       {timelocks.map((a) => {
         const { guardians, lifters } = a.settings.settings
         const phase = freezePhase(a.freeze, BigInt(now))
@@ -104,15 +102,16 @@ function FreezeControls({
         const window = actorWindowPhase(windows.data?.get(a.scope.actor), BigInt(now))
         const who = actorLabel(a.scope.actor, ctx.nameOf)
         return (
-          <li key={a.attachmentId} className="row wrap">
-            <strong>{actorLabel(a.scope.actor, ctx.nameOf)}</strong>
+          <li key={a.attachmentId} className="row wrap guardian-line">
+            <strong>{who}</strong>
             <span className="small">{callPhrase(a.scope, ctx)}</span>
             <FreezeBadge a={a} now={now} />
             {phase === 'active' && <Badge tone="ok">active</Badge>}
-            <span className="muted small">
-              guardians {listLabel(guardians, ctx)}
-              {lifters.length > 0 && ` · lifters ${listLabel(lifters, ctx)}`}
-            </span>
+            <InfoTip>
+              Guardians {listLabel(guardians, ctx)}
+              {lifters.length > 0 && `; lifters ${listLabel(lifters, ctx)}`}
+            </InfoTip>
+            <span className="queue-end" />
             {phase === 'active' && window.phase === 'cooling' && (
               <span className="muted small">
                 {who} cools down until {formatTime(Number(window.until) * 1000)}: no freeze of its rules
@@ -174,10 +173,36 @@ function SendItYourself({ what, call }: { what: 'freeze' | 'lift'; call: { to: A
     </span>
   )
 }
+/** Relayer and auto-schedule, folded behind a gear at the top right of the queue. */
+function QueueSettings({ nonce }: { nonce?: bigint }) {
+  const relayer = useRelayer()
+  const { autoSchedule } = relayStore.use()
+  return (
+    <div className="row queue-settings">
+      <span className="muted small">
+        <Term k="nonce">Nonce</Term> {nonce?.toString() ?? '…'}
+      </span>
+      <details className="popover">
+        <summary className="muted small" title="Relayer and auto-schedule">
+          <GearIcon /> {relayer ? relayer.label : 'No relayer'}
+          {autoSchedule && relayer ? ' · auto' : ''}
+        </summary>
+        <div className="popover-body">
+          <RelayerBar />
+          <p className="muted small">
+            The owners sign in Safe{'{Wallet}'} (sign only, do not execute). The relayer schedules it, then
+            executes it with the same signatures once the delay has passed.
+          </p>
+        </div>
+      </details>
+    </div>
+  )
+}
+
 /**
- * One queue for everything TimelockPolicy delays. Owner transactions (tracked by this app or
- * scheduled on-chain) each get one row with their next step; module schedules follow; then
- * Freeze / Lift per attachment.
+ * One queue for everything TimelockPolicy delays, Safe{Wallet} style: Next (the owner transaction
+ * at the current nonce), Queued (later nonces), module schedules, then the guardians' freeze and
+ * lift. Closed items leave for History, in the Activity tab.
  */
 function Queue({
   engine,
@@ -202,100 +227,116 @@ function Queue({
     nonce.reload()
     onChange()
   }
+  const current = nonce.data
   const queue = logs.data?.queue ?? []
   const same = (a: Hex, b: Hex) => a.toLowerCase() === b.toLowerCase()
-  const isTracked = (h: Hex) => tracked.some((t) => same(t.hash, h))
-  const openOwners = queue.filter((e) => isOwnerEntry(e) && e.state === 'scheduled')
-  const ownerHashes = [...openOwners.map((e) => e.txHash), ...tracked.map((t) => t.hash)].filter(
-    (h, i, all) => all.findIndex((x) => same(x, h)) === i,
+  const entryOf = (h: Hex) => queue.find((e) => isOwnerEntry(e) && same(e.txHash, h))
+  const trackedOf = (h: Hex) => tracked.find((t) => same(t.hash, h))
+  const openOwners = queue.filter(
+    (e) => isOwnerEntry(e) && e.state === 'scheduled' && (current === undefined || e.nonce >= current),
   )
-  const openModules = queue.filter((e) => !isOwnerEntry(e) && e.state === 'scheduled')
-  const closed = queue.filter((e) => e.state !== 'scheduled' && !isTracked(e.txHash)).slice(0, 8)
+  const owners = [
+    ...openOwners.map((e) => ({ hash: e.txHash, nonce: e.nonce as bigint | undefined })),
+    ...tracked
+      .filter(
+        (t) =>
+          !isTrackedClosed(t, current) &&
+          entryOf(t.hash)?.state !== 'executed' &&
+          entryOf(t.hash)?.state !== 'cancelled',
+      )
+      .map((t) => ({ hash: t.hash, nonce: t.nonce })),
+  ]
+    .filter((o, i, all) => all.findIndex((x) => same(x.hash, o.hash)) === i)
+    // Unknown nonces last; equal nonces (competing transactions) keep their order.
+    .sort((a, b) =>
+      a.nonce === b.nonce
+        ? 0
+        : a.nonce === undefined
+          ? 1
+          : b.nonce === undefined
+            ? -1
+            : a.nonce < b.nonce
+              ? -1
+              : 1,
+    )
+  const next = owners.filter((o) => current !== undefined && o.nonce === current)
+  const queued = owners.filter((o) => !next.includes(o))
+  const modules = queue.filter((e) => !isOwnerEntry(e) && e.state === 'scheduled')
+  const row = (o: { hash: Hex }) => (
+    <OwnerTxRow
+      key={o.hash.toLowerCase()}
+      hash={o.hash}
+      entry={entryOf(o.hash)}
+      tracked={trackedOf(o.hash)}
+      engine={engine}
+      model={model}
+      currentNonce={current}
+      onChange={reload}
+    />
+  )
 
   return (
     <div className="stack">
-      <div className="row wrap queue-bar">
-        <RelayerBar />
-        <span className="muted small queue-end">
-          Safe <Term k="nonce">nonce</Term> {nonce.data?.toString() ?? '…'}
-          <InfoTip>
-            Owner transactions this app proposed or signed, and everything a Timelock delays. The owners sign
-            in Safe{'{Wallet}'} (sign only, do not execute); the relayer schedules it, then executes it with
-            the same signatures once the delay has passed.
-          </InfoTip>
-        </span>
-      </div>
+      <QueueSettings nonce={current} />
       {logs.error !== undefined && (
         <Notice tone="bad" title="Could not read the queue">
           {describeError(logs.error)}
         </Notice>
       )}
-      <h3>Owner transactions</h3>
-      {ownerHashes.length === 0 ? (
+      {owners.length === 0 && modules.length === 0 ? (
         <p className="muted">
           {logs.loading && !logs.data
             ? 'Scanning…'
-            : 'None yet. Propose one from the draft or the playground.'}
+            : 'Nothing waits. Propose an owner transaction from the draft or the playground.'}
         </p>
       ) : (
-        <ul className="plain stack">
-          {ownerHashes.map((h) => (
-            <OwnerTxRow
-              key={h.toLowerCase()}
-              hash={h}
-              entry={queue.find((e) => isOwnerEntry(e) && same(e.txHash, h))}
-              tracked={tracked.find((t) => same(t.hash, h))}
+        <ul className="plain qi-list">
+          {next.length > 0 && <QueueGroup>Next</QueueGroup>}
+          {next.map(row)}
+          {queued.length > 0 && <QueueGroup>Queued</QueueGroup>}
+          {queued.map(row)}
+          {modules.length > 0 && <QueueGroup>Module schedules</QueueGroup>}
+          {modules.map((e) => (
+            <ModuleEntryRow
+              key={e.txHash}
+              entry={e}
               engine={engine}
               model={model}
-              currentNonce={nonce.data}
+              ctx={ctx}
               onChange={reload}
             />
           ))}
         </ul>
       )}
-      {openModules.length > 0 && (
-        <>
-          <h3>Module schedules</h3>
-          <ul className="plain stack">
-            {openModules.map((e) => (
-              <ModuleEntryRow
-                key={e.txHash}
-                entry={e}
-                engine={engine}
-                model={model}
-                ctx={ctx}
-                onChange={reload}
-              />
-            ))}
-          </ul>
-        </>
-      )}
-      {closed.length > 0 && (
-        <details className="small">
-          <summary>Recently closed ({closed.length})</summary>
-          <ul className="plain">
-            {closed.map((e) => (
-              <li key={e.txHash}>
-                {actorLabel(e.actor, ctx.nameOf)} ·{' '}
-                {selectorName(e.data.slice(0, 10) as Hex) ?? e.data.slice(0, 10)} ·{' '}
-                {cancelOutcome(e) === 'final' ? 'cancelled for good' : e.state}
-                {e.cancelledBy &&
-                  ` by ${isAddressEqual(e.cancelledBy, safe) ? 'the owners' : (ctx.nameOf?.(e.cancelledBy) ?? shortAddress(e.cancelledBy))}`}
-                {cancelOutcome(e) === 'reschedulable' && ': the module may schedule it again'}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-      <h3>
-        Freeze and lift
-        {freezeLimits && (
-          <span className="muted small">
-            {' '}
-            · an actor is frozen at most {durationLabel(freezeLimits.maxFreeze)} at a time, whoever freezes,
-            then {durationLabel(freezeLimits.cooldown)} with no new freeze
-          </span>
-        )}
+      <Guardians engine={engine} model={model} ctx={ctx} freezeLimits={freezeLimits} onChange={reload} />
+    </div>
+  )
+}
+
+/** Freeze and lift, one line per Timelock attachment with guardians; nothing when there is none. */
+function Guardians({
+  engine,
+  model,
+  ctx,
+  freezeLimits,
+  onChange,
+}: {
+  engine: V2Engine
+  model: SafeV2Model
+  ctx: LabelContext
+  freezeLimits?: { maxFreeze: bigint; cooldown: bigint }
+  onChange: () => void
+}) {
+  return (
+    <section className="queue-guardians">
+      <h3 className="row">
+        Guardians
+        <InfoTip>
+          A freeze stops new transactions of that actor. Allowances, operator rights and pre-signed orders
+          stay usable: revoke them separately.
+          {freezeLimits &&
+            ` An actor is frozen at most ${durationLabel(freezeLimits.maxFreeze)} at a time, whoever freezes, then ${durationLabel(freezeLimits.cooldown)} with no new freeze.`}
+        </InfoTip>
       </h3>
       <FreezeControls
         engine={engine}
@@ -303,22 +344,47 @@ function Queue({
         ctx={ctx}
         maxFreeze={freezeLimits?.maxFreeze}
         cooldown={freezeLimits?.cooldown}
-        onChange={reload}
+        onChange={onChange}
       />
-      {logs.data && logs.data.freezes.length > 0 && (
-        <details className="small">
-          <summary>Freeze history ({logs.data.freezes.length})</summary>
-          <ul className="plain">
-            {logs.data.freezes.slice(0, 10).map((f, i) => (
-              <li key={i}>
-                {f.kind} {f.attachmentId.slice(0, 10)}… by {ctx.nameOf?.(f.by) ?? shortAddress(f.by)} · until{' '}
-                {formatTime(Number(f.until) * 1000)}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-    </div>
+    </section>
+  )
+}
+
+/**
+ * History of the Timelock, for the Activity tab: schedules that closed (executed, cancelled) and
+ * freezes, wherever they were sent from.
+ */
+export function TimelockHistory() {
+  const { safe, v2 } = useSandbox()
+  const ctx = useLabelContext(v2)
+  const logs = useTimelockLogs(v2!.deployment, safe)
+  const closed = (logs.data?.queue ?? []).filter((e) => e.state !== 'scheduled')
+  const freezes = logs.data?.freezes ?? []
+  const name = (a: Address) => (isAddressEqual(a, safe) ? 'the owners' : (ctx.nameOf?.(a) ?? shortAddress(a)))
+  if (closed.length === 0 && freezes.length === 0) return null
+  return (
+    <details className="small timelock-history">
+      <summary>
+        Timelock history ({closed.length} closed, {freezes.length} freeze events)
+      </summary>
+      <ul className="plain">
+        {closed.map((e) => (
+          <li key={e.txHash}>
+            {isOwnerEntry(e) ? `Owners, nonce ${e.nonce}` : actorLabel(e.actor, ctx.nameOf)} ·{' '}
+            {selectorName(e.data.slice(0, 10) as Hex) ?? e.data.slice(0, 10)} ·{' '}
+            {cancelOutcome(e) === 'final' ? 'cancelled for good' : e.state}
+            {e.cancelledBy && ` by ${name(e.cancelledBy)}`}
+            {cancelOutcome(e) === 'reschedulable' && ': the module may schedule it again'}
+          </li>
+        ))}
+        {freezes.map((f, i) => (
+          <li key={`f${i}`}>
+            {f.kind} {f.attachmentId.slice(0, 10)}… by {name(f.by)} · until{' '}
+            {formatTime(Number(f.until) * 1000)}
+          </li>
+        ))}
+      </ul>
+    </details>
   )
 }
 

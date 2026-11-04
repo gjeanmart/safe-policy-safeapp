@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react'
 import type { Address } from 'viem'
-import type { QueuedSafeTx } from './hooks/useSafeApp'
+import type { MessageProbe, MessageProbeKind, QueuedSafeTx } from './hooks/useSafeApp'
 import type { SafeState, SafeTx } from './lib/safe'
 import type { V2Engine } from './config/contracts'
 
@@ -16,6 +16,8 @@ export type Sandbox = {
   propose?: (txs: SafeTx[]) => Promise<string>
   /** Reads a transaction (and its signatures) from the Safe{Wallet} queue; undefined outside it. */
   getQueuedTx?: (safeTxHash: string) => Promise<QueuedSafeTx>
+  /** Asks Safe{Wallet} to sign a test message (Settings spike); undefined outside it. */
+  probeMessageSigning?: (kind: MessageProbeKind) => Promise<MessageProbe>
   /**
    * Which engine the setup screens drive: the installed guard's `supportsInterface` decides; with
    * no guard installed, the user's choice in the setup tab.

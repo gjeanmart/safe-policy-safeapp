@@ -442,10 +442,6 @@ th {
   background: var(--surface);
 }
 
-.queue-bar {
-  align-items: center;
-}
-
 .scroll-target {
   scroll-margin-top: 16px;
 }
@@ -473,7 +469,7 @@ th {
 }
 
 .activity-details ul,
-.queue-lines ul {
+.queue-lines {
   margin: 4px 0;
   padding-left: 18px;
   white-space: pre-wrap;
@@ -1185,33 +1181,6 @@ select:focus-visible {
   display: inline-block;
 }
 
-.timeline {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  font-size: 12px;
-}
-
-.timeline li {
-  padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.timeline li.done::before {
-  content: '✓ ';
-}
-
-.timeline li.current {
-  border-color: currentColor;
-  color: inherit;
-  font-weight: 600;
-}
-
 .lint-item summary {
   cursor: pointer;
 }
@@ -1225,32 +1194,186 @@ select:focus-visible {
   outline-offset: 1px;
 }
 
-/* One Queue row: title + status | lines | timeline | next action | small meta. */
-.queue-entry {
+/* Queue: one line per transaction (nonce | icon | title | time | chips | action), Safe{Wallet} style. */
+.qi-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
 }
 
-.queue-head {
+.qi-group {
+  padding: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.qi {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.qi + .qi {
+  margin-top: 6px;
+}
+
+.qi-line {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 10px;
+  cursor: pointer;
 }
 
-.queue-title {
-  font-size: 14px;
+.qi-line .badge {
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+.qi-nonce {
+  min-width: 2ch;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.qi-icon {
+  display: inline-flex;
+  font-size: 16px;
+  color: var(--muted);
+}
+
+.qi-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.qi-time {
+  white-space: nowrap;
+}
+
+.qi-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: auto;
+}
+
+.qi-countdown {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.qi-details {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 16px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.qi-call,
+.qi-log {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.qi-primary {
+  padding-left: 22px;
+}
+
+.qi-more {
+  padding-left: 22px;
+}
+
+@media (max-width: 640px) {
+  .qi-line {
+    flex-wrap: wrap;
+  }
+
+  .qi-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Audit log: a vertical line of dots, the current step highlighted. */
+.audit-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.audit-log li {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding-bottom: 10px;
+  color: var(--muted);
+}
+
+.audit-log li:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 14px;
+  bottom: 0;
+  border-left: 2px solid var(--border);
+}
+
+.audit-dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--surface);
+}
+
+.audit-log li.done {
+  color: var(--text);
+}
+
+.audit-log li.done .audit-dot {
+  border-color: var(--accent-ink);
+  background: var(--accent-ink);
+}
+
+.audit-log li.current {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.audit-log li.current .audit-dot {
+  border-color: var(--warn);
+}
+
+.audit-log li.bad {
+  color: var(--bad);
+}
+
+.audit-log li.bad .audit-dot {
+  border-color: var(--bad);
+  background: var(--bad);
+}
+
+.audit-detail {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
 }
 
 .queue-end {
   margin-left: auto;
-}
-
-.queue-actions:empty {
-  display: none;
 }
 
 .queue-meta {
@@ -1262,15 +1385,60 @@ select:focus-visible {
   color: var(--muted);
 }
 
-/* A Queue row shown under the action that started it (playground, draft). */
-.inline-row {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0 12px 10px;
+/* Relayer and auto-schedule, behind a gear at the top right of the queue. */
+.queue-settings {
+  justify-content: flex-end;
+  gap: 12px;
 }
 
-.inline-row .queue-entry {
-  border-top: none;
+.popover {
+  position: relative;
+}
+
+.popover > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+}
+
+.popover > summary::-webkit-details-marker {
+  display: none;
+}
+
+.popover-body {
+  position: absolute;
+  right: 0;
+  z-index: 10;
+  width: min(360px, calc(100vw - 32px));
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+}
+
+.queue-guardians h3 {
+  margin-bottom: 4px;
+}
+
+.guardian-line {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.timelock-history {
+  margin-top: 12px;
+}
+
+.signers ul {
+  margin: 4px 0 0;
+}
+
+/* A Queue row shown under the action that started it (playground, draft). */
+.inline-row {
+  margin: 0;
 }
 
 .stack-tight {

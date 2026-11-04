@@ -10,6 +10,8 @@ import {
   rpcUrlStore,
 } from '../config/client'
 import { GUARDS } from '../config/contracts'
+import { useSandbox } from '../context'
+import type { MessageProbe, MessageProbeKind } from '../hooks/useSafeApp'
 import { describeError } from '../lib/errors'
 import { fieldError, parseRpcUrlInput } from '../lib/validation'
 import { MIN_PASSWORD_LENGTH, changeVaultPassword, unlockForSession, vaultStore } from '../lib/vault'
@@ -143,6 +145,7 @@ export function SettingsPanel() {
         </div>
       </Card>
       <PasswordSettings />
+      <MessageSigningTest />
     </>
   )
 }
@@ -244,6 +247,99 @@ function PasswordSettings() {
           {done && <span className="muted small">Password changed.</span>}
         </div>
       </form>
+    </Card>
+  )
+}
+
+const json = (value: unknown) =>
+  JSON.stringify(value, (_, v: unknown) => (typeof v === 'bigint' ? v.toString() : v), 2)
+
+/** One line on what Safe{Wallet} did with the test message. */
+function probeVerdict(probe: MessageProbe): { tone: 'info' | 'warn' | 'bad'; text: string } {
+  const response = probe.response as { messageHash?: string; safeTxHash?: string } | undefined
+  if (response?.messageHash)
+    return probe.offChainSignature
+      ? { tone: 'info', text: 'Signed off-chain: Safe{Wallet} returned the signatures. No transaction.' }
+      : { tone: 'warn', text: 'Signed off-chain, but the signatures are not complete (or not readable) yet.' }
+  if (response?.safeTxHash)
+    return {
+      tone: 'warn',
+      text: 'Safe{Wallet} proposed an on-chain signMessage transaction instead. Reject it in the queue.',
+    }
+  return { tone: 'bad', text: 'No signature: see the errors below.' }
+}
+
+/**
+ * Spike: can the owners sign a message off-chain through Safe{Wallet} (an ERC-1271 signature, no
+ * queue transaction)? Runs the Safe Apps SDK calls and shows exactly what came back.
+ */
+function MessageSigningTest() {
+  const { probeMessageSigning } = useSandbox()
+  const [probe, setProbe] = useState<MessageProbe>()
+  const run = (kind: MessageProbeKind) => async () => {
+    setProbe(undefined)
+    setProbe(await probeMessageSigning!(kind))
+  }
+  const verdict = probe && probeVerdict(probe)
+  return (
+    <Card title="Safe{Wallet} message signing">
+      <p className="small">
+        Asks Safe{'{Wallet}'} to sign a short test message, then shows what came back: an off-chain signature
+        (message hash and signatures) or an on-chain signMessage transaction.
+        <InfoTip>
+          Off-chain signing needs a fallback handler that answers isValidSignature (ERC-1271), such as
+          CompatibilityFallbackHandler. Policy Engine V2 installs TokenCallbackHandler, which may not.
+        </InfoTip>
+      </p>
+      {!probeMessageSigning ? (
+        <p className="muted small">Open the app inside Safe{'{Wallet}'} to run it.</p>
+      ) : (
+        <div className="row wrap">
+          <AsyncButton onClick={run('signMessage')} busyLabel="Waiting for Safe{Wallet}…">
+            Sign a text message
+          </AsyncButton>
+          <AsyncButton onClick={run('signTypedMessage')} busyLabel="Waiting for Safe{Wallet}…">
+            Sign typed data (EIP-712)
+          </AsyncButton>
+        </div>
+      )}
+      {probe && verdict && (
+        <Notice tone={verdict.tone} title={verdict.text}>
+          <ul className="plain small">
+            <li>
+              <strong>Call</strong>: {probe.kind}
+            </li>
+            <li>
+              <strong>Fallback handler</strong>:{' '}
+              <span className="mono break">{probe.safe?.fallbackHandler ?? 'unknown'}</span>
+              {probe.safe && ` · Safe ${probe.safe.version ?? '?'} · threshold ${probe.safe.threshold}`}
+            </li>
+            <li>
+              <strong>Message hash</strong>: <span className="mono break">{probe.messageHash}</span>
+            </li>
+            <li>
+              <strong>isValidSignature</strong>:{' '}
+              {probe.validOnChain === undefined ? 'not checked' : probe.validOnChain ? 'valid' : 'not valid'}
+            </li>
+            {probe.errors.map((e) => (
+              <li key={e.step}>
+                ✗ <strong>{e.step}</strong>: <span className="break">{e.message}</span>
+              </li>
+            ))}
+          </ul>
+          <details className="small">
+            <summary>Raw answers</summary>
+            <pre className="mono break">
+              {json({
+                settings: probe.settings,
+                response: probe.response,
+                offChainSignature: probe.offChainSignature,
+                gateway: probe.gateway,
+              })}
+            </pre>
+          </details>
+        </Notice>
+      )}
     </Card>
   )
 }

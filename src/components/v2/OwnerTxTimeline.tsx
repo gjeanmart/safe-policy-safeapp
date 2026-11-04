@@ -1,38 +1,28 @@
-/** The four steps of a delayed owner transaction; `done` once it executed. */
-export type OwnerStep = 'sign' | 'schedule' | 'wait' | 'execute' | 'done'
+import type { ReactNode } from 'react'
 
-const STEPS: { key: Exclude<OwnerStep, 'done'>; label: string }[] = [
-  { key: 'sign', label: 'Sign' },
-  { key: 'schedule', label: 'Schedule' },
-  { key: 'wait', label: 'Wait' },
-  { key: 'execute', label: 'Execute' },
-]
+/** One line of a queue item's audit log. */
+export type AuditEvent = {
+  key: string
+  label: ReactNode
+  detail?: ReactNode
+  /** done: happened; current: the step it waits on; todo: later; bad: the step that failed. */
+  state: 'done' | 'current' | 'todo' | 'bad'
+}
 
 /**
- * Sign → schedule → wait → execute, with the current step highlighted. A module schedules its own
- * call, so its timeline (`module`) has no signing step.
+ * Created, signed, scheduled, ready, executed: a vertical log of what happened to a delayed
+ * transaction and what comes next, the current step highlighted.
  */
-export function OwnerTxTimeline({
-  current,
-  delay,
-  module = false,
-}: {
-  current: OwnerStep
-  delay?: string
-  module?: boolean
-}) {
-  const steps = module ? STEPS.slice(1) : STEPS
-  const at = current === 'done' ? steps.length : steps.findIndex((s) => s.key === current)
+export function AuditLog({ events }: { events: readonly AuditEvent[] }) {
   return (
-    <ol className="timeline" aria-label="Steps of a delayed transaction">
-      {steps.map((s, i) => (
-        <li
-          key={s.key}
-          className={i < at ? 'done' : i === at ? 'current' : undefined}
-          aria-current={i === at ? 'step' : undefined}
-        >
-          {s.label}
-          {s.key === 'wait' && delay ? ` ${delay}` : ''}
+    <ol className="audit-log" aria-label="Transaction log">
+      {events.map((e) => (
+        <li key={e.key} className={e.state} aria-current={e.state === 'current' ? 'step' : undefined}>
+          <span className="audit-dot" aria-hidden="true" />
+          <div>
+            <div className="audit-label">{e.label}</div>
+            {e.detail && <div className="audit-detail">{e.detail}</div>}
+          </div>
         </li>
       ))}
     </ol>

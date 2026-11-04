@@ -3,13 +3,13 @@ import { activityStore, uiStore } from '../store'
 import { ActivityList, useSettleSentEntries } from './ActivityPanel'
 import { ChevronIcon } from './icons'
 import { Badge } from './ui'
-import { QueueCount, QueuePanel } from './v2/Queue'
+import { QueueCount, QueuePanel, TimelockHistory } from './v2/Queue'
 
 type DockTab = 'queue' | 'activity'
 
 /**
  * The panel at the bottom of every tab: Queue (what waits on someone, with its one next action)
- * and Activity (history). Collapsible; the open state and the tab survive reloads.
+ * and Activity (history: what the app sent, then everything the Timelock closed). Collapsible; the open state and the tab survive reloads.
  */
 export function Dock() {
   const { v2Installed } = useSandbox()
@@ -64,7 +64,14 @@ export function Dock() {
       </header>
       {open && (
         <div className="dock-body">
-          {tab === 'queue' ? <QueuePanel /> : <ActivityList activity={activity} />}
+          {tab === 'queue' ? (
+            <QueuePanel />
+          ) : (
+            <>
+              <ActivityList activity={activity} />
+              {v2Installed && <TimelockHistory />}
+            </>
+          )}
         </div>
       )}
     </section>

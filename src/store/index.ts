@@ -181,6 +181,10 @@ export type TrackedOwnerTx = {
   call?: { to: Address; value: bigint; data: Hex }
   /** Executed by a relayer from this app (Safe{Wallet} reports it too, when the app runs inside it). */
   executed?: boolean
+  /** Safe nonce, once read: the Queue groups by it (Next, Queued) before any row has loaded. */
+  nonce?: bigint
+  /** Closed for good, as a row last read it: it then shows in History, not in the Queue. */
+  closed?: 'executed' | 'cancelled' | 'replaced'
 }
 
 export const v2TrackedStore = persisted<Record<string, TrackedOwnerTx[]>>('v2-tracked', {})
@@ -197,6 +201,19 @@ export const untrackOwnerTx = (safe: Address, hash: Hex) =>
   v2TrackedStore.set((all) => {
     const key = safe.toLowerCase()
     return { ...all, [key]: (all[key] ?? []).filter((t) => t.hash.toLowerCase() !== hash.toLowerCase()) }
+  })
+
+/** Records what a Queue row read (nonce, closed), writing only when something changed. */
+export const noteOwnerTx = (safe: Address, hash: Hex, patch: Pick<TrackedOwnerTx, 'nonce' | 'closed'>) =>
+  v2TrackedStore.set((all) => {
+    const key = safe.toLowerCase()
+    const list = all[key] ?? []
+    const at = list.findIndex((t) => t.hash.toLowerCase() === hash.toLowerCase())
+    const t = list[at]
+    if (!t || ((patch.nonce ?? t.nonce) === t.nonce && (patch.closed ?? t.closed) === t.closed)) return all
+    const next = [...list]
+    next[at] = { ...t, nonce: patch.nonce ?? t.nonce, closed: patch.closed ?? t.closed }
+    return { ...all, [key]: next }
   })
 
 export const markOwnerTxExecuted = (safe: Address, hash: Hex) =>

@@ -46,31 +46,13 @@ function LegacyKeysNotice() {
   )
 }
 
-/** One table row: a local role, a signer (owner) of the Safe, or both. */
-type RoleEntry = { address: Address; role?: Role; signer?: number }
-
-/** The Safe's signers first (merged with their local role, if any), then the other roles. */
-function roleEntries(roles: readonly Role[], owners: readonly Address[]): RoleEntry[] {
-  const isOwner = (a: Address) => owners.some((o) => isAddressEqual(o, a))
-  return [
-    ...owners.map((address, signer) => ({
-      address,
-      signer,
-      role: roles.find((r) => isAddressEqual(r.address, address)),
-    })),
-    ...roles.filter((r) => !isOwner(r.address)).map((role) => ({ address: role.address, role })),
-  ]
-}
-
 export function RolesPanel() {
   const roles = rolesStore.use()
   const { state, reloadState } = useSandbox()
   const balances = useBalances(roles.map((r) => r.address))
   const [adding, setAdding] = useState(false)
-  const entries = roleEntries(roles, state?.owners ?? [])
-  const localSigners = entries.filter(
-    (e) => e.signer !== undefined && e.role && roleKind(e.role) === 'eoa',
-  ).length
+  const owners = state?.owners ?? []
+  const isOwner = (a: Address) => owners.some((o) => isAddressEqual(o, a))
 
   return (
     <>
@@ -90,12 +72,6 @@ export function RolesPanel() {
         }
         actions={
           <>
-            {state && (
-              <span className="muted small">
-                {state.threshold}-of-{state.owners.length} multisig · {localSigners} local signer key
-                {localSigners === 1 ? '' : 's'}
-              </span>
-            )}
             <button type="button" className="btn btn-primary" onClick={() => setAdding(true)}>
               Add role
             </button>
@@ -114,7 +90,7 @@ export function RolesPanel() {
         <LegacyKeysNotice />
         {adding && <AddRoleDialog onClose={() => setAdding(false)} />}
 
-        {entries.length > 0 && (
+        {(state || roles.length > 0) && (
           <div className="table-scroll">
             <table className="roles-table">
               <thead>
@@ -126,19 +102,16 @@ export function RolesPanel() {
                 </tr>
               </thead>
               <tbody>
-                {entries.map((e) =>
-                  e.role ? (
-                    <RoleRow
-                      key={e.address}
-                      role={e.role}
-                      signer={e.signer}
-                      eth={balances.data?.[e.address]?.eth}
-                      enabled={state ? isModuleEnabled(state, e.address) : undefined}
-                    />
-                  ) : (
-                    <SignerRow key={e.address} address={e.address} index={e.signer!} />
-                  ),
-                )}
+                {state && <OwnersRow owners={owners} threshold={state.threshold} roles={roles} />}
+                {roles.map((role) => (
+                  <RoleRow
+                    key={role.address}
+                    role={role}
+                    isSigner={isOwner(role.address)}
+                    eth={balances.data?.[role.address]?.eth}
+                    enabled={state ? isModuleEnabled(state, role.address) : undefined}
+                  />
+                ))}
               </tbody>
             </table>
           </div>
@@ -163,24 +136,60 @@ export function RolesPanel() {
   )
 }
 
-/** "Signer · multisig": an owner of the Safe, part of the owners' (multisig) path. */
+/** Small mark on a local role that is also one of the Safe's signers. */
 const SignerBadge = () => (
   <Tooltip content={GLOSSARY.signer}>
-    <Badge tone="ok">Signer · multisig</Badge>
+    <Badge tone="ok">signer</Badge>
   </Tooltip>
 )
 
-/** A signer with no key in this browser: it signs in Safe{Wallet}, there is nothing to do here. */
-function SignerRow({ address, index }: { address: Address; index: number }) {
+/**
+ * The owners as one role: the multisig acts through owner transactions (threshold signatures), not
+ * as a module. Its signers are listed folded, with the local role holding each key, if any.
+ */
+function OwnersRow({
+  owners,
+  threshold,
+  roles,
+}: {
+  owners: readonly Address[]
+  threshold: number
+  roles: readonly Role[]
+}) {
+  const local = (owner: Address) =>
+    roles.find((r) => roleKind(r) === 'eoa' && hasLocalKey(r) && isAddressEqual(r.address, owner))
+  const localCount = owners.filter((o) => local(o)).length
   return (
     <tr>
       <td>
         <div className="row">
-          <strong>Signer {index + 1}</strong>
-          <SignerBadge />
+          <strong>Owners (multisig)</strong>
+          <Tag tone="info">Multisig</Tag>
+          <Tooltip content={GLOSSARY.signer}>
+            <Badge tone="ok">
+              {threshold}-of-{owners.length}
+            </Badge>
+          </Tooltip>
         </div>
-        <AddressView address={address} name="" full />
-        <div className="muted small">Signs in Safe{'{Wallet}'}</div>
+        <details className="signers small">
+          <summary>
+            {owners.length} signer{owners.length === 1 ? '' : 's'}
+            {localCount > 0 && ` · ${localCount} with a local key`}
+          </summary>
+          <ul className="plain">
+            {owners.map((owner) => {
+              const role = local(owner)
+              return (
+                <li key={owner} className="row wrap">
+                  <AddressView address={owner} name="" />
+                  <span className="muted">
+                    {role ? `local key (${role.label})` : 'signs in Safe{Wallet}'}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        </details>
       </td>
       <td>
         <span className="muted">-</span>
@@ -195,13 +204,13 @@ function SignerRow({ address, index }: { address: Address; index: number }) {
 
 function RoleRow({
   role,
-  signer,
+  isSigner,
   eth,
   enabled,
 }: {
   role: Role
-  /** Index among the Safe's owners, when the role is one. */
-  signer?: number
+  /** One of the Safe's owners. */
+  isSigner: boolean
   eth?: bigint
   enabled?: boolean
 }) {
@@ -216,7 +225,6 @@ function RoleRow({
   const relayer = kind === 'relayer'
   const keyed = hasLocalKey(role)
   const executor = useAsync(() => resolveExecutor(role), `${role.address}:${kind}`)
-  const isSigner = signer !== undefined
 
   const toggleKey = async () => {
     setRevealError(undefined)

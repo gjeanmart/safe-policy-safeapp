@@ -74,10 +74,12 @@ function Workspace({
   safe,
   propose,
   getQueuedTx,
+  probeMessageSigning,
 }: {
   safe: Address
   propose?: Sandbox['propose']
   getQueuedTx?: Sandbox['getQueuedTx']
+  probeMessageSigning?: Sandbox['probeMessageSigning']
 }) {
   const [tab, setTab] = useState<TabKey>('roles')
   const settings = settingsStore.use()
@@ -99,11 +101,12 @@ function Workspace({
       guardInstalled: v2Guard !== undefined || installedV1 !== undefined,
       propose,
       getQueuedTx,
+      probeMessageSigning,
       engineVersion,
       v2,
       v2Installed: v2Guard !== undefined,
     }
-  }, [safe, state, safeState.reload, settings, propose, getQueuedTx, v2Guard])
+  }, [safe, state, safeState.reload, settings, propose, getQueuedTx, probeMessageSigning, v2Guard])
 
   const unknownGuard =
     state && state.moduleGuard !== zeroAddress && !isKnownGuard(state.moduleGuard) && !v2Guard
@@ -211,7 +214,12 @@ export function App() {
     }
     return (
       <div className="container">
-        <Workspace safe={connection.safe} propose={connection.propose} getQueuedTx={connection.getQueuedTx} />
+        <Workspace
+          safe={connection.safe}
+          propose={connection.propose}
+          getQueuedTx={connection.getQueuedTx}
+          probeMessageSigning={connection.probeMessageSigning}
+        />
       </div>
     )
   }

@@ -56,6 +56,10 @@ export const useTimelockLogs = (deployment: V2Deployment, safe: Address) =>
 
 const same = (a: Hex, b: Hex) => a.toLowerCase() === b.toLowerCase()
 
+/** A tracked owner transaction that can no longer run: executed, cancelled, or its nonce used. */
+export const isTrackedClosed = (t: TrackedOwnerTx, nonce?: bigint) =>
+  !!t.executed || !!t.closed || (t.nonce !== undefined && nonce !== undefined && t.nonce < nonce)
+
 /**
  * Items that wait on someone, from the events alone (no per-row reads): a tracked owner transaction
  * not scheduled yet (to sign or schedule), and any open schedule past its ready time (to execute).
@@ -68,6 +72,8 @@ export function countNeedingAction(
 ): number {
   const live = (e: QueueEntry) => !isOwnerEntry(e) || nonce === undefined || e.nonce >= nonce
   const ready = queue.filter((e) => e.state === 'scheduled' && e.readyAt <= now && live(e)).length
-  const unscheduled = tracked.filter((t) => !t.executed && !queue.some((e) => same(e.txHash, t.hash))).length
+  const unscheduled = tracked.filter(
+    (t) => !isTrackedClosed(t, nonce) && !queue.some((e) => same(e.txHash, t.hash)),
+  ).length
   return ready + unscheduled
 }
