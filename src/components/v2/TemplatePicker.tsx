@@ -222,13 +222,18 @@ const FORMS: TemplateForm[] = [
       { key: 'token', label: 'Sell token', kind: 'token', initial: TOKENS.WETH.address },
       { key: 'amount', label: 'Budget (approval cap too)', kind: 'text', initial: '1' },
       { key: 'period', label: 'Period', kind: 'period', initial: String(DAY) },
-      { key: 'approvers', label: 'Co-signer(s)', kind: 'addresses' },
-      { key: 'guardians', label: 'Guardians', kind: 'addresses', info: KILL_SWITCH_INFO },
+      {
+        key: 'approvers',
+        label: 'Co-signer(s) (optional)',
+        kind: 'addresses',
+        info: 'With co-signers, every transaction of the actor needs the approval of one of them. Empty: no co-signer.',
+      },
+      { key: 'guardians', label: 'Guardians (optional)', kind: 'addresses', info: KILL_SWITCH_INFO },
     ],
     build: (d, v, context) => {
       const agent = address(v.agent!, 'the agent')
-      const approvers = list(v.approvers!, 'a co-signer', true)
-      const guardians = list(v.guardians!, 'a guardian', true)
+      const approvers = list(v.approvers!, 'co-signers')
+      const guardians = list(v.guardians!, 'guardians')
       const amount = units(v.amount!, v.token!)
       const error = firstError(agent, approvers, guardians, amount)
       if (error) return error

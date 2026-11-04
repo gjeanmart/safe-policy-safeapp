@@ -12,7 +12,7 @@ import { SetupPanel } from './components/setup/SetupPanel'
 import { EngineSwitch } from './components/v2/EngineSwitch'
 import { V2SetupPanel } from './components/v2/V2SetupPanel'
 import { WhyV2 } from './components/v2/WhyV2'
-import { ActivityPanel } from './components/ActivityPanel'
+import { Dock } from './components/Dock'
 import { AddressView, Badge, Notice } from './components/ui'
 import { chain, publicClient } from './config/client'
 import { deployedV2Engines, v2EngineFor } from './config/contracts'
@@ -184,7 +184,7 @@ function Workspace({
         {tab === 'settings' && <SettingsPanel />}
       </main>
 
-      <ActivityPanel />
+      <Dock />
 
       <Footer onOpenNotes={() => setTab('notes')} />
       <VaultDialogs />

@@ -2,12 +2,12 @@ import { useState } from 'react'
 import type { Hex } from 'viem'
 import { chain, publicClient } from '../../config/client'
 import { useSandbox } from '../../context'
-import { useAsync } from '../../hooks/useAsync'
 import { describeCall } from '../../lib/describeTx'
 import { execTransactionCall, signHashAsRole } from '../../lib/roleExec'
 import {
   OWNERS,
   type OwnerCall,
+  type PreviewResult,
   readSafeNonce,
   runPreview,
   safeTransaction,
@@ -17,9 +17,9 @@ import {
 import { logActivity, trackOwnerTx, v2OwnerTxStore, v2TrackedStore } from '../../store'
 import { useProposeAndTrack } from '../ProposeButton'
 import { Term } from '../Term'
-import { AsyncButton, Badge, Notice } from '../ui'
+import { AsyncButton } from '../ui'
 import { useDescribeContext } from '../useDescribe'
-import { PreviewView } from './GatePreview'
+import { Advanced, PreviewView } from './GatePreview'
 import { InlineOwnerTx, useLocalOwners } from './QueueRows'
 import { relay } from './relayer'
 import { toSafeTxs } from './ownerCalls'
@@ -60,11 +60,12 @@ function Progress({ hashes }: { hashes: readonly Hex[] }) {
 }
 
 /**
- * One owner (multisig) transaction started from this app: simulate it (every gate), then propose it
- * in Safe{Wallet} or sign it with local signer keys; once it exists, its Queue row (timeline, next
- * action) shows right here, so it can be scheduled, simulated at ready time and executed in place.
- * `followUps` are proposed as separate owner transactions right after it (next nonces), e.g. an
- * enableModule that must not share a batch with engine.configure.
+ * One owner (multisig) transaction started from this app. Under V2: Simulate first (every gate as a
+ * chip, a missing schedule in yellow), then only the next step: sign and execute when nothing delays
+ * it, else sign for the queue; once it exists, its Queue row (schedule, countdown, simulate at ready
+ * time, execute) shows right here. The other way to sign (Safe{Wallet} or local keys) sits under
+ * Advanced. `followUps` are proposed as separate owner transactions right after it (next nonces),
+ * e.g. an enableModule that must not share a batch with engine.configure.
  */
 export function OwnerAction({
   call,
@@ -87,21 +88,26 @@ export function OwnerAction({
   const canSignHere = signers.length >= threshold
   const existing = useTrackedFor(call)
   const [started, setStarted] = useState<Hex[]>()
-  const [showGates, setShowGates] = useState(false)
+  const [preview, setPreview] = useState<{ key: string; value: PreviewResult }>()
   const key = `${call.to}:${call.value}:${call.data}:${v2Installed}`
-  const preview = useAsync(
-    async () =>
-      v2 && v2Installed
-        ? runPreview(publicClient, v2.deployment, safe, OWNERS, call, { chainId: chain.id, ctx: describeCtx })
-        : undefined,
-    key,
-  )
-  const outcome = preview.data?.ok ? preview.data.outcome : undefined
+  const result = preview?.key === key ? preview.value : undefined
+  const outcome = result?.ok ? result.outcome : undefined
   const needsSchedule = !!outcome?.needs.includes('schedule')
   const denied = !!outcome && !outcome.allowed && !needsSchedule
+  // Before V2 is installed nothing checks the owners: no simulation to wait for.
+  const ready = !v2Installed || (!!outcome && !denied)
   const signerNames = signers.map((o) => o.label).join(', ')
   const all = [call, ...followUps]
   const hashes = started ?? (existing ? [existing.hash] : [])
+
+  const simulate = async () => {
+    if (!v2) return
+    const value = await runPreview(publicClient, v2.deployment, safe, OWNERS, call, {
+      chainId: chain.id,
+      ctx: describeCtx,
+    })
+    setPreview({ key, value })
+  }
 
   /** Signs `c` at `nonce` with the local signer keys; keeps the signatures and tracks it. */
   const signAt = async (c: OwnerCall, nonce: bigint) => {
@@ -163,104 +169,84 @@ export function OwnerAction({
     return last
   }
 
-  if (v2Installed && preview.loading && !preview.data)
-    return <p className="muted small">Checking the owners&apos; rules…</p>
-
   const twoTxs =
     followUps.length > 0 &&
     `${all.length} owner transactions: ${all.map((c) => describeCall(c, describeCtx).title).join(', then ')}.`
   const blockedHere = !!existing && !started
+
+  const proposeButton = (primary: boolean) => (
+    <AsyncButton
+      variant={primary ? 'primary' : 'secondary'}
+      disabled={!proposeAndTrack}
+      busyLabel="Proposing…"
+      onClick={propose}
+      title={
+        proposeAndTrack
+          ? needsSchedule
+            ? 'The owners sign it in Safe{Wallet} (sign only, do not execute)'
+            : 'The owners sign and execute it in Safe{Wallet}'
+          : 'Open this app inside Safe{Wallet} to propose'
+      }
+    >
+      {needsSchedule ? 'Propose & sign in Safe{Wallet}' : 'Propose in Safe{Wallet}'}
+    </AsyncButton>
+  )
+  const localButton = needsSchedule ? (
+    <AsyncButton
+      variant="primary"
+      busyLabel="Signing…"
+      onClick={signForQueue}
+      title="Signs with the local signer keys at the current nonce; the relayer schedules it next"
+    >
+      Sign here with {signerNames}
+    </AsyncButton>
+  ) : (
+    <AsyncButton
+      variant="primary"
+      busyLabel="Executing…"
+      doneLabel="Executed"
+      onClick={executeHere}
+      title="Signs with the local signer keys, then sends execTransaction"
+    >
+      Sign &amp; execute with {signerNames}
+    </AsyncButton>
+  )
 
   return (
     <div className="stack">
       {!v2Installed && (
         <p className="small muted">No guard on the owners yet: the signers can execute this as is.</p>
       )}
-      {preview.data && !preview.data.ok && (
-        <Notice tone="bad" title="Could not simulate">
-          {preview.data.reason}
-        </Notice>
-      )}
-      {outcome && (
-        <div className="row wrap small">
-          <Badge tone={outcome.allowed ? 'ok' : needsSchedule ? 'warn' : 'bad'}>
-            {outcome.allowed
-              ? 'no delay'
-              : needsSchedule
-                ? `delayed${delayLabel ? ` ${delayLabel}` : ''}`
-                : 'denied'}
-          </Badge>
-          {needsSchedule ? (
-            <span>
-              A <Term k="timelock">Timelock</Term> applies: sign, <Term k="schedule">schedule</Term>, wait,
-              then execute.
-            </span>
-          ) : (
-            !outcome.allowed && outcome.deciding?.reasonText && <span>{outcome.deciding.reasonText}</span>
-          )}
-        </div>
-      )}
-      {denied && <p className="small muted">The owners&apos; rules refuse it: change them in Setup first.</p>}
       {twoTxs && <p className="small">{twoTxs}</p>}
-      {!denied && !blockedHere && (
+      {!blockedHere && (
         <div className="row wrap">
           {v2Installed && (
             <AsyncButton
-              onClick={async () => {
-                setShowGates(true)
-                preview.reload()
-              }}
+              variant={result ? 'secondary' : 'primary'}
+              onClick={simulate}
+              busyLabel="Simulating…"
               title="Checks every gate now (eth_call): nothing is sent"
             >
-              Simulate
+              {result ? 'Simulate again' : 'Simulate'}
             </AsyncButton>
           )}
-          <AsyncButton
-            variant={canSignHere && !needsSchedule ? 'secondary' : 'primary'}
-            disabled={!proposeAndTrack}
-            busyLabel="Proposing…"
-            onClick={propose}
-            title={
-              proposeAndTrack
-                ? needsSchedule
-                  ? 'The owners sign it in Safe{Wallet} (sign only, do not execute)'
-                  : 'The owners sign and execute it in Safe{Wallet}'
-                : 'Open this app inside Safe{Wallet} to propose'
-            }
-          >
-            {needsSchedule ? 'Propose & sign in Safe{Wallet}' : 'Propose in Safe{Wallet}'}
-          </AsyncButton>
-          {canSignHere &&
-            (needsSchedule ? (
-              <AsyncButton
-                busyLabel="Signing…"
-                onClick={signForQueue}
-                title="Signs with the local signer keys at the current nonce"
-              >
-                Sign here with {signerNames}
-              </AsyncButton>
-            ) : (
-              <AsyncButton
-                variant="primary"
-                busyLabel="Executing…"
-                doneLabel="Executed"
-                onClick={executeHere}
-                title="Signs with the local signer keys, then sends execTransaction"
-              >
-                Sign &amp; execute with {signerNames}
-              </AsyncButton>
-            ))}
+          {ready && (canSignHere ? localButton : proposeButton(true))}
         </div>
       )}
-      {showGates && preview.data && <PreviewView result={preview.data} />}
-      {needsSchedule && threshold === 1 && hashes.length === 0 && (
+      {result && <PreviewView result={result} />}
+      {denied && <p className="small muted">The owners&apos; rules refuse it: change them in Setup first.</p>}
+      {!blockedHere && ready && needsSchedule && (
         <p className="small muted">
-          In Safe{'{Wallet}'}, sign only: on a 1-of-1 Safe it offers to execute right away, which fails under
-          the Timelock.
+          Then the relayer <Term k="schedule">schedules</Term> it, it waits
+          {delayLabel ? ` ${delayLabel}` : ''}, and executes with the same signatures.
+          {threshold === 1 &&
+            hashes.length === 0 &&
+            ' In Safe{Wallet}, sign only: executing right away fails.'}
         </p>
       )}
+      {!blockedHere && ready && canSignHere && <Advanced>{proposeButton(false)}</Advanced>}
       {v2 && v2Installed && hashes.length > 0 && <Progress hashes={hashes} />}
-      {!canSignHere && !needsSchedule && !denied && state && (
+      {!canSignHere && ready && !needsSchedule && state && (
         <span className="muted small">
           To sign here instead: Make signer on an EOA role in Roles ({localOwners.length}/{threshold} local
           signer keys).

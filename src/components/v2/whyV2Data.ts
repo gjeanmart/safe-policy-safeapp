@@ -114,7 +114,7 @@ export const E2E: { use: string; story: string }[] = [
   { use: 'Ops payments', story: 'Allow token.transfer + recipients + budget; batches summed' },
   {
     use: 'Agent (CoW)',
-    story: 'Capped approval to the vault relayer, pre-sign, budget, co-signer, kill switch',
+    story: 'Capped approval to the vault relayer, pre-sign, budget, optional co-signer and kill switch',
   },
   { use: 'Recovery', story: 'swapOwner after R, no guardian, may lift; WA-4016 closed' },
   { use: 'Compromise', story: 'Owner keys, guardian, recovery key compromised: T < R < F holds' },

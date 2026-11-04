@@ -3,6 +3,7 @@ import { publicClient } from '../../config/client'
 import { useSandbox } from '../../context'
 import { readSafeNonce, readSchedule, timelockCalls } from '../../lib/v2'
 import { describeCall } from '../../lib/describeTx'
+import { pollWhileVisible } from '../../lib/poll'
 import { relayStore, settleProposal, v2TrackedStore } from '../../store'
 import { useDescribeContext } from '../useDescribe'
 import { hasGasFields, loadOwnerTx, readRoute } from './ownerTx'
@@ -40,9 +41,14 @@ export function AutoScheduler() {
           if (attempted.has(key) || t.executed) continue
           const data = await loadOwnerTx(t.hash, getQueuedTx)
           if (!data || data.executed || data.unusable || data.count < threshold) continue
-          if (hasGasFields(data.tx) || data.tx.nonce < nonce) continue
-          if (await readSchedule(publicClient, deployment, safe, t.hash)) continue
+          // Settled for good: no need to read them again on the next tick.
+          if (hasGasFields(data.tx) || data.tx.nonce < nonce) {
+            attempted.add(key)
+            continue
+          }
+          const scheduled = await readSchedule(publicClient, deployment, safe, t.hash)
           attempted.add(key)
+          if (scheduled) continue
           if ((await readRoute(deployment, safe, data.tx)).route !== 'schedule') continue
           const call = timelockCalls.schedule(deployment, safe, data.tx, data.signatures)
           const summary = describeCall(data.tx, describeCtx)
@@ -67,8 +73,7 @@ export function AutoScheduler() {
       }
     }
     void tick()
-    const timer = setInterval(() => void tick(), AUTO_SCHEDULE_MS)
-    return () => clearInterval(timer)
+    return pollWhileVisible(() => void tick(), AUTO_SCHEDULE_MS)
   }, [autoSchedule, v2, v2Installed, relayer, threshold, tracked, safe, getQueuedTx, describeCtx])
 
   return null

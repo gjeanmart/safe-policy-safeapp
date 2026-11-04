@@ -1,9 +1,9 @@
 import { type Hex, isAddressEqual } from 'viem'
-import { publicClient } from '../../config/client'
 import { EXPLORER } from '../../config/contracts'
 import { describeError } from '../../lib/errors'
 import { shortAddress } from '../../lib/format'
 import { type DirectCall, sendCallAsRole, simulateCallAsRole } from '../../lib/roleExec'
+import { waitForReceipt } from '../../lib/send'
 import {
   type Activity,
   type Role,
@@ -26,7 +26,8 @@ const modeOf = (description: string): Activity['mode'] =>
 
 /**
  * Simulates then sends a direct call as `role`, logs it (with `log` details) and waits for the
- * receipt. A refused simulation or a failed send is logged too, so every attempt shows in Activity.
+ * receipt. A refused simulation or a failed send is logged too, so every attempt shows in Activity;
+ * an RPC failure says at which step (simulate, estimate, fees, nonce, send, receipt).
  */
 export async function relay(
   role: Role,
@@ -34,15 +35,7 @@ export async function relay(
   log: RelayLog = {},
 ): Promise<Hex> {
   const { label = call.description, mode = modeOf(call.description), ...details } = log
-  const denied = await simulateCallAsRole(role, call)
-  if (denied) {
-    logActivity({ role: role.address, mode, label, status: 'denied', detail: denied, ...details })
-    throw new Error(denied)
-  }
-  let hash: Hex
-  try {
-    hash = await sendCallAsRole(role, call)
-  } catch (error) {
+  const failed = (error: unknown): never => {
     logActivity({
       role: role.address,
       mode,
@@ -53,6 +46,12 @@ export async function relay(
     })
     throw error
   }
+  const denied = await simulateCallAsRole(role, call).catch(failed)
+  if (denied) {
+    logActivity({ role: role.address, mode, label, status: 'denied', detail: denied, ...details })
+    throw new Error(denied)
+  }
+  const hash = await sendCallAsRole(role, call).catch(failed)
   const id = logActivity({
     role: role.address,
     mode,
@@ -62,7 +61,10 @@ export async function relay(
     link: `${EXPLORER}/tx/${hash}`,
     ...details,
   })
-  const receipt = await publicClient.waitForTransactionReceipt({ hash })
+  const receipt = await waitForReceipt(hash).catch((error: unknown) => {
+    updateActivity(id, { detail: `${describeError(error)} The transaction may still land: check the link.` })
+    throw error
+  })
   updateActivity(id, { status: receipt.status === 'success' ? 'confirmed' : 'reverted' })
   if (receipt.status !== 'success') throw new Error(`Reverted on-chain (${shortAddress(hash)})`)
   return hash

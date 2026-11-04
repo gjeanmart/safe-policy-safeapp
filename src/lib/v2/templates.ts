@@ -168,15 +168,17 @@ export type AgentCowParams = {
   budgets: readonly TokenLimit[]
   vaultRelayer: Address
   settlement: Address
+  /** Empty: no co-signer. */
   approvers: readonly Address[]
+  /** Empty: no kill switch. */
   guardians: readonly Address[]
 }
 
 const agentCow: Template<AgentCowParams> = {
   id: 'agent-cow',
-  title: 'CoW swaps: capped approval, pre-sign, budget, co-signer, kill switch',
+  title: 'CoW swaps: capped approval, pre-sign, budget, optional co-signer and kill switch',
   summary:
-    'The actor approves the CoW vault relayer (capped) and pre-signs orders. The approvals count against a budget; the order itself is opaque (passUnpriced). Every transaction needs a co-signer; a guardian can stop the agent at once.',
+    'The actor approves the CoW vault relayer (capped) and pre-signs orders. The approvals count against a budget; the order itself is opaque (passUnpriced). With co-signers, every transaction needs one of them; with guardians, any of them can stop the agent at once.',
   build: (deployment, { agent, budgets, vaultRelayer, settlement, approvers, guardians }) => [
     ...budgets.flatMap((b) => {
       const scope = onFunction(agent, b.token, SELECTORS.approve)
@@ -193,11 +195,15 @@ const agentCow: Template<AgentCowParams> = {
       policy: 'limit',
       settings: { limits: budgets, passUnpriced: true },
     }),
-    policyChange(deployment, anyCall(agent), {
-      policy: 'coSigner',
-      settings: { approvers, required: 1 },
-    }),
-    timelock(deployment, agent, { delay: 0, guardians }),
+    ...(approvers.length
+      ? [
+          policyChange(deployment, anyCall(agent), {
+            policy: 'coSigner',
+            settings: { approvers, required: 1 },
+          }),
+        ]
+      : []),
+    ...killSwitch(deployment, agent, guardians),
   ],
 }
 

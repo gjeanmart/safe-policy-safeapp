@@ -410,13 +410,44 @@ th {
   border-bottom: 1px solid var(--border);
 }
 
-/* The global Activity panel, at the bottom of every tab. */
+/* The global dock (Queue and Activity), at the bottom of every tab. */
 .activity-panel .card-header {
   margin-bottom: 0;
 }
 
-.activity-panel .activity {
+.dock-body {
   margin-top: 12px;
+}
+
+.dock-tabs {
+  gap: 4px;
+}
+
+.dock-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+
+.dock-tab.active {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+.queue-bar {
+  align-items: center;
+}
+
+.scroll-target {
+  scroll-margin-top: 16px;
 }
 
 .activity-toggle {

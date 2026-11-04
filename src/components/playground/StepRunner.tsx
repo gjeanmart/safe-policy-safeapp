@@ -9,7 +9,7 @@ import { type Executor, nestedModuleCall, resolveExecutor } from '../../lib/role
 import { type RunMode, type Step, runSteps } from '../../lib/runner'
 import { type Role, logActivity, roleKind } from '../../store'
 import { AddressView, AsyncButton, CopyButton, ErrorLine, Notice } from '../ui'
-import { GatePreview } from '../v2/GatePreview'
+import { Advanced, GatePreview } from '../v2/GatePreview'
 
 type Resolution = { label: string; policy: string; fallback: boolean }
 
@@ -106,12 +106,13 @@ export function StepRunner({
       ? `Simulate, then sign as ${executor.signer.label} (owner of ${role.label}) and send it through that Safe`
       : "Simulate, then send from the role's EOA only if the policies allow it"
 
-  const run = async (mode: RunMode) => {
+  const run = async (mode: RunMode): Promise<boolean> => {
     setError(undefined)
     try {
       if (mode !== 'simulate') await beforeSend?.()
       const ok = await runSteps(safe, role, steps, mode)
       onDone?.(ok)
+      return ok
     } catch (err) {
       const message = explain(err, role, executor)
       setError({ key, value: message })
@@ -122,6 +123,7 @@ export function StepRunner({
         status: 'failed',
         detail: message,
       })
+      return false
     } finally {
       if (mode !== 'simulate') reloadState()
     }
@@ -143,20 +145,43 @@ export function StepRunner({
   }
 
   const disabled = steps.length === 0
+  const showTransaction = (
+    <button
+      type="button"
+      className="btn btn-primary"
+      disabled={disabled}
+      onClick={() => setShowCalls((v) => !v)}
+    >
+      {showCalls ? 'Hide transaction' : 'Show transaction'}
+    </button>
+  )
+  const forceSend = !manual && (
+    <AsyncButton
+      variant="danger"
+      disabled={disabled || !executor}
+      onClick={() => run('force')}
+      busyLabel="Sending…"
+      title="Skip the dry-run and send with a fixed gas limit so the revert lands on-chain"
+    >
+      Force-send
+    </AsyncButton>
+  )
   return (
     <div className="stack">
-      <div className="row wrap step-actions">
-        {!v2Engine && (
-          <AsyncButton
-            disabled={disabled || !guardInstalled}
-            onClick={check}
-            title="Which policy would the guard consult?"
-          >
-            Resolve policy
-          </AsyncButton>
-        )}
-        {/* Under V2 the gate preview below is the simulation: every gate, not only the final revert. */}
-        {!v2Engine && (
+      {/* Under V2 the gate flow is the simulation: every gate, then only the next step needed. */}
+      {v2Engine ? (
+        !disabled && (
+          <GatePreview
+            key={key}
+            role={role}
+            steps={steps}
+            engine={v2Engine}
+            execute={manual || !executor ? undefined : { run: () => run('execute'), title: sendTitle }}
+            manual={manual && showTransaction}
+          />
+        )
+      ) : (
+        <div className="row wrap step-actions">
           <AsyncButton
             disabled={disabled}
             onClick={() => run('simulate')}
@@ -165,18 +190,9 @@ export function StepRunner({
           >
             Simulate
           </AsyncButton>
-        )}
-        {manual ? (
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={disabled}
-            onClick={() => setShowCalls((v) => !v)}
-          >
-            {showCalls ? 'Hide transaction' : 'Show transaction'}
-          </button>
-        ) : (
-          <>
+          {manual ? (
+            showTransaction
+          ) : (
             <AsyncButton
               variant="primary"
               disabled={disabled || !executor}
@@ -186,19 +202,23 @@ export function StepRunner({
             >
               Execute
             </AsyncButton>
+          )}
+        </div>
+      )}
+      {!disabled && (forceSend || !v2Engine) && (
+        <Advanced>
+          {!v2Engine && (
             <AsyncButton
-              variant="danger"
-              disabled={disabled || !executor}
-              onClick={() => run('force')}
-              busyLabel="Sending…"
-              title="Skip the dry-run and send with a fixed gas limit so the revert lands on-chain"
+              disabled={!guardInstalled}
+              onClick={check}
+              title="Which policy would the guard consult?"
             >
-              Force-send
+              Resolve policy
             </AsyncButton>
-          </>
-        )}
-      </div>
-      {v2Engine && !disabled && <GatePreview key={key} role={role} steps={steps} engine={v2Engine} />}
+          )}
+          {forceSend}
+        </Advanced>
+      )}
       {manual && showCalls && <NestedCalls role={role} steps={steps} reason={manual.reason} />}
       {error?.key === key && (
         <Notice tone="bad" title="Could not run">

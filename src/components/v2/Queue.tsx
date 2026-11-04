@@ -4,6 +4,7 @@ import type { V2Engine } from '../../config/contracts'
 import { useSandbox } from '../../context'
 import { useAsync } from '../../hooks/useAsync'
 import { useNow } from '../../hooks/useNow'
+import { describeError } from '../../lib/errors'
 import { formatTime, shortAddress } from '../../lib/format'
 import {
   type Attachment,
@@ -18,25 +19,20 @@ import {
   isOwnerEntry,
   listLabel,
   readActorWindow,
-  readSafeNonce,
-  readTimelockLogs,
   selectorName,
   timelockCalls,
 } from '../../lib/v2'
 import { hasLocalKey, roleKind, rolesStore, v2TrackedStore } from '../../store'
 import { Term } from '../Term'
 import { InfoTip } from '../Tooltip'
-import { AsyncButton, Badge, Card, CopyButton, Notice } from '../ui'
+import { AsyncButton, Badge, CopyButton, Notice } from '../ui'
 import { FreezeBadge } from './OrgChart'
 import { ModuleEntryRow, OwnerTxRow } from './QueueRows'
 import { RelayerBar, relay } from './relayer'
+import { countNeedingAction, useSafeNonce, useTimelockLogs } from './useQueueData'
+import { useV2 } from './useV2'
 
 export { useLocalOwners } from './QueueRows'
-
-const QUEUE_REFRESH_MS = 30_000
-const NONCE_REFRESH_MS = 10_000
-/** Without a known deployment block, scan roughly the last three weeks of Sepolia. */
-const DEFAULT_LOOKBACK = 150_000n
 
 /** Freeze / lift per Timelock attachment, for its guardians and lifters. */
 function FreezeControls({
@@ -183,7 +179,7 @@ function SendItYourself({ what, call }: { what: 'freeze' | 'lift'; call: { to: A
  * scheduled on-chain) each get one row with their next step; module schedules follow; then
  * Freeze / Lift per attachment.
  */
-export function Queue({
+function Queue({
   engine,
   model,
   ctx,
@@ -199,16 +195,8 @@ export function Queue({
   const { safe } = useSandbox()
   const { deployment } = engine
   const tracked = v2TrackedStore.use()[safe.toLowerCase()] ?? []
-  const nonce = useAsync(() => readSafeNonce(publicClient, safe), safe, NONCE_REFRESH_MS)
-  const logs = useAsync(
-    async () => {
-      const latest = await publicClient.getBlockNumber()
-      const fromBlock = deployment.fromBlock ?? (latest > DEFAULT_LOOKBACK ? latest - DEFAULT_LOOKBACK : 0n)
-      return readTimelockLogs(publicClient, deployment, safe, { fromBlock, toBlock: latest })
-    },
-    `${deployment.policies.timelock}:${safe}`,
-    QUEUE_REFRESH_MS,
-  )
+  const nonce = useSafeNonce(safe)
+  const logs = useTimelockLogs(deployment, safe)
   const reload = () => {
     logs.reload()
     nonce.reload()
@@ -225,27 +213,21 @@ export function Queue({
   const closed = queue.filter((e) => e.state !== 'scheduled' && !isTracked(e.txHash)).slice(0, 8)
 
   return (
-    <Card
-      title={
-        <span className="row">
-          Queue
+    <div className="stack">
+      <div className="row wrap queue-bar">
+        <RelayerBar />
+        <span className="muted small queue-end">
+          Safe <Term k="nonce">nonce</Term> {nonce.data?.toString() ?? '…'}
           <InfoTip>
             Owner transactions this app proposed or signed, and everything a Timelock delays. The owners sign
             in Safe{'{Wallet}'} (sign only, do not execute); the relayer schedules it, then executes it with
             the same signatures once the delay has passed.
           </InfoTip>
         </span>
-      }
-      actions={
-        <span className="muted small">
-          Safe <Term k="nonce">nonce</Term> {nonce.data?.toString() ?? '…'}
-        </span>
-      }
-    >
-      <RelayerBar />
+      </div>
       {logs.error !== undefined && (
         <Notice tone="bad" title="Could not read the queue">
-          {String(logs.error)}
+          {describeError(logs.error)}
         </Notice>
       )}
       <h3>Owner transactions</h3>
@@ -336,6 +318,50 @@ export function Queue({
           </ul>
         </details>
       )}
-    </Card>
+    </div>
   )
+}
+
+/** The dock's Queue tab: the queue of the installed V2 engine, else why there is none. */
+export function QueuePanel() {
+  const { v2, v2Installed } = useSandbox()
+  if (!v2 || !v2Installed)
+    return (
+      <p className="muted">
+        The queue lists owner transactions and Timelock schedules once Policy Engine V2 is installed on this
+        Safe.
+      </p>
+    )
+  return <InstalledQueue />
+}
+
+function InstalledQueue() {
+  const view = useV2()
+  if (view.error !== undefined && !view.model)
+    return (
+      <Notice tone="bad" title="Could not read the V2 engine">
+        {describeError(view.error)}
+      </Notice>
+    )
+  if (!view.model) return <p className="muted">Loading…</p>
+  return (
+    <Queue
+      engine={view.engine}
+      model={view.model}
+      ctx={view.ctx}
+      freezeLimits={view.freezeLimits}
+      onChange={view.reload}
+    />
+  )
+}
+
+/** How many queue items wait on someone; rendered only when V2 is installed. */
+export function QueueCount() {
+  const { safe, v2 } = useSandbox()
+  const tracked = v2TrackedStore.use()[safe.toLowerCase()] ?? []
+  const now = BigInt(useNow(10_000))
+  const logs = useTimelockLogs(v2!.deployment, safe)
+  const nonce = useSafeNonce(safe)
+  const count = countNeedingAction(logs.data?.queue ?? [], tracked, now, nonce.data)
+  return count > 0 ? <Badge tone="warn">{count}</Badge> : null
 }

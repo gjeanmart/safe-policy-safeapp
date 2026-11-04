@@ -52,9 +52,12 @@ export function diffAttachments(
   })
   for (const a of current)
     if (!projected.some((p) => p.attachmentId === a.attachmentId)) result.push({ ...a, status: 'removed' })
-  for (const a of preview)
-    if (!result.some((r) => r.attachmentId === a.attachmentId && r.status !== 'removed'))
-      result.push({ ...a, status: 'preview' })
+  // A previewed rule that is already attached (live or in the draft) shows its new settings in place.
+  for (const a of preview) {
+    const index = result.findIndex((r) => r.attachmentId === a.attachmentId && r.status !== 'removed')
+    if (index >= 0) result[index] = { ...a, freeze: result[index]!.freeze, status: 'preview' }
+    else result.push({ ...a, status: 'preview' })
+  }
   return result
 }
 

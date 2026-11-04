@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { Hex } from 'viem'
 import { useSandbox } from '../../context'
 import { useAsync } from '../../hooks/useAsync'
@@ -16,7 +16,6 @@ import { SafeStatus } from '../setup/SafeStatus'
 import { Card, Notice } from '../ui'
 import { DraftPanel } from './DraftPanel'
 import { OrgChart, diffAttachments } from './OrgChart'
-import { Queue } from './Queue'
 import { ScopeBuilder } from './ScopeBuilder'
 import { readFallbackHandler } from './ownerCalls'
 import { useV2, useV2Draft } from './useV2'
@@ -26,6 +25,7 @@ function V2Screens() {
   const view = useV2()
   const [draft, setDraft] = useV2Draft()
   const [preview, setPreview] = useState<Change[]>()
+  const chartRef = useRef<HTMLDivElement>(null)
   const { deployment } = view.engine
   const handler = useAsync(() => readFallbackHandler(safe), `${safe}:handler`, 30_000)
 
@@ -63,17 +63,23 @@ function V2Screens() {
           then propose the install batch from the draft.
         </Notice>
       )}
-      <OrgChart
-        deployment={deployment}
-        items={items}
-        ctx={view.ctx}
-        onDetach={(list) => add(list.map(detachChange))}
-      />
+      <div ref={chartRef} className="scroll-target">
+        <OrgChart
+          deployment={deployment}
+          items={items}
+          ctx={view.ctx}
+          onDetach={(list) => add(list.map(detachChange))}
+        />
+      </div>
       <ScopeBuilder
         deployment={deployment}
         ctx={view.ctx}
         context={{ safe, attachments: projected }}
-        onPreview={setPreview}
+        onPreview={(changes) => {
+          setPreview(changes)
+          // The chart sits above the builder, out of view: bring the dashed chips to the user.
+          if (changes) chartRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }}
         onAdd={add}
       />
       <DraftPanel
@@ -85,15 +91,6 @@ function V2Screens() {
         ctx={view.ctx}
         handler={handler.data}
       />
-      {v2Installed && (
-        <Queue
-          engine={view.engine}
-          model={model}
-          ctx={view.ctx}
-          freezeLimits={view.freezeLimits}
-          onChange={view.reload}
-        />
-      )}
     </>
   )
 }

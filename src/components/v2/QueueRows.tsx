@@ -23,7 +23,6 @@ import {
   durationLabel,
   ownerNonceState,
   readCancelDigest,
-  readSafeNonce,
   readSchedule,
   runPreview,
   scheduleStatus,
@@ -54,9 +53,12 @@ import {
   simulateAtTime,
 } from './ownerTx'
 import { type RelayLog, relay, useRelayer } from './relayer'
+import { useSafeNonce } from './useQueueData'
 
 const ROW_REFRESH_MS = 15_000
-const NONCE_REFRESH_MS = 10_000
+
+/** A schedule only changes while it waits, is ready (executed by someone) or is frozen (lifted). */
+const LIVE_STATUSES: readonly ScheduleStatus[] = ['waiting', 'ready', 'frozen']
 
 /** Owners local to this browser: EOA roles that are owners of the Safe. */
 export function useLocalOwners(): Role[] {
@@ -287,10 +289,19 @@ export function OwnerTxRow({
   const fallback = entry
     ? { to: entry.to, value: entry.value, data: entry.data, operation: entry.operation }
     : tracked?.call && { ...tracked.call, operation: Operation.CALL }
+  const closedOnChain = entry?.state === 'executed' || entry?.state === 'cancelled' || !!tracked?.executed
   const live = useAsync(
     () => readOwnerRow(deployment, safe, hash, model, threshold, fallback, getQueuedTx),
     `${hash}:${model.attachments.length}:${threshold}:${entry?.state}`,
-    ROW_REFRESH_MS,
+    // Before a schedule the signatures can still arrive; after, only a live schedule changes.
+    (row) =>
+      closedOnChain || row?.data?.executed
+        ? undefined
+        : row?.schedule && row.merged
+          ? LIVE_STATUSES.includes(scheduleStatus(row.schedule, row.merged, now).status)
+            ? ROW_REFRESH_MS
+            : undefined
+          : ROW_REFRESH_MS,
   )
   const d = live.data
   const remove = tracked && (
@@ -506,7 +517,7 @@ export function InlineOwnerTx({
   onChange?: () => void
 }) {
   const { safe } = useSandbox()
-  const nonce = useAsync(() => readSafeNonce(publicClient, safe), safe, NONCE_REFRESH_MS)
+  const nonce = useSafeNonce(safe)
   return (
     <ul className="plain inline-row">
       <OwnerTxRow
@@ -558,7 +569,10 @@ export function ModuleEntryRow({
       return { schedule, merged }
     },
     `${entry.txHash}:${model.attachments.length}`,
-    ROW_REFRESH_MS,
+    (row) =>
+      !row || (row.schedule && LIVE_STATUSES.includes(scheduleStatus(row.schedule, row.merged, now).status))
+        ? ROW_REFRESH_MS
+        : undefined,
   )
   const data = live.data
   if (!data) return <li className="muted small queue-entry">loading…</li>

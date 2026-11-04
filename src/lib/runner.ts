@@ -1,9 +1,10 @@
 import type { Address } from 'viem'
-import { publicClient } from '../config/client'
 import { EXPLORER } from '../config/contracts'
 import { type Role, logActivity, updateActivity } from '../store'
+import { describeError } from './errors'
 import { type ModuleTx, simulateModuleTx } from './moduleTx'
 import { sendAsRole } from './roleExec'
+import { waitForReceipt } from './send'
 
 export type RunMode = 'simulate' | 'execute' | 'force'
 
@@ -48,7 +49,12 @@ export async function runSteps(
       txHash: hash,
       link: `${EXPLORER}/tx/${hash}`,
     })
-    const receipt = await publicClient.waitForTransactionReceipt({ hash })
+    const receipt = await waitForReceipt(hash).catch((error: unknown) => {
+      updateActivity(id, {
+        detail: `${describeError(error)} The transaction may still land: check the link.`,
+      })
+      throw error
+    })
     updateActivity(id, { status: receipt.status === 'success' ? 'confirmed' : 'reverted' })
     if (receipt.status !== 'success') return false
   }

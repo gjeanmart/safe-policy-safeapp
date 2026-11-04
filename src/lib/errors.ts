@@ -5,6 +5,7 @@ import {
   type Hex,
   HttpRequestError,
   InsufficientFundsError,
+  LimitExceededRpcError,
   TimeoutError,
   UserRejectedRequestError,
   decodeErrorResult,
@@ -54,8 +55,62 @@ export function describeRevertData(data: Hex): string {
   }
 }
 
+/** The RPC calls behind a send, so a failure says which one broke. */
+export type RpcStep = 'simulate' | 'estimate' | 'fees' | 'nonce' | 'send' | 'receipt'
+
+const STEP_LABELS: Record<RpcStep, string> = {
+  simulate: 'Simulation',
+  estimate: 'Gas estimate',
+  fees: 'Fee lookup',
+  nonce: 'Nonce lookup',
+  send: 'Send',
+  receipt: 'Receipt',
+}
+
+/** An RPC failure (not a policy decision) at one step of a send. */
+export class RpcStepError extends Error {
+  readonly step: RpcStep
+
+  constructor(step: RpcStep, cause: unknown) {
+    super(`${STEP_LABELS[step]} failed: ${describeError(cause)}`, { cause })
+    this.name = 'RpcStepError'
+    this.step = step
+  }
+}
+
+const LIMIT_CODES: readonly number[] = [-32005, -32029]
+const LIMIT_TEXT = /exceeds defined limit|rate limit|too many requests|request limit/i
+
+/** The RPC refused the request as over a rate or size limit (JSON-RPC -32005 / -32029, HTTP 429). */
+export function isLimitError(error: unknown): boolean {
+  if (error instanceof BaseError) {
+    const hit = error.walk((e) => {
+      const { code, status } = e as { code?: unknown; status?: unknown }
+      return (
+        e instanceof LimitExceededRpcError ||
+        (typeof code === 'number' && LIMIT_CODES.includes(code)) ||
+        status === 429
+      )
+    })
+    if (hit) return true
+    return LIMIT_TEXT.test(`${error.shortMessage} ${error.details ?? ''}`)
+  }
+  return LIMIT_TEXT.test(error instanceof Error ? error.message : String(error))
+}
+
+/** Not an answer about the transaction: the RPC limited, timed out or could not be reached. */
+export const isRpcFailure = (error: unknown): boolean =>
+  isLimitError(error) ||
+  (error instanceof BaseError &&
+    !!error.walk((e) => e instanceof HttpRequestError || e instanceof TimeoutError))
+
 /** Best-effort human description for anything thrown by viem (or elsewhere). */
 export function describeError(error: unknown): string {
+  if (error instanceof RpcStepError) return error.message
+  if (isLimitError(error)) {
+    const details = error instanceof BaseError && error.details ? ` (${error.details})` : ''
+    return `The RPC refused it as over its limit${details}. If it keeps happening, switch the RPC in Settings.`
+  }
   if (error instanceof BaseError) {
     // Infrastructure failures first: these are not policy decisions and read badly verbatim.
     if (error.walk((e) => e instanceof InsufficientFundsError)) {

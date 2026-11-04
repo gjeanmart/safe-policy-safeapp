@@ -1,5 +1,5 @@
 import { expect } from 'chai'
-import { AbiCoder, Interface, ZeroAddress, concat, getAddress, hexlify, toBeHex, zeroPadValue } from 'ethers'
+import { Interface, ZeroAddress, concat, getAddress, hexlify, toBeHex, zeroPadValue } from 'ethers'
 import { ethers } from 'hardhat'
 import type { Safe } from '../../../typechain-types'
 import {
@@ -23,7 +23,6 @@ import { OWNERS, deployEngine } from './fixtures'
  * engine denies it.
  */
 
-const coder = AbiCoder.defaultAbiCoder()
 const MULTI_SEND = '0x8d80ff0a'
 type Entry = { op: number; to: string; value: bigint; data: string }
 type Seen = { op: number; to: string; value: bigint; data: string }

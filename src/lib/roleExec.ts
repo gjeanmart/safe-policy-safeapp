@@ -1,20 +1,12 @@
-import {
-  type Address,
-  type Hash,
-  type Hex,
-  createWalletClient,
-  encodeFunctionData,
-  http,
-  isAddressEqual,
-  zeroAddress,
-} from 'viem'
+import { type Address, type Hash, type Hex, encodeFunctionData, isAddressEqual, zeroAddress } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { policyErrorsAbi, safeAbi } from '../abi'
-import { chain, publicClient, rpcUrl } from '../config/client'
+import { safeAbi } from '../abi'
+import { chain, publicClient } from '../config/client'
 import { type Role, roleKind, rolesStore } from '../store'
 import { Operation } from './configurations'
 import { type ModuleTx, sendModuleTx } from './moduleTx'
-import { describeError } from './errors'
+import { RpcStepError, describeError, isRpcFailure } from './errors'
+import { rpcStep, sendSigned, withRetry } from './send'
 import { revealKey } from './vault'
 
 /** Enough about a Safe used as a role to decide how it can act. */
@@ -124,7 +116,9 @@ async function execThroughRoleSafe(
   call: { to: Address; value: bigint; data: Hex },
   force: boolean,
 ): Promise<Hash> {
-  const nonce = await publicClient.readContract({ address: roleSafe, abi: safeAbi, functionName: 'nonce' })
+  const nonce = await rpcStep('nonce', () =>
+    publicClient.readContract({ address: roleSafe, abi: safeAbi, functionName: 'nonce' }),
+  )
   const account = privateKeyToAccount(
     await revealKey(signer, `Enter your password to sign as ${signer.label}.`),
   )
@@ -143,13 +137,13 @@ async function execThroughRoleSafe(
       nonce,
     },
   })
-  const wallet = createWalletClient({ account, chain, transport: http(rpcUrl()) })
-  return wallet.writeContract({
-    account,
-    address: roleSafe,
-    abi: [...safeAbi, ...policyErrorsAbi],
-    functionName: 'execTransaction',
-    args: [call.to, call.value, call.data, Operation.CALL, 0n, 0n, 0n, zeroAddress, zeroAddress, signature],
+  return sendSigned(account, {
+    to: roleSafe,
+    data: encodeFunctionData({
+      abi: safeAbi,
+      functionName: 'execTransaction',
+      args: [call.to, call.value, call.data, Operation.CALL, 0n, 0n, 0n, zeroAddress, zeroAddress, signature],
+    }),
     gas: force ? 800_000n : undefined,
   })
 }
@@ -190,8 +184,7 @@ export async function sendCallAsRole(role: Role, call: DirectCall): Promise<Hash
       const account = privateKeyToAccount(
         await revealKey(role, `Enter your password to sign as ${role.label}.`),
       )
-      const wallet = createWalletClient({ account, chain, transport: http(rpcUrl()) })
-      return wallet.sendTransaction({ account, to: call.to, value, data: call.data })
+      return sendSigned(account, { to: call.to, value, data: call.data })
     }
     case 'safe-owner':
       return execThroughRoleSafe(role.address, executor.signer, { ...call, value }, false)
@@ -200,12 +193,18 @@ export async function sendCallAsRole(role: Role, call: DirectCall): Promise<Hash
   }
 }
 
-/** Dry-runs a direct call from the role's address (`eth_call`); resolves to the revert reason or undefined. */
+/**
+ * Dry-runs a direct call from the role's address (`eth_call`); resolves to the revert reason or
+ * undefined. An RPC failure (limit, timeout) throws an {@link RpcStepError}: it is not a denial.
+ */
 export async function simulateCallAsRole(role: Role, call: DirectCall): Promise<string | undefined> {
   try {
-    await publicClient.call({ account: role.address, to: call.to, value: call.value, data: call.data })
+    await withRetry(() =>
+      publicClient.call({ account: role.address, to: call.to, value: call.value, data: call.data }),
+    )
     return undefined
   } catch (error) {
+    if (isRpcFailure(error)) throw new RpcStepError('simulate', error)
     return describeError(error)
   }
 }

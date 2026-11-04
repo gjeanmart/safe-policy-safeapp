@@ -139,7 +139,7 @@ export const settleProposal = (safeTxHash: Hex, status: 'scheduled' | 'executed'
   )
 
 /** View preferences that should survive a reload. */
-export type UiPrefs = { activityOpen: boolean }
+export type UiPrefs = { activityOpen: boolean; dockTab?: 'queue' | 'activity' }
 
 export const uiStore = persisted<UiPrefs>('ui', { activityOpen: true })
 

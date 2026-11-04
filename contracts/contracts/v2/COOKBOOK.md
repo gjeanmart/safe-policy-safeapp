@@ -99,6 +99,10 @@ at (Ops, *) reads the NFT transfer as an ERC-20 spend of an unlisted token: Unpr
 **Guarantees.** Every agent transaction needs the co-signer; the bound on what an order can sell is every allowance to
 the vault relayer; a freeze stops new approvals and pre-signatures, not orders already pre-signed.
 
+The co-signer and the kill switch are optional (the app's template drops the CoSigner without approvers and the Timelock
+without guardians). Without them only the Args cap and the Limit bound the agent, and nobody can stop it short of the
+owners detaching its rules: the lint says so.
+
 Every agent transaction needs the co-signer's approval of its module call hash (`approve`, or `approveWithSig` pushed by
 anyone), consumed on use. What the policies cannot see: the order inside the `orderUid` (sell token, amounts,
 receiver). A pre-signed order can sell any token the Safe has approved to the vault relayer, so the bound is **every

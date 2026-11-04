@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 import { type Hex, isAddressEqual } from 'viem'
 import { chain, publicClient } from '../../config/client'
 import type { V2Engine } from '../../config/contracts'
@@ -7,6 +7,7 @@ import type { Step } from '../../lib/runner'
 import {
   type Gate,
   type LabelContext,
+  type Need,
   type PreviewResult,
   coSignerCalls,
   gateName,
@@ -16,7 +17,6 @@ import {
   timelockCalls,
 } from '../../lib/v2'
 import { type Role, logActivity, roleKind, rolesStore } from '../../store'
-import { Term } from '../Term'
 import { AsyncButton, Badge, Notice } from '../ui'
 import { Chip, type ChipTone } from './Chip'
 import { type ModuleEntry, ModuleEntryRow } from './QueueRows'
@@ -25,11 +25,12 @@ import { useLabelContext, useV2 } from './useV2'
 
 /** Approvals pushed from the playground are valid for an hour. */
 const APPROVAL_LIFETIME = 3600n
+const approvalDeadline = () => BigInt(Math.floor(Date.now() / 1000)) + APPROVAL_LIFETIME
 
 const TONES: Record<Gate['verdict'], ChipTone> = {
   grant: 'allow',
   'not-counted': 'neutral',
-  pass: 'protect',
+  pass: 'allow',
   deny: 'deny',
 }
 const VERDICTS: Record<Gate['verdict'], string> = {
@@ -38,6 +39,13 @@ const VERDICTS: Record<Gate['verdict'], string> = {
   pass: 'pass',
   deny: 'deny',
 }
+/** A deny that only waits on a step (schedule, delay, approval): not a refusal, so yellow. */
+const NEEDS: Record<Need, string> = {
+  schedule: 'needs schedule',
+  wait: 'waiting for the delay',
+  approval: 'needs approval',
+  attestation: 'needs attestation',
+}
 
 function GateChips({ gates, deciding }: { gates: readonly Gate[]; deciding?: Gate }) {
   return (
@@ -45,7 +53,7 @@ function GateChips({ gates, deciding }: { gates: readonly Gate[]; deciding?: Gat
       {gates.map((g, i) => (
         <span key={i} className={g === deciding ? 'gate gate-deciding' : 'gate'}>
           <Chip
-            tone={TONES[g.verdict]}
+            tone={g.verdict === 'deny' && g.needs ? 'protect' : TONES[g.verdict]}
             title={
               <>
                 {g.level !== undefined && levelLabel(g.level)}
@@ -56,7 +64,7 @@ function GateChips({ gates, deciding }: { gates: readonly Gate[]; deciding?: Gat
               </>
             }
           >
-            {gateName(g)}: {VERDICTS[g.verdict]}
+            {gateName(g)}: {g.verdict === 'deny' && g.needs ? NEEDS[g.needs] : VERDICTS[g.verdict]}
           </Chip>
         </span>
       ))}
@@ -78,16 +86,25 @@ export function PreviewView({ result }: { result: PreviewResult }) {
       <GateChips gates={outcome.gates} deciding={outcome.deciding} />
       <div className="row wrap">
         {outcome.allowed ? (
-          <Badge tone="ok">allowed</Badge>
+          <Badge tone="ok">passes</Badge>
+        ) : outcome.onlyNeeds ? (
+          <Badge tone="warn">{outcome.needs.map((n) => NEEDS[n]).join(', ')}</Badge>
         ) : (
-          <Badge tone={outcome.onlyNeeds ? 'warn' : 'bad'}>{outcome.onlyNeeds ? 'needs' : 'denied'}</Badge>
+          <Badge tone="bad">denied</Badge>
         )}
         {outcome.deciding?.reasonText && <span className="small">{outcome.deciding.reasonText}</span>}
-        {!outcome.allowed && outcome.deciding && (
-          <span className="muted small">deciding gate: {gateName(outcome.deciding)}</span>
-        )}
       </div>
     </div>
+  )
+}
+
+/** Force-send and other escape hatches, folded away from the main flow. */
+export function Advanced({ children }: { children: ReactNode }) {
+  return (
+    <details className="advanced small">
+      <summary>Advanced</summary>
+      <div className="row wrap">{children}</div>
+    </details>
   )
 }
 
@@ -112,19 +129,26 @@ function Scheduled({ entries }: { entries: readonly ModuleEntry[] }) {
 }
 
 /**
- * The playground's V2 gate preview: `matches` plus an `eth_call` of each matched policy's `check`
- * from the engine (chips per gate, the deciding one, what is still needed). When a Timelock asks
- * for a schedule, the role schedules its own call (`scheduleModuleTx`); when a co-signer approval
- * is missing and a local key is an approver, it approves on-chain.
+ * The playground's V2 flow for a module role: Simulate (every gate as a chip: `matches` plus an
+ * `eth_call` of each matched policy's `check` from the engine), then only the next step it needs.
+ * All gates pass: Execute. A Timelock asks for a schedule: Schedule, then the countdown, Simulate at
+ * ready time and Execute once ready. A co-signer approval is missing and a local key is an
+ * approver: Approve.
  */
 export function GatePreview({
   role,
   steps,
   engine,
+  execute,
+  manual,
 }: {
   role: Role
   steps: readonly Step[]
   engine: V2Engine
+  /** The send once every gate passes; undefined when the role cannot send from here. */
+  execute?: { run: () => Promise<boolean>; title: string }
+  /** Shown instead of Execute when the role cannot send from here. */
+  manual?: ReactNode
 }) {
   const { safe } = useSandbox()
   const roles = rolesStore.use()
@@ -163,7 +187,20 @@ export function GatePreview({
     }
   }
   const current = results?.key === key ? results.value : undefined
-  const needs = (n: string) => current?.some((r) => r.ok && r.outcome.needs.includes(n as never))
+  const outcomes = current?.map((r) => (r.ok ? r.outcome : undefined))
+  const needs = (n: Need) => !!outcomes?.some((o) => o?.needs.includes(n))
+  const passes = !!outcomes && outcomes.every((o) => o?.allowed)
+  const justScheduled = scheduled?.key === key ? scheduled.value : []
+  // Scheduled here, or found waiting on a fresh simulation: follow them in place.
+  const waiting: ModuleEntry[] = [
+    ...justScheduled,
+    ...steps.flatMap((s, i) => {
+      const o = outcomes?.[i]
+      return o?.needs.includes('wait') && !justScheduled.some((e) => e.txHash === o.txHash)
+        ? [{ ...s.tx, txHash: o.txHash, actor: role.address, isConfiguration: false }]
+        : []
+    }),
+  ]
 
   const send = (from: Role, call: { to: `0x${string}`; data: Hex; description: string }, label: string) =>
     relay(from, call, { label })
@@ -171,22 +208,22 @@ export function GatePreview({
   const schedule = async () => {
     const done: ModuleEntry[] = []
     for (const [i, s] of steps.entries()) {
-      const r = current?.[i]
-      if (!r?.ok || !r.outcome.needs.includes('schedule')) continue
+      const o = outcomes?.[i]
+      if (!o?.needs.includes('schedule')) continue
       await send(role, timelockCalls.scheduleModuleTx(engine.deployment, safe, s.tx), `Schedule: ${s.label}`)
-      done.push({ ...s.tx, txHash: r.outcome.txHash, actor: role.address, isConfiguration: false })
+      done.push({ ...s.tx, txHash: o.txHash, actor: role.address, isConfiguration: false })
     }
     setScheduled({ key, value: done })
     await preview()
   }
 
   const approve = async () => {
-    const until = BigInt(Math.floor(Date.now() / 1000)) + APPROVAL_LIFETIME
+    const until = approvalDeadline()
     let sent = 0
     for (const [i, s] of steps.entries()) {
-      const r = current?.[i]
-      if (!r?.ok) continue
-      for (const g of r.outcome.denies.filter((d) => d.error?.name === 'MissingApprovals')) {
+      const o = outcomes?.[i]
+      if (!o) continue
+      for (const g of o.denies.filter((d) => d.error?.name === 'MissingApprovals')) {
         const id = g.error!.args[0] as Hex
         const settings = await readPolicySettings(publicClient, engine.deployment, safe, 'coSigner', id)
         if (settings.policy !== 'coSigner') continue
@@ -195,7 +232,7 @@ export function GatePreview({
           if (!local) continue
           await send(
             local,
-            coSignerCalls.approve(engine.deployment, safe, r.outcome.txHash, until),
+            coSignerCalls.approve(engine.deployment, safe, o.txHash, until),
             `Approve: ${s.label}`,
           )
           sent++
@@ -209,16 +246,32 @@ export function GatePreview({
     await preview()
   }
 
+  const run = async () => {
+    if (!execute) return
+    const ok = await execute.run()
+    // Spent budgets, consumed approvals: the old verdict no longer holds.
+    if (ok) setResults(undefined)
+  }
+
   return (
     <div className="stack">
       <div className="row wrap">
         <AsyncButton
+          variant={current ? 'secondary' : 'primary'}
           onClick={simulate}
           busyLabel="Simulating…"
           title="Checks every gate now (eth_call from the engine): nothing is sent"
         >
-          Simulate
+          {current ? 'Simulate again' : 'Simulate'}
         </AsyncButton>
+        {passes &&
+          (execute ? (
+            <AsyncButton variant="primary" onClick={run} busyLabel="Executing…" title={execute.title}>
+              Execute
+            </AsyncButton>
+          ) : (
+            manual
+          ))}
         {needs('schedule') && (
           <AsyncButton
             variant="primary"
@@ -228,12 +281,6 @@ export function GatePreview({
           >
             Schedule
           </AsyncButton>
-        )}
-        {needs('schedule') && (
-          <span className="small muted">
-            A <Term k="timelock">Timelock</Term> applies: <Term k="schedule">schedule</Term>, wait, then
-            execute.
-          </span>
         )}
         {needs('approval') && (
           <AsyncButton
@@ -252,7 +299,7 @@ export function GatePreview({
           <PreviewView result={r} />
         </div>
       ))}
-      {scheduled?.key === key && scheduled.value.length > 0 && <Scheduled entries={scheduled.value} />}
+      {waiting.length > 0 && <Scheduled entries={waiting} />}
     </div>
   )
 }

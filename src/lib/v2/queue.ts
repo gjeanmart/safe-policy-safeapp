@@ -59,14 +59,15 @@ export type FreezeEvent = {
   block: bigint
 }
 
-type Log = {
+/** A parsed TimelockPolicy event. */
+export type TimelockLog = {
   eventName: string
   args: Record<string, unknown>
   blockNumber: bigint | null
   logIndex: number | null
 }
 
-const chronological = (a: Log, b: Log) =>
+const chronological = (a: TimelockLog, b: TimelockLog) =>
   a.blockNumber === b.blockNumber
     ? (a.logIndex ?? 0) - (b.logIndex ?? 0)
     : Number((a.blockNumber ?? 0n) - (b.blockNumber ?? 0n))
@@ -75,7 +76,7 @@ const chronological = (a: Log, b: Log) =>
  * Folds TimelockPolicy logs (any order) into one entry per schedule; the newest schedule wins for a
  * hash scheduled again (a module call can be scheduled once more after it executed). Pure.
  */
-export function foldTimelockEvents(logs: readonly Log[]): QueueEntry[] {
+export function foldTimelockEvents(logs: readonly TimelockLog[]): QueueEntry[] {
   const entries = new Map<string, QueueEntry>()
   for (const log of [...logs].sort(chronological)) {
     const txHash = String(log.args.txHash).toLowerCase()
@@ -108,7 +109,7 @@ export function foldTimelockEvents(logs: readonly Log[]): QueueEntry[] {
 }
 
 /** Freeze / lift history, newest first. Pure. */
-export const foldFreezeEvents = (logs: readonly Log[]): FreezeEvent[] =>
+export const foldFreezeEvents = (logs: readonly TimelockLog[]): FreezeEvent[] =>
   [...logs]
     .sort(chronological)
     .filter((l) => l.eventName === 'Frozen' || l.eventName === 'Lifted' || l.eventName === 'FreezeSkipped')
@@ -122,9 +123,39 @@ export const foldFreezeEvents = (logs: readonly Log[]): FreezeEvent[] =>
     .reverse()
 
 /**
- * Scans the TimelockPolicy events of this engine and Safe (both indexed), in `chunk`-block ranges
- * (public RPCs cap `eth_getLogs` at ~50k blocks).
+ * The TimelockPolicy events of this engine and Safe (both indexed), scanned in `chunk`-block ranges
+ * with the policy as address filter (public RPCs cap `eth_getLogs` at 50k blocks).
  */
+export async function readTimelockEvents(
+  client: PublicClient,
+  deployment: V2Deployment,
+  safe: Address,
+  options: { fromBlock: bigint; toBlock: bigint; chunk?: bigint },
+): Promise<TimelockLog[]> {
+  const chunk = options.chunk ?? 49_999n
+  const logs: TimelockLog[] = []
+  for (let from = options.fromBlock; from <= options.toBlock; from += chunk + 1n) {
+    const to = from + chunk > options.toBlock ? options.toBlock : from + chunk
+    const raw = await client.getLogs({ address: deployment.policies.timelock, fromBlock: from, toBlock: to })
+    const parsed = parseEventLogs({
+      abi: timelockPolicyAbi,
+      logs: raw,
+      args: { engine: deployment.engine, safe },
+    })
+    logs.push(...(parsed as unknown as TimelockLog[]))
+  }
+  return logs
+}
+
+/** The queue and the freeze history from the events (pure). */
+export const foldTimelockLogs = (
+  logs: readonly TimelockLog[],
+): { queue: QueueEntry[]; freezes: FreezeEvent[] } => ({
+  queue: foldTimelockEvents(logs),
+  freezes: foldFreezeEvents(logs),
+})
+
+/** {@link readTimelockEvents} then {@link foldTimelockLogs}. */
 export async function readTimelockLogs(
   client: PublicClient,
   deployment: V2Deployment,
@@ -132,19 +163,7 @@ export async function readTimelockLogs(
   options: { fromBlock: bigint; toBlock?: bigint; chunk?: bigint },
 ): Promise<{ queue: QueueEntry[]; freezes: FreezeEvent[] }> {
   const toBlock = options.toBlock ?? (await client.getBlockNumber())
-  const chunk = options.chunk ?? 49_999n
-  const logs: Log[] = []
-  for (let from = options.fromBlock; from <= toBlock; from += chunk + 1n) {
-    const to = from + chunk > toBlock ? toBlock : from + chunk
-    const raw = await client.getLogs({ address: deployment.policies.timelock, fromBlock: from, toBlock: to })
-    const parsed = parseEventLogs({
-      abi: timelockPolicyAbi,
-      logs: raw,
-      args: { engine: deployment.engine, safe },
-    })
-    logs.push(...(parsed as unknown as Log[]))
-  }
-  return { queue: foldTimelockEvents(logs), freezes: foldFreezeEvents(logs) }
+  return foldTimelockLogs(await readTimelockEvents(client, deployment, safe, { ...options, toBlock }))
 }
 
 /** Just the queue (see {@link readTimelockLogs}). */
