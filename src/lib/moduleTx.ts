@@ -1,9 +1,10 @@
-import { type Address, type Hash, type Hex, createWalletClient, http } from 'viem'
+import { type Address, type Hash, type Hex, encodeFunctionData } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { guardAbi, policyErrorsAbi, safeAbi } from '../abi'
-import { chain, publicClient, rpcUrl } from '../config/client'
+import { publicClient } from '../config/client'
 import type { Operation } from './configurations'
-import { describeError } from './errors'
+import { RpcStepError, describeError, isRpcFailure } from './errors'
+import { sendSigned, withRetry } from './send'
 
 /** A transaction a module (here: a local EOA) asks the Safe to execute. */
 export type ModuleTx = { to: Address; value: bigint; data: Hex; operation: Operation }
@@ -12,22 +13,28 @@ export type SimulationResult = { ok: true } | { ok: false; reason: string }
 
 const execAbi = [...safeAbi, ...policyErrorsAbi]
 
-/** Dry-runs `execTransactionFromModule` from the module's address. */
+/**
+ * Dry-runs `execTransactionFromModule` from the module's address. An RPC failure (limit, timeout)
+ * throws an {@link RpcStepError} instead of reading as a denial.
+ */
 export async function simulateModuleTx(
   safe: Address,
   module: Address,
   tx: ModuleTx,
 ): Promise<SimulationResult> {
   try {
-    await publicClient.simulateContract({
-      account: module,
-      address: safe,
-      abi: execAbi,
-      functionName: 'execTransactionFromModule',
-      args: [tx.to, tx.value, tx.data, tx.operation],
-    })
+    await withRetry(() =>
+      publicClient.simulateContract({
+        account: module,
+        address: safe,
+        abi: execAbi,
+        functionName: 'execTransactionFromModule',
+        args: [tx.to, tx.value, tx.data, tx.operation],
+      }),
+    )
     return { ok: true }
   } catch (error) {
+    if (isRpcFailure(error)) throw new RpcStepError('simulate', error)
     return { ok: false, reason: describeError(error) }
   }
 }
@@ -42,14 +49,13 @@ export async function sendModuleTx(
   tx: ModuleTx,
   { force = false }: { force?: boolean } = {},
 ): Promise<Hash> {
-  const account = privateKeyToAccount(privateKey)
-  const wallet = createWalletClient({ account, chain, transport: http(rpcUrl()) })
-  return wallet.writeContract({
-    account,
-    address: safe,
-    abi: execAbi,
-    functionName: 'execTransactionFromModule',
-    args: [tx.to, tx.value, tx.data, tx.operation],
+  return sendSigned(privateKeyToAccount(privateKey), {
+    to: safe,
+    data: encodeFunctionData({
+      abi: execAbi,
+      functionName: 'execTransactionFromModule',
+      args: [tx.to, tx.value, tx.data, tx.operation],
+    }),
     gas: force ? 500_000n : undefined,
   })
 }

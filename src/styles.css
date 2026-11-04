@@ -10,7 +10,9 @@
   --warn-bg: #fff4e0;
   --bad: #c31717;
   --bad-bg: #ffe6e6;
+  --info: #2a4f9e;
   --info-bg: #eaf2ff;
+  --ok-bg: #e3f9ec;
   --radius: 8px;
   font-family:
     ui-sans-serif,
@@ -245,19 +247,65 @@ select {
   color: var(--bad);
 }
 
+/* Callout: icon | title + body, with a left accent in the tone's colour. */
 .notice {
-  padding: 8px 12px;
+  --tone: var(--info);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
   border-radius: 6px;
+  border-left: 3px solid var(--tone);
   margin: 8px 0;
   background: var(--info-bg);
+  line-height: 1.45;
+}
+
+.notice-ok {
+  --tone: var(--accent-ink);
+  background: var(--ok-bg);
 }
 
 .notice-warn {
+  --tone: var(--warn);
   background: var(--warn-bg);
 }
 
 .notice-bad {
+  --tone: var(--bad);
   background: var(--bad-bg);
+}
+
+.notice-icon {
+  display: inline-flex;
+  color: var(--tone);
+  font-size: 16px;
+  padding-top: 1px;
+}
+
+.notice-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.notice-title {
+  font-weight: 600;
+}
+
+.notice-more {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.notice-more[open] summary {
+  margin-bottom: 4px;
+}
+
+.notice .propose {
+  display: inline-flex;
 }
 
 .tabs {
@@ -362,9 +410,69 @@ th {
   border-bottom: 1px solid var(--border);
 }
 
-.activity .detail {
-  color: var(--bad);
-  margin-top: 2px;
+/* The global dock (Queue and Activity), at the bottom of every tab. */
+.activity-panel .card-header {
+  margin-bottom: 0;
+}
+
+.dock-body {
+  margin-top: 12px;
+}
+
+.dock-tabs {
+  gap: 4px;
+}
+
+.dock-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+
+.dock-tab.active {
+  border-color: var(--border);
+  background: var(--surface);
+}
+
+.scroll-target {
+  scroll-margin-top: 16px;
+}
+
+.activity-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.chevron {
+  display: inline-flex;
+  transform: rotate(-90deg);
+  transition: transform 0.15s;
+}
+
+.chevron.open {
+  transform: none;
+}
+
+.activity-details ul,
+.queue-lines {
+  margin: 4px 0;
+  padding-left: 18px;
+  white-space: pre-wrap;
 }
 
 details summary {
@@ -623,9 +731,12 @@ select:focus-visible {
   justify-self: end;
 }
 
-/* The decoded revert sits under the action column. */
-.activity-row .detail {
+/* The reason and the decoded details sit under the action column. */
+.activity-more {
   grid-column: 5 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 /* Tags: outlined and square-ish, to read differently from the filled status badges. */
@@ -917,4 +1028,484 @@ select:focus-visible {
 
 .nested-call .calldata {
   max-width: 100%;
+}
+
+/* ---------- Policy Engine V2 ---------- */
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.chip-row {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chip-allow {
+  background: #e3f9ec;
+  color: var(--accent-ink);
+}
+
+.chip-limit {
+  background: var(--info-bg);
+  color: #2a4f9e;
+}
+
+.chip-protect {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.chip-deny {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.chip-neutral {
+  background: #eeeeee;
+  color: var(--muted);
+}
+
+.chip-added,
+.chip-changed,
+.chip-preview {
+  border: 1px dashed currentColor;
+}
+
+.chip-preview {
+  opacity: 0.7;
+}
+
+.chip-removed {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
+
+.chip-x {
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.everyone-band {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.actor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.actor-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.actor-card p {
+  margin: 0;
+}
+
+.actor-today {
+  background: var(--warn-bg);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.draft-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.draft-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.draft-item:last-child {
+  border-bottom: none;
+}
+
+.draft-note {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.steps li.done {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.inline-details {
+  display: inline-block;
+}
+
+.lint-item summary {
+  cursor: pointer;
+}
+
+.actor-section {
+  margin-top: 6px;
+}
+
+.gate-deciding .chip {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+/* Queue: one line per transaction (nonce | icon | title | time | chips | action), Safe{Wallet} style. */
+.qi-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.qi-group {
+  padding: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.qi {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.qi + .qi {
+  margin-top: 6px;
+}
+
+.qi-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.qi-line .badge {
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+.qi-nonce {
+  min-width: 2ch;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.qi-icon {
+  display: inline-flex;
+  font-size: 16px;
+  color: var(--muted);
+}
+
+.qi-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.qi-time {
+  white-space: nowrap;
+}
+
+.qi-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: auto;
+}
+
+.qi-countdown {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.qi-details {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 16px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.qi-call,
+.qi-log {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.qi-primary {
+  padding-left: 22px;
+}
+
+.qi-more {
+  padding-left: 22px;
+}
+
+@media (max-width: 640px) {
+  .qi-line {
+    flex-wrap: wrap;
+  }
+
+  .qi-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Audit log: a vertical line of dots, the current step highlighted. */
+.audit-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.audit-log li {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  padding-bottom: 10px;
+  color: var(--muted);
+}
+
+.audit-log li:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 14px;
+  bottom: 0;
+  border-left: 2px solid var(--border);
+}
+
+.audit-dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--surface);
+}
+
+.audit-log li.done {
+  color: var(--text);
+}
+
+.audit-log li.done .audit-dot {
+  border-color: var(--accent-ink);
+  background: var(--accent-ink);
+}
+
+.audit-log li.current {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.audit-log li.current .audit-dot {
+  border-color: var(--warn);
+}
+
+.audit-log li.bad {
+  color: var(--bad);
+}
+
+.audit-log li.bad .audit-dot {
+  border-color: var(--bad);
+  background: var(--bad);
+}
+
+.audit-detail {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.queue-end {
+  margin-left: auto;
+}
+
+.queue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Relayer and auto-schedule, behind a gear at the top right of the queue. */
+.queue-settings {
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.popover {
+  position: relative;
+}
+
+.popover > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+}
+
+.popover > summary::-webkit-details-marker {
+  display: none;
+}
+
+.popover-body {
+  position: absolute;
+  right: 0;
+  z-index: 10;
+  width: min(360px, calc(100vw - 32px));
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+}
+
+.queue-guardians h3 {
+  margin-bottom: 4px;
+}
+
+.guardian-line {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.timelock-history {
+  margin-top: 12px;
+}
+
+.signers ul {
+  margin: 4px 0 0;
+}
+
+/* A Queue row shown under the action that started it (playground, draft). */
+.inline-row {
+  margin: 0;
+}
+
+.stack-tight {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.short-hash {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.term {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Pending, done and failed states of an action button. */
+.spinner {
+  display: inline-flex;
+  animation: spin 0.8s linear infinite;
+}
+
+.pending-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.done-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.error-line {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.error-line details summary {
+  font-size: 12px;
+}
+
+.error-details {
+  margin: 4px 0 0;
+  max-width: 640px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.draft-list {
+  padding-left: 20px;
+}
+
+.contents {
+  display: contents;
+}
+
+.why-table td {
+  vertical-align: top;
 }

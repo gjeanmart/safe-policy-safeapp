@@ -1,0 +1,4 @@
+#!/bin/sh
+# Resolves symlinks so this can be linked onto PATH (e.g. ~/.local/bin/safe-role).
+DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+exec node "$DIR/../dist/safe-role.mjs" "$@"

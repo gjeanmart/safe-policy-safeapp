@@ -2,24 +2,26 @@ import type { Address, Hash, Hex } from 'viem'
 import { DEFAULT_GUARD } from '../config/contracts'
 import type { Configuration } from '../lib/configurations'
 import type { ConfirmedPolicy } from '../lib/policyEvents'
+import type { Change } from '../lib/v2/changes'
+import type { SafeTransaction } from '../lib/v2/identity'
 import { persisted } from './persisted'
 
 /** AES-GCM ciphertext and its IV, base64-encoded (see lib/vault). */
 export type Encrypted = { iv: string; data: string }
 
 /**
- * A role is a locally generated EOA meant to be enabled as a Safe module. Its key is either
- * encrypted with the vault password (`encryptedKey`) or, before a password is set, stored in
- * plain text (`privateKey`). Never both.
- */
-/**
  * What a role is, which decides how it acts:
  * - `eoa`: a local key signs and sends execTransactionFromModule (default, and roles saved before
  *   kinds existed).
  * - `safe`: another Safe is the module; it acts through its own transactions (nested call).
  * - `contract`: any other contract; the app can only simulate its calls.
+ * - `relayer`: a local key that only pays gas to send what others signed (schedule, execute,
+ *   cancel). Never a module nor a signer, so it gains no power from the key being in a browser.
+ *
+ * A local key is either encrypted with the vault password (`encryptedKey`) or, before a password
+ * is set, stored in plain text (`privateKey`). Never both.
  */
-export type RoleKind = 'eoa' | 'safe' | 'contract'
+export type RoleKind = 'eoa' | 'safe' | 'contract' | 'relayer'
 
 export type Role = {
   kind?: RoleKind
@@ -32,6 +34,12 @@ export type Role = {
 
 export const roleKind = (role: Role): RoleKind => role.kind ?? 'eoa'
 
+/** A key held in this browser that can send transactions (an EOA role or a relayer). */
+export const hasLocalKey = (role: Role) => roleKind(role) === 'eoa' || roleKind(role) === 'relayer'
+
+/** Roles that can be an actor (module) or a signer: everything but relayers. */
+export const canAct = (role: Role) => roleKind(role) !== 'relayer'
+
 export const rolesStore = persisted<Role[]>('roles', [])
 
 export type Settings = {
@@ -43,6 +51,8 @@ export type Settings = {
   guardModulePath?: boolean
   /** Install the guard as transaction guard (`setGuard`): policies apply to the multisig too. */
   guardOwnerPath: boolean
+  /** Engine to set up when no guard is installed yet (an installed guard always decides). */
+  engineVersion?: 'v1' | 'v2'
 }
 
 export const settingsStore = persisted<Settings>('settings', { guard: DEFAULT_GUARD, guardOwnerPath: false })
@@ -71,20 +81,42 @@ export const pendingStore = persisted<PendingConfiguration[]>('pending', [])
 export const draftStore = persisted<Configuration[]>('draft', [])
 
 /** How an action was run; shown as a tag in the activity log. */
-export type ActivityMode = 'simulate' | 'execute' | 'force'
+export type ActivityMode = 'simulate' | 'execute' | 'force' | 'propose' | 'schedule' | 'cancel'
 
+export type ActivityStatus =
+  | 'allowed'
+  | 'denied'
+  | 'sent'
+  | 'confirmed'
+  | 'reverted'
+  | 'failed'
+  | 'info'
+  | 'proposed'
+  | 'scheduled'
+  | 'executed'
+
+/**
+ * One transaction the app sent, proposed or simulated. Every field added after the first version
+ * is optional, so entries saved earlier still read.
+ */
 export type Activity = {
   id: string
   at: number
+  /** Who acted: a role, or the Safe itself for owner transactions. */
   role: Address
   /** Optional: entries logged before this field existed carry the mode as a label prefix. */
   mode?: ActivityMode
   label: string
   /** failed: could not run at all (gas, RPC, CoW API…), as opposed to a policy decision (denied). */
-  status: 'allowed' | 'denied' | 'sent' | 'confirmed' | 'reverted' | 'failed' | 'info'
+  status: ActivityStatus
   detail?: string
   txHash?: Hash
   link?: string
+  /** Owner transactions: the Safe transaction hash and nonce they are bound to. */
+  safeTxHash?: Hex
+  nonce?: bigint
+  /** Decoded description: the configure changes, a transfer, each call of a batch. */
+  lines?: string[]
 }
 
 export const activityStore = persisted<Activity[]>('activity', [])
@@ -98,9 +130,103 @@ export const logActivity = (entry: Omit<Activity, 'id' | 'at'>): string => {
 export const updateActivity = (id: string, patch: Partial<Activity>) =>
   activityStore.set((list) => list.map((a) => (a.id === id ? { ...a, ...patch } : a)))
 
+/** Moves the "proposed" entry of an owner transaction along (scheduled, executed). */
+export const settleProposal = (safeTxHash: Hex, status: 'scheduled' | 'executed') =>
+  activityStore.set((list) =>
+    list.map((a) =>
+      a.mode === 'propose' && a.safeTxHash?.toLowerCase() === safeTxHash.toLowerCase() ? { ...a, status } : a,
+    ),
+  )
+
+/** View preferences that should survive a reload. */
+export type UiPrefs = { activityOpen: boolean; dockTab?: 'queue' | 'activity' }
+
+export const uiStore = persisted<UiPrefs>('ui', { activityOpen: true })
+
 /** Cached `PolicyConfirmed` history per `guard:safe`, with the last scanned block. */
 export type PolicyHistory = { events: ConfirmedPolicy[]; scannedTo: string }
 
 export const policyHistoryStore = persisted<Record<string, PolicyHistory>>('policy-history', {})
 
 export const historyKey = (guard: Address, safe: Address) => `${guard.toLowerCase()}:${safe.toLowerCase()}`
+
+/**
+ * V2 draft: the configuration changes being assembled in the scope builder, per engine and Safe
+ * (rev 3 shape; the key changed with it so rev 2 drafts are not read back).
+ */
+export const v2DraftStore = persisted<Record<string, Change[]>>('v2-draft-rev3', {})
+
+/**
+ * Owner transactions scheduled from this browser with locally collected signatures, by Safe
+ * transaction hash, so they can be executed (relayed) once the Timelock has passed.
+ */
+export type V2OwnerTx = {
+  safe: Address
+  engine: Address
+  tx: SafeTransaction
+  signatures: Hex
+}
+
+export const v2OwnerTxStore = persisted<Record<string, V2OwnerTx>>('v2-owner-txs', {})
+
+/**
+ * Owner transactions this app proposed in Safe{Wallet} or signed with local keys, per Safe
+ * (lowercase address): the Queue follows each one from signatures to execution.
+ */
+export type TrackedOwnerTx = {
+  hash: Hex
+  label?: string
+  addedAt: number
+  /** The call it carries, so the playground can show its progress under the same action. */
+  call?: { to: Address; value: bigint; data: Hex }
+  /** Executed by a relayer from this app (Safe{Wallet} reports it too, when the app runs inside it). */
+  executed?: boolean
+  /** Safe nonce, once read: the Queue groups by it (Next, Queued) before any row has loaded. */
+  nonce?: bigint
+  /** Closed for good, as a row last read it: it then shows in History, not in the Queue. */
+  closed?: 'executed' | 'cancelled' | 'replaced'
+}
+
+export const v2TrackedStore = persisted<Record<string, TrackedOwnerTx[]>>('v2-tracked', {})
+
+export const trackOwnerTx = (safe: Address, hash: Hex, label?: string, call?: TrackedOwnerTx['call']) =>
+  v2TrackedStore.set((all) => {
+    const key = safe.toLowerCase()
+    const list = all[key] ?? []
+    if (list.some((t) => t.hash.toLowerCase() === hash.toLowerCase())) return all
+    return { ...all, [key]: [{ hash, label, addedAt: Date.now(), call }, ...list] }
+  })
+
+export const untrackOwnerTx = (safe: Address, hash: Hex) =>
+  v2TrackedStore.set((all) => {
+    const key = safe.toLowerCase()
+    return { ...all, [key]: (all[key] ?? []).filter((t) => t.hash.toLowerCase() !== hash.toLowerCase()) }
+  })
+
+/** Records what a Queue row read (nonce, closed), writing only when something changed. */
+export const noteOwnerTx = (safe: Address, hash: Hex, patch: Pick<TrackedOwnerTx, 'nonce' | 'closed'>) =>
+  v2TrackedStore.set((all) => {
+    const key = safe.toLowerCase()
+    const list = all[key] ?? []
+    const at = list.findIndex((t) => t.hash.toLowerCase() === hash.toLowerCase())
+    const t = list[at]
+    if (!t || ((patch.nonce ?? t.nonce) === t.nonce && (patch.closed ?? t.closed) === t.closed)) return all
+    const next = [...list]
+    next[at] = { ...t, nonce: patch.nonce ?? t.nonce, closed: patch.closed ?? t.closed }
+    return { ...all, [key]: next }
+  })
+
+export const markOwnerTxExecuted = (safe: Address, hash: Hex) =>
+  v2TrackedStore.set((all) => {
+    const key = safe.toLowerCase()
+    const list = all[key] ?? []
+    return {
+      ...all,
+      [key]: list.map((t) => (t.hash.toLowerCase() === hash.toLowerCase() ? { ...t, executed: true } : t)),
+    }
+  })
+
+/** Who relays (pays gas) and whether fully signed tracked transactions are scheduled on sight. */
+export type RelaySettings = { relayer?: Address; autoSchedule: boolean }
+
+export const relayStore = persisted<RelaySettings>('v2-relay', { autoSchedule: false })

@@ -27,6 +27,7 @@ import { activePolicies } from '../../lib/policyEvents'
 import { isModuleEnabled, safeTxs, type SafeTx } from '../../lib/safe'
 import { fieldError, parseAddressInput, parseAddressList, parseSelectorInput } from '../../lib/validation'
 import {
+  canAct,
   draftStore,
   guardPaths,
   historyKey,
@@ -69,7 +70,7 @@ function appendAddress(list: string, address: Address): string {
  * submit attempt.
  */
 function TemplateForm({ onAdd }: { onAdd: (configs: Configuration[]) => DraftAddResult }) {
-  const roles = rolesStore.use()
+  const roles = rolesStore.use().filter(canAct)
   const [template, setTemplate] = useState<TemplateKey>('erc20Transfer')
   const [token, setToken] = useState<string>(TOKENS.USDC.address)
   const [recipients, setRecipients] = useState('')
@@ -468,7 +469,7 @@ export function ConfigurationTable({
 export function PolicyBuilder() {
   const { safe, state, guard, guardInstalled } = useSandbox()
   const draft = draftStore.use()
-  const roles = rolesStore.use()
+  const roles = rolesStore.use().filter(canAct)
   const settings = settingsStore.use()
   const timing = useGuardTiming(guard)
   const activeKeys = useActiveKeys()

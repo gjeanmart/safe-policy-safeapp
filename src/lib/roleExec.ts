@@ -1,19 +1,12 @@
-import {
-  type Address,
-  type Hash,
-  type Hex,
-  createWalletClient,
-  encodeFunctionData,
-  http,
-  isAddressEqual,
-  zeroAddress,
-} from 'viem'
+import { type Address, type Hash, type Hex, encodeFunctionData, isAddressEqual, zeroAddress } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { policyErrorsAbi, safeAbi } from '../abi'
-import { chain, publicClient, rpcUrl } from '../config/client'
+import { safeAbi } from '../abi'
+import { chain, publicClient } from '../config/client'
 import { type Role, roleKind, rolesStore } from '../store'
 import { Operation } from './configurations'
 import { type ModuleTx, sendModuleTx } from './moduleTx'
+import { RpcStepError, describeError, isRpcFailure } from './errors'
+import { rpcStep, sendSigned, withRetry } from './send'
 import { revealKey } from './vault'
 
 /** Enough about a Safe used as a role to decide how it can act. */
@@ -54,7 +47,7 @@ export type Executor =
 
 export async function resolveExecutor(role: Role): Promise<Executor> {
   const kind = roleKind(role)
-  if (kind === 'eoa') return { kind: 'eoa' }
+  if (kind === 'eoa' || kind === 'relayer') return { kind: 'eoa' }
   if (kind === 'contract') {
     return {
       kind: 'manual',
@@ -113,8 +106,19 @@ async function sendViaSafe(
   tx: ModuleTx,
   force: boolean,
 ): Promise<Hash> {
-  const call = nestedModuleCall(treasury, tx)
-  const nonce = await publicClient.readContract({ address: roleSafe, abi: safeAbi, functionName: 'nonce' })
+  return execThroughRoleSafe(roleSafe, signer, nestedModuleCall(treasury, tx), force)
+}
+
+/** A 1-of-1 role Safe makes any CALL, signed and sent by its owner EOA. */
+async function execThroughRoleSafe(
+  roleSafe: Address,
+  signer: Role,
+  call: { to: Address; value: bigint; data: Hex },
+  force: boolean,
+): Promise<Hash> {
+  const nonce = await rpcStep('nonce', () =>
+    publicClient.readContract({ address: roleSafe, abi: safeAbi, functionName: 'nonce' }),
+  )
   const account = privateKeyToAccount(
     await revealKey(signer, `Enter your password to sign as ${signer.label}.`),
   )
@@ -133,13 +137,13 @@ async function sendViaSafe(
       nonce,
     },
   })
-  const wallet = createWalletClient({ account, chain, transport: http(rpcUrl()) })
-  return wallet.writeContract({
-    account,
-    address: roleSafe,
-    abi: [...safeAbi, ...policyErrorsAbi],
-    functionName: 'execTransaction',
-    args: [call.to, call.value, call.data, Operation.CALL, 0n, 0n, 0n, zeroAddress, zeroAddress, signature],
+  return sendSigned(account, {
+    to: roleSafe,
+    data: encodeFunctionData({
+      abi: safeAbi,
+      functionName: 'execTransaction',
+      args: [call.to, call.value, call.data, Operation.CALL, 0n, 0n, 0n, zeroAddress, zeroAddress, signature],
+    }),
     gas: force ? 800_000n : undefined,
   })
 }
@@ -163,3 +167,93 @@ export async function sendAsRole(
       throw new Error(executor.reason)
   }
 }
+
+/** A direct call (not a module transaction) the role makes itself, e.g. a Timelock schedule. */
+export type DirectCall = { to: Address; value?: bigint; data: Hex }
+
+/**
+ * Sends `call` with the role as `msg.sender`: an EOA role sends it, a 1-of-1 role Safe executes it
+ * through its owner. Policy proofs pushed by an actor (TimelockPolicy `scheduleModuleTx`, a
+ * freeze by a guardian role) must come from the actor itself.
+ */
+export async function sendCallAsRole(role: Role, call: DirectCall): Promise<Hash> {
+  const executor = await resolveExecutor(role)
+  const value = call.value ?? 0n
+  switch (executor.kind) {
+    case 'eoa': {
+      const account = privateKeyToAccount(
+        await revealKey(role, `Enter your password to sign as ${role.label}.`),
+      )
+      return sendSigned(account, { to: call.to, value, data: call.data })
+    }
+    case 'safe-owner':
+      return execThroughRoleSafe(role.address, executor.signer, { ...call, value }, false)
+    case 'manual':
+      throw new Error(executor.reason)
+  }
+}
+
+/**
+ * Dry-runs a direct call from the role's address (`eth_call`); resolves to the revert reason or
+ * undefined. An RPC failure (limit, timeout) throws an {@link RpcStepError}: it is not a denial.
+ */
+export async function simulateCallAsRole(role: Role, call: DirectCall): Promise<string | undefined> {
+  try {
+    await withRetry(() =>
+      publicClient.call({ account: role.address, to: call.to, value: call.value, data: call.data }),
+    )
+    return undefined
+  } catch (error) {
+    if (isRpcFailure(error)) throw new RpcStepError('simulate', error)
+    return describeError(error)
+  }
+}
+
+/**
+ * Signs a 32-byte digest with a local EOA role, without any prefix: what `checkNSignatures`
+ * verifies for `v` 27/28. Used for a Safe transaction hash (owners scheduling under a Timelock)
+ * and the TimelockPolicy `Cancel` digest.
+ */
+export async function signHashAsRole(role: Role, hash: Hex): Promise<{ signer: Address; signature: Hex }> {
+  if (roleKind(role) !== 'eoa') throw new Error(`${role.label} is not a local key`)
+  const account = privateKeyToAccount(await revealKey(role, `Enter your password to sign as ${role.label}.`))
+  return { signer: account.address, signature: await account.sign({ hash }) }
+}
+
+/**
+ * An owner transaction (`execTransaction`) with signatures collected elsewhere, as a plain call any
+ * local key can relay. V2 refuses `safeTxGas` or `gasPrice` other than 0 before any policy runs.
+ */
+export const execTransactionCall = (
+  safe: Address,
+  tx: {
+    to: Address
+    value: bigint
+    data: Hex
+    operation: number
+    safeTxGas: bigint
+    baseGas: bigint
+    gasPrice: bigint
+    gasToken: Address
+    refundReceiver: Address
+  },
+  signatures: Hex,
+): DirectCall => ({
+  to: safe,
+  data: encodeFunctionData({
+    abi: safeAbi,
+    functionName: 'execTransaction',
+    args: [
+      tx.to,
+      tx.value,
+      tx.data,
+      tx.operation,
+      tx.safeTxGas,
+      tx.baseGas,
+      tx.gasPrice,
+      tx.gasToken,
+      tx.refundReceiver,
+      signatures,
+    ],
+  }),
+})

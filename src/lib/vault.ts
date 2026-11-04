@@ -179,3 +179,94 @@ export async function revealKey(role: Role, reason: string): Promise<Hex> {
   const key = await ensureUnlocked(reason)
   return (await decrypt(key, role.encryptedKey)) as Hex
 }
+
+/**
+ * Roles backup: the roles as stored (keys stay encrypted) plus the vault salt and check they were
+ * encrypted with. Roles live in localStorage, so per origin: this moves them between addresses of
+ * the app (e.g. a preview deployment) or browsers.
+ */
+export type RolesBackup = {
+  app: 'safe-policy-sandbox'
+  version: 1
+  exportedAt: number
+  vault?: VaultMeta
+  roles: Role[]
+}
+
+export function exportRoles(): RolesBackup {
+  const roles = rolesStore.get()
+  if (roles.some((r) => r.privateKey))
+    throw new Error('Some keys are not encrypted yet: create a password first, then export.')
+  return { app: 'safe-policy-sandbox', version: 1, exportedAt: Date.now(), vault: vaultStore.get(), roles }
+}
+
+const isEncrypted = (v: unknown): v is Encrypted =>
+  !!v && typeof (v as Encrypted).iv === 'string' && typeof (v as Encrypted).data === 'string'
+
+const ROLE_KINDS: readonly unknown[] = ['eoa', 'safe', 'contract', 'relayer']
+
+function parseBackup(raw: unknown): RolesBackup {
+  const b = raw as Partial<RolesBackup> | undefined
+  if (!b || b.app !== 'safe-policy-sandbox' || b.version !== 1 || !Array.isArray(b.roles))
+    throw new Error('Not a roles file exported by this app.')
+  if (b.vault !== undefined && (typeof b.vault.salt !== 'string' || !isEncrypted(b.vault.check)))
+    throw new Error('The roles file has a malformed password check.')
+  for (const r of b.roles) {
+    const ok =
+      typeof r?.address === 'string' &&
+      /^0x[0-9a-fA-F]{40}$/.test(r.address) &&
+      typeof r.label === 'string' &&
+      (r.kind === undefined || ROLE_KINDS.includes(r.kind)) &&
+      r.privateKey === undefined &&
+      (r.encryptedKey === undefined || isEncrypted(r.encryptedKey))
+    if (!ok) throw new Error('The roles file has a malformed role.')
+  }
+  if (b.roles.some((r) => r.encryptedKey) && !b.vault)
+    throw new Error('The roles file has encrypted keys but no password check.')
+  return b as RolesBackup
+}
+
+/**
+ * Adds the roles of a backup that are not here yet. Keys stay encrypted: with no password here
+ * yet, the file's password is adopted; with the same one, keys are copied as is; otherwise each
+ * key is decrypted with the file's password (`askFilePassword`) and encrypted with this browser's.
+ */
+export async function importRoles(
+  raw: unknown,
+  askFilePassword: () => Promise<string>,
+): Promise<{ added: number; skipped: number }> {
+  const backup = parseBackup(raw)
+  const existing = rolesStore.get()
+  const fresh = backup.roles.filter(
+    (r) => !existing.some((e) => e.address.toLowerCase() === r.address.toLowerCase()),
+  )
+  const skipped = backup.roles.length - fresh.length
+  const keyed = fresh.some((r) => r.encryptedKey)
+  const local = vaultStore.get()
+  const add = (roles: Role[]) => rolesStore.set((list) => [...list, ...roles])
+
+  if (!keyed || (local && backup.vault && local.salt === backup.vault.salt)) {
+    add(fresh)
+  } else if (!local && !existing.some((r) => r.privateKey || r.encryptedKey)) {
+    vaultStore.set(backup.vault)
+    add(fresh)
+  } else {
+    const fileVault = backup.vault!
+    const password = await askFilePassword()
+    const fileKey = await deriveKey(password, fromBase64(fileVault.salt))
+    try {
+      if ((await decrypt(fileKey, fileVault.check)) !== CHECK_PLAINTEXT) throw new Error()
+    } catch {
+      throw new Error('Wrong password for this file (the one of the browser it was exported from).')
+    }
+    const key = await ensureUnlocked('Enter your password to add the imported roles.')
+    const roles = await Promise.all(
+      fresh.map(async (r): Promise<Role> => {
+        if (!r.encryptedKey) return r
+        return { ...r, encryptedKey: await encrypt(key, await decrypt(fileKey, r.encryptedKey)) }
+      }),
+    )
+    add(roles)
+  }
+  return { added: fresh.length, skipped }
+}

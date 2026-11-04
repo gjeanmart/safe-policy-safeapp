@@ -11,6 +11,9 @@ import { ProposeIconButton } from '../ProposeIconButton'
 import { RefreshButton } from '../RefreshButton'
 import { InfoTip } from '../Tooltip'
 import { AddressView, Badge, Card, Notice } from '../ui'
+import { Erc1271Notice, FallbackHandlerValue } from '../v2/Erc1271Notice'
+import { readFallbackHandler } from '../v2/ownerCalls'
+import { useAsync } from '../../hooks/useAsync'
 
 /** A guard slot, with a trash icon proposing its removal (`setModuleGuard(0)` / `setGuard(0)`). */
 function GuardTiming({ guard }: { guard: Address }) {
@@ -37,6 +40,8 @@ function GuardSlot({
   /** Extra status after the value, e.g. that this Safe version has no such guard slot. */
   badge?: ReactNode
 }) {
+  const { guard, v2Installed } = useSandbox()
+  const isV2 = v2Installed && isAddressEqual(address, guard)
   return (
     <>
       <span className="field-label">{label}</span>
@@ -48,6 +53,8 @@ function GuardSlot({
             <AddressView address={address} />
             {isKnownGuard(address) ? (
               <GuardTiming guard={address} />
+            ) : isV2 ? (
+              <Badge tone="ok">Policy Engine V2</Badge>
             ) : (
               <Badge tone="warn">unknown guard</Badge>
             )}
@@ -71,6 +78,7 @@ export function SafeStatus({ showGuardSetup = false }: { showGuardSetup?: boolea
   const roles = rolesStore.use()
   const balances = useBalances([safe])
   const balance = balances.data?.[safe]
+  const handler = useAsync(() => readFallbackHandler(safe), `${safe}:handler`, 30_000)
 
   const refresh = (
     <RefreshButton
@@ -78,6 +86,7 @@ export function SafeStatus({ showGuardSetup = false }: { showGuardSetup?: boolea
       busy={balances.loading}
       onClick={() => {
         balances.reload()
+        handler.reload()
         reloadState()
       }}
     />
@@ -141,6 +150,10 @@ export function SafeStatus({ showGuardSetup = false }: { showGuardSetup?: boolea
             removeTx={safeTxs.setModuleGuard(state.address, zeroAddress)}
             removeTitle={`Remove the module-path guard: proposes setModuleGuard(0x0).${moduleWarning}${ownerPathNote}`}
           />
+          <span className="field-label">Fallback handler</span>
+          <span className="kv-value">
+            {handler.data ? <FallbackHandlerValue handler={handler.data} /> : '…'}
+          </span>
         </div>
         <div>
           <span className="field-label">Enabled modules</span>
@@ -163,10 +176,11 @@ export function SafeStatus({ showGuardSetup = false }: { showGuardSetup?: boolea
         </div>
       </div>
 
+      {handler.data && <Erc1271Notice handler={handler.data} />}
+
       {!supportsModuleGuard && (
-        <Notice tone="bad">
-          Safe {state.version} has no module guard: module transactions would bypass every policy. Use a 1.5.0
-          Safe.
+        <Notice tone="bad" title={`Safe ${state.version} has no module guard`}>
+          Module transactions would bypass every policy. Use a 1.5.0 Safe.
         </Notice>
       )}
 
@@ -221,22 +235,28 @@ export function SafeStatus({ showGuardSetup = false }: { showGuardSetup?: boolea
           )}
 
           {!guardInstalled && paths.multisig && !paths.module && (
-            <Notice tone="bad">
-              The multisig path alone is not allowed: every enabled module would then run completely
-              unchecked, and could even remove the guard. Also enforce on the module path.
+            <Notice tone="bad" title="The multisig path alone is not allowed">
+              Every enabled module would run unchecked, and could even remove the guard. Also enforce on the
+              module path.
             </Notice>
           )}
           {!guardInstalled && paths.multisig && paths.module && (
-            <Notice tone="warn">
-              With the multisig path enforced, owner transactions are default-denied too: the multisig can
-              then only request/apply/invalidate configurations until policies allow more. Safe{'{Wallet}'}{' '}
-              batches are a DELEGATECALL to MultiSendCallOnly and need a MultiSendPolicy binding as well.
+            <Notice
+              tone="warn"
+              title="Owner transactions are denied by default too"
+              more={
+                <>
+                  Safe{'{Wallet}'} batches are a DELEGATECALL to MultiSendCallOnly and need a MultiSendPolicy
+                  binding as well.
+                </>
+              }
+            >
+              The multisig can only request, apply or invalidate configurations until policies allow more.
             </Notice>
           )}
           {!guardInstalled && !paths.multisig && !paths.module && (
-            <Notice>
-              No path selected: the Policy builder only writes configurations (configureImmediately) and
-              installs no guard, e.g. to clean up stored policies.
+            <Notice title="No path selected">
+              The Policy builder only writes configurations (configureImmediately) and installs no guard.
             </Notice>
           )}
         </>

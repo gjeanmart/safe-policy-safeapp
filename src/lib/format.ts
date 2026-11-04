@@ -17,6 +17,16 @@ export function formatDuration(seconds: bigint | number): string {
   return `${Math.round(s / 86_400)}d`
 }
 
+/** How long ago `ms` was, Safe{Wallet} style: `just now`, `5 min ago`, `3 h ago`, `2 days ago`. */
+export function formatAgo(ms: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - ms) / 1000))
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`
+  if (s < 86_400) return `${Math.floor(s / 3600)} h ago`
+  const days = Math.floor(s / 86_400)
+  return `${days} day${days === 1 ? '' : 's'} ago`
+}
+
 const pad = (n: number) => String(n).padStart(2, '0')
 
 /** Local date and time as `yyyy-mm-dd HH:mm:ss` (24h). */
@@ -26,4 +36,13 @@ export function formatTime(ms: number): string {
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
     `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   )
+}
+
+/** Local time of a unix timestamp (seconds) as `HH:mm`, with the date when it is not today. */
+export function formatClock(seconds: bigint | number): string {
+  const d = new Date(Number(seconds) * 1000)
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return d.toDateString() === new Date().toDateString()
+    ? time
+    : `${formatTime(d.getTime()).slice(0, 10)} ${time}`
 }

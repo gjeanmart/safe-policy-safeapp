@@ -19,7 +19,7 @@ export function useAddressName(address: string): string | undefined {
   if (sandbox) {
     if (sandbox.safe.toLowerCase() === lower) return 'Safe'
     const owner = sandbox.state?.owners.findIndex((o) => isAddressEqual(o, address as `0x${string}`)) ?? -1
-    if (owner >= 0) return `Owner ${owner + 1}`
+    if (owner >= 0) return `Signer ${owner + 1}`
   }
   return ADDRESS_BOOK[lower]
 }

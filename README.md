@@ -47,6 +47,7 @@ Requirements: a **Safe v1.5.0** (the module guard doesn't exist in 1.4.1), funde
 | ------------------- | ----------------------------------- |
 | `pnpm dev`          | Vite dev server on port 5173        |
 | `pnpm build`        | Typecheck + production build (dist) |
+| `pnpm agent:build`  | Bundle the agent (agent/dist)       |
 | `pnpm typecheck`    | TypeScript only                     |
 | `pnpm lint`         | ESLint                              |
 | `pnpm format:check` | Prettier check (`format` to fix)    |
@@ -68,6 +69,12 @@ CI (`.github/workflows/ci.yml`) runs typecheck, build, lint, format check and `p
    revert on-chain). Every decision goes to the activity log with its decoded revert reason, e.g.
    `PolicyReverted by ERC20TransferPolicy → Unauthorized`.
 4. **Notes**: the model and its sharp edges.
+
+## AI agent experiment
+
+[`agent/`](agent/README.md) holds everything AI-related, separate from the Safe App: an AI agent (Claude Desktop,
+Cowork, Claude Code, Codex) acting as one role through MCP. The role key stays in `safe-role signer`, a process you
+run in your terminal. It simulates every request against the on-chain policies and asks you y/N before signing.
 
 ## Design choices
 
@@ -101,6 +108,7 @@ src/
   store/         localStorage-backed stores (roles, draft, pending, activity, event cache)
   hooks/         Safe App connection, polling, balances
   components/    Roles, Setup (status, builder, pending, active), Playground, Notes
+agent/           AI agent experiment: safe-role signer + MCP server (reuses src/lib), see agent/README.md
 ```
 
 ## Security

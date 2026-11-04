@@ -32,6 +32,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
+      - run: pnpm agent:build
 
   lint:
     runs-on: ubuntu-latest
@@ -49,6 +50,34 @@ jobs:
       # ESLint + Prettier check; never writes (CI-safe).
       - run: pnpm lint
       - run: pnpm format:check
+
+  # The Solidity package is its own pnpm root (contracts/pnpm-lock.yaml), run under the normal hardhat.config.ts
+  # (with hardhat-toolbox). `pnpm test` is `hardhat test`, which runs every file under contracts/test/
+  # recursively: the V1 policy tests and all of test/v2/ (Sizes.test.ts keeps every V2 contract deployable on
+  # Sepolia). The dry run rehearses scripts/deploy-v2.ts on the in-process network: no key, no RPC.
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: contracts/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: contracts/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm deploy:v2:dry-run
 
   audit:
     runs-on: ubuntu-latest

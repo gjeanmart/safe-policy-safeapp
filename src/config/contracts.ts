@@ -1,4 +1,5 @@
-import type { Address, Hex } from 'viem'
+import { type Address, type Hex, isAddressEqual } from 'viem'
+import { type V2Deployment, deploymentNames, isDeployed, parseV2Deployment } from '../lib/v2/policies'
 
 /** Sepolia deployments of the Safe Policy Engine (https://github.com/safe-research/policy-engine). */
 export const POLICIES = {
@@ -74,3 +75,94 @@ export const ADDRESS_BOOK: Record<string, string> = Object.fromEntries([
   [COW.settlement.toLowerCase(), 'CoW GPv2Settlement'],
   [COW.vaultRelayer.toLowerCase(), 'CoW VaultRelayer'],
 ])
+
+/**
+ * Policy Engine V2 (contracts/contracts/v2/SPEC.md). Until it is deployed every address is a
+ * zero placeholder and the app shows "V2 not deployed on this chain".
+ *
+ * To fill in: run `pnpm deploy:v2:sepolia` in `contracts/` and replace the entry below with the
+ * printed one (`{ label: 'rev 3', deployment: parseV2Deployment({...}) }`). `parseV2Deployment`
+ * validates and checksums every address; `fromBlock` (the deployment block, where the queue scan
+ * starts) is part of the JSON. Safenet stays 0x0 when the deploy had no Safenet consensus: the app
+ * then hides it.
+ */
+const V2_ZERO = '0x0000000000000000000000000000000000000000'
+
+export type V2Engine = { label: string; deployment: V2Deployment }
+
+export const V2_ENGINES: readonly V2Engine[] = [
+  {
+    // Sepolia, deployed 2026-11-03 by contracts/scripts/deploy-v2.ts (Safenet skipped: no SAFENET_* variables).
+    label: 'rev 4',
+    deployment: parseV2Deployment({
+      engine: '0xe0Aa9874E3d4eE6fAd632d8dBCCcF8D61dfCD3B5',
+      engineConfig: '0xEf696d5d3285c10C7e996D43035CB6ad97D837f0',
+      trustedBatches: [
+        '0x9641d764fc13c8B624c04430C7356C1C7C8102e2',
+        '0xA83c336B20401Af773B6219BA5027174338D1836',
+      ],
+      policies: {
+        timelock: '0x59a502E8A103670A0743Ba30257A8e6dCF55Cb7d',
+        timelockQueue: '0x77882359557112e039E6D295DC1a7cbeBE513471',
+        timelockFreeze: '0xC0192B5620E75BEdE185A16fE0c042f786cc1724',
+        args: '0x196ea4bf5e99Cc18C4b401aA452C839c327D66a2',
+        limit: '0xf3645eB0fD52BAAbE3F61Dd450CAB7cE982e42D5',
+        coSigner: '0x6D338Fb2505262da97c61485693428929e4436d1',
+        safenet: V2_ZERO,
+      },
+      fromBlock: 12058074,
+    }),
+  },
+  {
+    // Rev 3, superseded by rev 4. Kept only so a Safe that still runs it can schedule its uninstall
+    // through the rev 3 Timelock (same schedule / execute interface); new installs use rev 4.
+    label: 'rev 3 (legacy)',
+    deployment: parseV2Deployment({
+      engine: '0x0d08b0B71dF73F454c5c2DA2bbC4Ee82D20DdF1E',
+      engineConfig: '0x647D108A63ab9050e2c1BC89e0Ac68598E452F8C',
+      trustedBatches: [
+        '0x9641d764fc13c8B624c04430C7356C1C7C8102e2',
+        '0xA83c336B20401Af773B6219BA5027174338D1836',
+      ],
+      policies: {
+        timelock: '0xBdA4e7B19545E61ffedf82Ac113b6d72ED1727fA',
+        timelockQueue: '0xd40e50E87749Bcd9e127B6746bb1961f55812325',
+        timelockFreeze: '0x4eB88b1721EcECf34537Aa29F0A10E9e10976F17',
+        args: '0x5B72C80b5bA4903D0eAb3491e9dc0AF35B3317f3',
+        limit: '0x814733ee7867Cf6bC521A10BaF784e1552D6d007',
+        coSigner: '0x0482F1081C459D75a5c3DaF3C07D68f1c63aEa04',
+        safenet: V2_ZERO,
+      },
+      fromBlock: 12054999,
+    }),
+  },
+]
+
+/** The V2 engines that exist on this chain. */
+export const deployedV2Engines = (): V2Engine[] => V2_ENGINES.filter((e) => isDeployed(e.deployment))
+
+/**
+ * The deployment entry of an installed V2 engine. An engine the config does not know (deployed by
+ * someone else) reuses the known policies, which serve any engine (they key state by engine).
+ */
+export function v2EngineFor(engine: Address): V2Engine | undefined {
+  const known = V2_ENGINES.find(
+    (e) => isDeployed(e.deployment) && isAddressEqual(e.deployment.engine, engine),
+  )
+  if (known) return known
+  const base = deployedV2Engines()[0]
+  return base && { label: 'unknown engine', deployment: { ...base.deployment, engine } }
+}
+
+for (const { deployment } of deployedV2Engines()) {
+  const nameOf = deploymentNames(deployment)
+  for (const address of [
+    deployment.engine,
+    deployment.engineConfig,
+    ...deployment.trustedBatches,
+    ...Object.values(deployment.policies),
+  ]) {
+    const name = nameOf(address)
+    if (name) ADDRESS_BOOK[address.toLowerCase()] ??= name
+  }
+}

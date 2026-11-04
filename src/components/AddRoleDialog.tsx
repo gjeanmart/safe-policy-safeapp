@@ -13,6 +13,7 @@ const SOURCES = {
   new: 'New EOA',
   import: 'Import EOA',
   contract: 'Safe or contract',
+  relayer: 'Relayer',
 } as const
 type Source = keyof typeof SOURCES
 
@@ -21,10 +22,19 @@ const HINTS: Record<Source, string> = {
   import: 'Add an existing EOA from its private key, e.g. a role created in another browser.',
   contract:
     'Another Safe acts through its own transactions (executed here when one of your EOA roles owns it alone). Any other contract acts through its own logic: the app simulates what it is allowed to do.',
+  relayer:
+    'Relayer: only pays gas to send transactions others signed (schedule, execute, cancel). It is never a module nor a signer. A fresh key is generated and encrypted with your password; fund it with a little Sepolia ETH.',
 }
 
-const defaultLabel = (source: Source | 'safe', count: number) =>
-  `${source === 'safe' ? 'Safe' : source === 'contract' ? 'Contract' : 'Role'} ${count + 1}`
+const DEFAULT_LABELS: Record<Source | 'safe', string> = {
+  new: 'Role',
+  import: 'Role',
+  safe: 'Safe',
+  contract: 'Contract',
+  relayer: 'Relayer',
+}
+
+const defaultLabel = (source: Source | 'safe', count: number) => `${DEFAULT_LABELS[source]} ${count + 1}`
 
 /** Adds a role from one of three sources: a new key, an imported key, or a Safe / contract address. */
 export function AddRoleDialog({ onClose }: { onClose: () => void }) {
@@ -45,16 +55,17 @@ export function AddRoleDialog({ onClose }: { onClose: () => void }) {
 
   const exists = (a: string) => roles.some((r) => isAddressEqual(r.address, a as Hex))
 
-  const addEoa = async (privateKey: Hex) => {
+  const addEoa = async (privateKey: Hex, relayer = false) => {
     const { address: eoa } = privateKeyToAccount(privateKey)
     if (exists(eoa)) throw new Error(`This key is already a role (${eoa}).`)
     const encrypted = await protectKey(privateKey)
     rolesStore.set((list) => [
       ...list,
       {
+        ...(relayer ? { kind: 'relayer' as const } : {}),
         address: eoa,
         ...encrypted,
-        label: label.trim() || defaultLabel('new', list.length),
+        label: label.trim() || defaultLabel(relayer ? 'relayer' : 'new', list.length),
         createdAt: Date.now(),
       },
     ])
@@ -87,6 +98,7 @@ export function AddRoleDialog({ onClose }: { onClose: () => void }) {
     setBusy(true)
     try {
       if (source === 'new') await addEoa(generatePrivateKey())
+      else if (source === 'relayer') await addEoa(generatePrivateKey(), true)
       else if (source === 'import' && parsedKey.ok) await addEoa(parsedKey.value)
       else if (parsedAddress.ok) await addContract(parsedAddress.value)
       onClose()
@@ -126,7 +138,7 @@ export function AddRoleDialog({ onClose }: { onClose: () => void }) {
           <input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
-            placeholder="e.g. Trader bot"
+            placeholder={source === 'relayer' ? 'e.g. Gas payer' : 'e.g. Trader bot'}
             autoFocus
           />
         </Field>
@@ -160,7 +172,7 @@ export function AddRoleDialog({ onClose }: { onClose: () => void }) {
             Cancel
           </button>
           <button type="submit" className="btn btn-primary" disabled={busy}>
-            {busy ? 'Adding…' : source === 'new' ? 'Generate' : 'Add'}
+            {busy ? 'Adding…' : source === 'new' || source === 'relayer' ? 'Generate' : 'Add'}
           </button>
         </div>
       </form>
